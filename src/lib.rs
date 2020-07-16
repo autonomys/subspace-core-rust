@@ -1,6 +1,8 @@
 pub mod crypto;
 pub mod sloth;
 pub mod utils;
+pub mod plotter;
+pub mod plot;
 
 pub const PRIME_SIZE_BITS: usize = 256;
 pub const PRIME_SIZE_BYTES: usize = PRIME_SIZE_BITS / 8;

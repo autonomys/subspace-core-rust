@@ -1,14 +1,16 @@
 # Subspace Core Rust
 
-A simple blockchain based on proofs-of-replication for the [Subspace Network](www.subspace.network), implemented in pure Rust.
+A simple blockchain based on proofs-of-replication for the [Subspace Network](https://www.subspace.network), implemented in pure Rust.
 
 
 ### Install
 
+If you have not previously installed the `gmp_mpfr_sys` crate, follow these [instructions](https://docs.rs/gmp-mpfr-sys/1.3.0/gmp_mpfr_sys/index.html#building-on-gnulinux).
+
 ```
 git clone https://github.com/subspace/subspace-core-rust.git
 cd subspace-core-rust
-cargo build -- release
+cargo build --release
 ```
 
 ### Run Tests

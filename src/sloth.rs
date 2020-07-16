@@ -6,10 +6,11 @@ use rug::{integer::Order, Integer, ops::BitXorFrom, integer::IsPrime};
 use std::cmp::Ordering;
 
 /*  ToDo
+    * only store expanded IV in integer form for encoding
     * revise sloth to mutate in place (Nazar)
     * remove unnessecary cloning (Nazar)
     * handle errors correctly if the data is larger than prime in sqrt_permutation (Nazar)
-    * Ensure compiles for ARM (Nazar)
+    * Ensure compiles for ARM -- gmp will be tricky (Nazar)
     * use a different prime for each block for additional ASIC resistance
     * setup plotting tester script (with // plotting)
     * add in sloth art, progress bar, cli
