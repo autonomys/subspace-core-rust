@@ -1,5 +1,13 @@
 #![allow(dead_code)]
 
+/* 
+A pure rust implementation of pysloth C internals
+https://github.com/randomchain/pysloth/blob/master/sloth.c
+by Mathias Michno
+
+With extensions for a proof-of-replication
+*/
+
 use super::*;
 use crate::{Piece, Encoding};
 use rug::{integer::Order, Integer, ops::BitXorFrom, integer::IsPrime};
@@ -11,6 +19,7 @@ use std::cmp::Ordering;
     * remove unnessecary cloning (Nazar)
     * handle errors correctly if the data is larger than prime in sqrt_permutation (Nazar)
     * Ensure compiles for ARM -- gmp will be tricky (Nazar)
+    * Ensure complies for Windows (Nazar)
     * use a different prime for each block for additional ASIC resistance
     * setup plotting tester script (with // plotting)
     * add in sloth art, progress bar, cli
