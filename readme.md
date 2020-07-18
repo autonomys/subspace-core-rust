@@ -23,10 +23,16 @@ cargo build --release
 
 Benches single block encode/decode time and full piece encode/decode time for each prime size.
 
+### Run Plotter
+
+`cargo run --[/optional/path/to/plot/file`
+
+Times the creation of a 100 MB plot using all available cores.
+
 ### Status
 
 1. ~~Sloth based proof-of-replication~~
-2. Disk plotter
+2. ~~Disk plotter~~
 3. Evaluation Loop
 4. Ledger
 5. TCP Gossip Network
