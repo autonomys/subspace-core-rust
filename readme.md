@@ -25,7 +25,7 @@ Benches single block encode/decode time and full piece encode/decode time for ea
 
 ### Run Plotter
 
-`cargo run --[/optional/path/to/plot/file`
+`cargo run --[/optional/path/to/plot/file]`
 
 Times the creation of a 100 MB plot using all available cores.
 
