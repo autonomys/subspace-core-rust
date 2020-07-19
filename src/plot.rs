@@ -45,17 +45,21 @@ impl Plot {
         }
     }
 
-    pub async fn add(&mut self, encoding: &Piece, index: usize) {
-        let position = self.file.seek(SeekFrom::Current(0)).await.unwrap();
-        self.file.write_all(&encoding[0..PIECE_SIZE]).await.unwrap();
-        self.map.insert(index, position);
-    }
-
-    pub async fn get(&mut self, index: usize) -> Piece {
+    pub async fn read(&mut self, index: usize) -> Piece {
         let position = self.map.get(&index).unwrap();
         self.file.seek(SeekFrom::Start(*position)).await.unwrap();
         let mut buffer = [0u8; PIECE_SIZE];
         self.file.read_exact(&mut buffer).await.unwrap();
         buffer
+    }
+
+    pub async fn write(&mut self, encoding: &Piece, index: usize) {
+        let position = self.file.seek(SeekFrom::Current(0)).await.unwrap();
+        self.file.write_all(&encoding[0..PIECE_SIZE]).await.unwrap();
+        self.map.insert(index, position);
+    }
+
+    pub async fn remove(&mut self, index: usize) {
+        self.map.remove(&index);
     }
 }

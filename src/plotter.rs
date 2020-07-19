@@ -50,7 +50,7 @@ pub fn plot() {
             // init plotter
             let mut plot = plot::Plot::new(path, PLOT_SIZE).await;
             while let Some((piece, index)) = plot_piece_receiver.next().await {
-                plot.add(&piece, index).await;
+                plot.write(&piece, index).await;
             }
         });
     });
