@@ -125,21 +125,19 @@ impl Sloth {
     }
 
     /// Sequentially encodes a 4096 byte piece s.t. a minimum amount of wall clock time elapses
-    pub fn encode(&self, piece: &mut Piece, expanded_iv: ExpandedIV, layers: usize) -> Piece {
-        let mut encoding: Piece = [0u8; PIECE_SIZE];
-        let mut int_encoding: Vec<Integer> = vec![];
-
+    pub fn encode(&self, piece: &mut Piece, expanded_iv: ExpandedIV, layers: usize) {
         // convert piece to integer representation
-        piece.chunks_exact(self.block_size_bytes).for_each(|block| {
-            int_encoding.push(Integer::from_digits(&block, Order::Lsf));
-        });
+        let mut integer_piece: Vec<Integer> = piece
+            .chunks_exact(self.block_size_bytes)
+            .map(|block| Integer::from_digits(&block, Order::Lsf))
+            .collect();
 
         // init feedback as expanded IV
         let mut feedback = Integer::from_digits(&expanded_iv, Order::Lsf);
 
         // apply the block cipher
         for _ in 0..layers {
-            for block in int_encoding.iter_mut() {
+            for block in integer_piece.iter_mut() {
                 // xor block with feedback
                 block.bitxor_from(feedback);
 
@@ -151,40 +149,28 @@ impl Sloth {
             }
         }
 
-        // transform integer back to encoding
-        int_encoding.iter().enumerate().for_each(|(i, block)| {
-            block
-                .to_digits::<u8>(Order::Lsf)
-                .iter()
-                .enumerate()
-                .for_each(|(j, &byte)| encoding[i * self.block_size_bytes + j] = byte)
-        });
-
-        encoding
+        // transform integers back to bytes
+        write_integers_to_array(&integer_piece, piece, self.block_size_bytes);
     }
 
     /// Sequentially decodes a 4096 byte encoding in time << encode time
-    pub fn decode(&self, encoding: &mut Piece, expanded_iv: ExpandedIV, layers: usize) -> Piece {
-        let mut piece: Piece = [0u8; PIECE_SIZE];
-        let mut int_piece: Vec<Integer> = vec![];
-
+    pub fn decode(&self, piece: &mut Piece, expanded_iv: ExpandedIV, layers: usize) {
         // convert encoding to integer representation
-        encoding
+        let mut integer_piece: Vec<Integer> = piece
             .chunks_exact(self.block_size_bytes)
-            .for_each(|block| {
-                int_piece.push(Integer::from_digits(&block, Order::Lsf));
-            });
+            .map(|block| Integer::from_digits(&block, Order::Lsf))
+            .collect();
 
-        for l in 0..layers {
+        for layer in 0..layers {
             for i in (0..(PIECE_SIZE / self.block_size_bytes)).rev() {
                 if i == 0 {
-                    let (block, feedback) = piece_to_first_block_and_feedback(&mut int_piece);
+                    let (block, feedback) = piece_to_first_block_and_feedback(&mut integer_piece);
                     self.inverse_sqrt(block);
-                    if l != layers - 1 {
+                    if layer != layers - 1 {
                         block.bitxor_from(feedback);
                     }
                 } else {
-                    let (block, feedback) = piece_to_block_and_feedback(&mut int_piece, i);
+                    let (block, feedback) = piece_to_block_and_feedback(&mut integer_piece, i);
                     self.inverse_sqrt(block);
                     block.bitxor_from(feedback);
                 }
@@ -192,23 +178,33 @@ impl Sloth {
         }
 
         // remove the IV (last round)
-        int_piece[0].bitxor_from(&Integer::from_digits(&expanded_iv, Order::Lsf));
+        integer_piece[0].bitxor_from(&Integer::from_digits(&expanded_iv, Order::Lsf));
 
-        // transform integer back to piece
-        int_piece.iter().enumerate().for_each(|(i, block)| {
-            block
-                .to_digits::<u8>(Order::Lsf)
-                .iter()
-                .enumerate()
-                .for_each(|(j, &byte)| piece[i * self.block_size_bytes + j] = byte)
-        });
-
-        piece
+        // transform integers back to bytes
+        write_integers_to_array(&integer_piece, piece, self.block_size_bytes);
     }
 }
 
-#[test]
+fn write_integers_to_array(integer_piece: &[Integer], piece: &mut Piece, block_size_bytes: usize) {
+    integer_piece
+        .iter()
+        .zip(piece.chunks_exact_mut(block_size_bytes))
+        .for_each(|(integer, chunk)| {
+            let integer_bytes = integer.to_digits::<u8>(Order::Lsf);
+            let integer_bytes_len = integer_bytes.len();
+            integer_bytes
+                .into_iter()
+                .zip(chunk.iter_mut())
+                .for_each(|(from_byte, to_byte)| {
+                    *to_byte = from_byte;
+                });
+            chunk[integer_bytes_len..block_size_bytes]
+                .iter_mut()
+                .for_each(|byte| *byte = 0);
+        });
+}
 
+#[test]
 fn test_random_data_for_all_primes() {
     use rug::{rand::RandState, Integer};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -245,11 +241,13 @@ fn test_random_piece_for_all_primes() {
     let expanded_iv = crypto::expand_iv(iv);
 
     for &bits in [256, 512, 1024, 2048, 4096].iter() {
-        let mut piece = crypto::generate_random_piece();
+        let piece = crypto::generate_random_piece();
         let sloth = Sloth::init(bits);
         let layers = PIECE_SIZE / sloth.block_size_bytes;
-        let mut encoding = sloth.encode(&mut piece, expanded_iv, layers);
-        let decoding = sloth.decode(&mut encoding, expanded_iv, layers);
+        let mut encoding = piece.clone();
+        sloth.encode(&mut encoding, expanded_iv, layers);
+        let mut decoding = encoding.clone();
+        sloth.decode(&mut decoding, expanded_iv, layers);
 
         // println!("\nPiece is {:?}\n", piece.to_vec());
         // println!("\nDecoding is {:?}\n", decoding.to_vec());

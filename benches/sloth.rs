@@ -39,17 +39,16 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let expanded_iv = crypto::expand_iv(iv);
         let mut piece = crypto::generate_random_piece();
         let layers = PIECE_SIZE / sloth.block_size_bytes;
-        let mut encoding = sloth.encode(&mut piece, expanded_iv, layers);
 
         group.bench_function(format!("{} bits/encode-piece", prime_size), |b| {
             b.iter(|| {
-                piece = sloth.encode(&mut piece, expanded_iv, layers);
+                sloth.encode(&mut piece, expanded_iv, layers);
             })
         });
 
         group.bench_function(format!("{} bits/decode-piece", prime_size), |b| {
             b.iter(|| {
-                encoding = sloth.decode(&mut encoding, expanded_iv, layers);
+                sloth.decode(&mut piece, expanded_iv, layers);
             })
         });
     }

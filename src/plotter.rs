@@ -69,7 +69,7 @@ pub fn plot() {
     println!("\nPlotting {} pieces!\n", PLOT_SIZE);
 
     pieces.par_iter_mut().for_each(|piece| {
-        *piece = sloth.encode(piece, expanded_iv, layers);
+        sloth.encode(piece, expanded_iv, layers);
         bar.inc(1);
     });
 
