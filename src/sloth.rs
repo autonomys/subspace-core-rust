@@ -114,19 +114,14 @@ impl Sloth {
     }
 
     /// Inverts the sqrt permutation with a single squaring mod prime
-    pub fn inverse_sqrt(&self, encoding: &Integer) -> Integer {
-        // clean api to mutate in place
-        let mut decoding = encoding.clone();
-
-        decoding.square_mut();
-        decoding
-            .pow_mod_mut(&Integer::from(1), &self.prime)
-            .unwrap();
-        if encoding.is_odd() {
-            decoding = self.prime.clone() - decoding
+    pub fn inverse_sqrt(&self, data: &mut Integer) {
+        let is_odd = data.is_odd();
+        data.square_mut();
+        data.pow_mod_mut(&Integer::from(1), &self.prime).unwrap();
+        if is_odd {
+            data.neg_assign();
+            data.add_assign(&self.prime);
         }
-
-        decoding
     }
 
     /// Sequentially encodes a 4096 byte piece s.t. a minimum amount of wall clock time elapses
@@ -184,13 +179,13 @@ impl Sloth {
             for i in (0..(PIECE_SIZE / self.block_size_bytes)).rev() {
                 if i == 0 {
                     let (block, feedback) = piece_to_first_block_and_feedback(&mut int_piece);
-                    *block = self.inverse_sqrt(block);
+                    self.inverse_sqrt(block);
                     if l != layers - 1 {
                         block.bitxor_from(feedback);
                     }
                 } else {
                     let (block, feedback) = piece_to_block_and_feedback(&mut int_piece, i);
-                    *block = self.inverse_sqrt(block);
+                    self.inverse_sqrt(block);
                     block.bitxor_from(feedback);
                 }
             }
@@ -231,7 +226,8 @@ fn test_random_data_for_all_primes() {
         let sloth = Sloth::init(bits as usize);
         let mut encoding = data.clone();
         sloth.sqrt_permutation(&mut encoding);
-        let decoding = sloth.inverse_sqrt(&encoding);
+        let mut decoding = encoding.clone();
+        sloth.inverse_sqrt(&mut decoding);
 
         println!("For prime and data of size {}", bits);
         println!("Prime: {}", sloth.prime.to_string_radix(10));

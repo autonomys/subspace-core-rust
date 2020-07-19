@@ -31,7 +31,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 
         group.bench_function(format!("{} bits/decode-block", prime_size), |b| {
             b.iter(|| {
-                data = sloth.inverse_sqrt(&data);
+                sloth.inverse_sqrt(&mut data);
             })
         });
 
