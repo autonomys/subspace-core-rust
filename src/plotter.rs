@@ -41,11 +41,11 @@ pub fn plot() {
         let mut plot_piece_receiver = plot_piece_receiver;
         task::block_on(async move {
             // init plotter
-            let mut plot = Plot::new(path.deref().into(), PLOT_SIZE).await;
+            let mut plot = Plot::new(path.deref().into(), PLOT_SIZE).await.unwrap();
             while let Some((piece, index)) = plot_piece_receiver.next().await {
-                plot.write(&piece, index).await;
+                plot.write(&piece, index).await.unwrap();
             }
-            plot.force_write_map().await;
+            plot.force_write_map().await.unwrap();
         });
     });
 

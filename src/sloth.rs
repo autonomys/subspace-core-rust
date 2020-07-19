@@ -263,63 +263,68 @@ fn write_integers_to_array(integer_piece: &[Integer], piece: &mut Piece, block_s
         });
 }
 
-#[test]
-fn test_random_data_for_all_primes() {
-    use rug::{rand::RandState, Integer};
-    use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    for &bits in [256, 512, 1024, 2048, 4096].iter() {
-        let seed = Integer::from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis(),
-        );
-        let mut rand = RandState::new();
-        rand.seed(&seed);
-        let data = Integer::from(Integer::random_bits(bits, &mut rand));
-        let sloth = Sloth::init(bits as usize);
-        let mut encoding = data.clone();
-        sloth.sqrt_permutation(&mut encoding).unwrap();
-        let mut decoding = encoding.clone();
-        sloth.inverse_sqrt(&mut decoding);
+    #[test]
+    fn test_random_data_for_all_primes() {
+        use rug::{rand::RandState, Integer};
+        use std::time::{SystemTime, UNIX_EPOCH};
 
-        println!("For prime and data of size {}", bits);
-        println!("Prime: {}", sloth.prime.to_string_radix(10));
-        println!("Data: {}", data.to_string_radix(10));
-        println!("Encoding: {}", encoding.to_string_radix(10));
-        println!("Decoding: {}\n\n", decoding.to_string_radix(10));
+        for &bits in [256, 512, 1024, 2048, 4096].iter() {
+            let seed = Integer::from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            );
+            let mut rand = RandState::new();
+            rand.seed(&seed);
+            let data = Integer::from(Integer::random_bits(bits, &mut rand));
+            let sloth = Sloth::init(bits as usize);
+            let mut encoding = data.clone();
+            sloth.sqrt_permutation(&mut encoding).unwrap();
+            let mut decoding = encoding.clone();
+            sloth.inverse_sqrt(&mut decoding);
 
-        assert_eq!(&data, &decoding);
+            println!("For prime and data of size {}", bits);
+            println!("Prime: {}", sloth.prime.to_string_radix(10));
+            println!("Data: {}", data.to_string_radix(10));
+            println!("Encoding: {}", encoding.to_string_radix(10));
+            println!("Decoding: {}\n\n", decoding.to_string_radix(10));
+
+            assert_eq!(&data, &decoding);
+        }
     }
-}
 
-#[test]
-fn test_random_piece_for_all_primes() {
-    let iv = crypto::random_bytes_32();
-    let expanded_iv = crypto::expand_iv(iv);
-    let integer_expanded_iv = Integer::from_digits(&expanded_iv, Order::Lsf);
+    #[test]
+    fn test_random_piece_for_all_primes() {
+        let iv = crypto::random_bytes_32();
+        let expanded_iv = crypto::expand_iv(iv);
+        let integer_expanded_iv = Integer::from_digits(&expanded_iv, Order::Lsf);
 
-    for &bits in [256, 512, 1024, 2048, 4096].iter() {
-        let piece = crypto::generate_random_piece();
-        let sloth = Sloth::init(bits);
-        let layers = PIECE_SIZE / sloth.block_size_bytes;
-        let mut encoding = piece.clone();
-        sloth
-            .encode(&mut encoding, &integer_expanded_iv, layers)
-            .unwrap();
-        let mut decoding = encoding.clone();
-        sloth.decode(&mut decoding, expanded_iv, layers);
+        for &bits in [256, 512, 1024, 2048, 4096].iter() {
+            let piece = crypto::generate_random_piece();
+            let sloth = Sloth::init(bits);
+            let layers = PIECE_SIZE / sloth.block_size_bytes;
+            let mut encoding = piece.clone();
+            sloth
+                .encode(&mut encoding, &integer_expanded_iv, layers)
+                .unwrap();
+            let mut decoding = encoding.clone();
+            sloth.decode(&mut decoding, expanded_iv, layers);
 
-        // println!("\nPiece is {:?}\n", piece.to_vec());
-        // println!("\nDecoding is {:?}\n", decoding.to_vec());
-        // println!("\nEncoding is {:?}\n", encoding.to_vec());
+            // println!("\nPiece is {:?}\n", piece.to_vec());
+            // println!("\nDecoding is {:?}\n", decoding.to_vec());
+            // println!("\nEncoding is {:?}\n", encoding.to_vec());
 
-        assert_eq!(piece.to_vec(), decoding.to_vec());
+            assert_eq!(piece.to_vec(), decoding.to_vec());
 
-        let mut decoding = encoding.clone();
-        sloth.decode_parallel(&mut decoding, expanded_iv, layers);
+            let mut decoding = encoding.clone();
+            sloth.decode_parallel(&mut decoding, expanded_iv, layers);
 
-        assert_eq!(piece.to_vec(), decoding.to_vec());
+            assert_eq!(piece.to_vec(), decoding.to_vec());
+        }
     }
 }
