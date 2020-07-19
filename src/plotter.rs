@@ -1,13 +1,16 @@
 #![allow(dead_code)]
 
 use super::*;
+use async_std::task;
+use futures::channel::mpsc;
+use futures::{SinkExt, StreamExt};
 use indicatif::ProgressBar;
 use rayon::prelude::*;
 use rug::integer::Order;
 use rug::Integer;
-use std::env;
 use std::path::Path;
 use std::time::Instant;
+use std::{env, thread};
 
 /* ToDo
  * Print Sloth Art (Nazar)
@@ -39,19 +42,25 @@ pub fn plot() {
             .to_string();
     }
 
-    // init plotter
-    let mut plot = plot::Plot::new(path, PLOT_SIZE);
+    let (plot_piece_sender, plot_piece_receiver) = mpsc::channel::<(Piece, usize)>(10);
+
+    thread::spawn(move || {
+        let mut plot_piece_receiver = plot_piece_receiver;
+        task::block_on(async move {
+            // init plotter
+            let mut plot = plot::Plot::new(path, PLOT_SIZE).await;
+            while let Some((piece, index)) = plot_piece_receiver.next().await {
+                plot.add(&piece, index).await;
+            }
+        });
+    });
 
     // generate random seed data
     let iv = crypto::random_bytes_32();
     let expanded_iv = crypto::expand_iv(iv);
     let integer_expanded_iv = Integer::from_digits(&expanded_iv, Order::Lsf);
 
-    let mut pieces: Vec<Piece> = vec![];
-    for _ in 0..PLOT_SIZE {
-        let piece = crypto::generate_random_piece();
-        pieces.push(piece);
-    }
+    let piece = crypto::generate_random_piece();
 
     // init sloth
     let prime_size = 256;
@@ -71,16 +80,16 @@ pub fn plot() {
 
     println!("\nPlotting {} pieces!\n", PLOT_SIZE);
 
-    pieces.par_iter_mut().for_each(|piece| {
-        sloth.encode(piece, &integer_expanded_iv, layers).unwrap();
+    (0..PLOT_SIZE).into_par_iter().for_each(|index| {
+        let mut piece = piece;
+        sloth
+            .encode(&mut piece, &integer_expanded_iv, layers)
+            .unwrap();
+        task::block_on(plot_piece_sender.clone().send((piece, index))).unwrap();
         bar.inc(1);
     });
 
     bar.finish();
-
-    pieces.iter().enumerate().for_each(|(i, piece)| {
-        plot.add(&piece, i);
-    });
 
     let total_plot_time = plot_time.elapsed();
     let average_plot_time =
