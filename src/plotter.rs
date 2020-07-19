@@ -8,6 +8,7 @@ use indicatif::ProgressBar;
 use rayon::prelude::*;
 use rug::integer::Order;
 use rug::Integer;
+use std::ops::Deref;
 use std::path::Path;
 use std::time::Instant;
 use std::{env, thread};
@@ -23,24 +24,16 @@ use std::{env, thread};
 const PLOT_SIZE: usize = 256 * 100;
 
 pub fn plot() {
-    // set storage path
-    let path: String;
     let args: Vec<String> = env::args().collect();
-    if args.len() > 1 {
-        let storage_path = args[1].parse::<String>().unwrap();
-        path = Path::new(&storage_path)
-            .join("plot.bin")
-            .to_str()
-            .unwrap()
-            .to_string();
-    } else {
-        path = Path::new(".")
-            .join("results")
-            .join("plot.bin")
-            .to_str()
-            .unwrap()
-            .to_string();
-    }
+    // set storage path
+    let path = match args.get(1) {
+        Some(path) => Path::new(path).to_path_buf(),
+        None => dirs::data_local_dir()
+            .expect("Can't find local data directory, needs to be specified explicitly")
+            .join("subspace")
+            .join("results"),
+    };
+    let path = path.join("plot.bin");
 
     let (plot_piece_sender, plot_piece_receiver) = mpsc::channel::<(Piece, usize)>(10);
 
@@ -48,7 +41,7 @@ pub fn plot() {
         let mut plot_piece_receiver = plot_piece_receiver;
         task::block_on(async move {
             // init plotter
-            let mut plot = plot::Plot::new(path, PLOT_SIZE).await;
+            let mut plot = plot::Plot::new(path.deref().into(), PLOT_SIZE).await;
             while let Some((piece, index)) = plot_piece_receiver.next().await {
                 plot.write(&piece, index).await;
             }

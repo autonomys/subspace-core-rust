@@ -4,6 +4,7 @@ use crate::{Piece, PIECE_SIZE};
 use async_std::fs::File;
 use async_std::fs::OpenOptions;
 use async_std::io::prelude::*;
+use async_std::path::Path;
 use std::collections::HashMap;
 use std::io::prelude::*;
 use std::io::SeekFrom;
@@ -17,19 +18,25 @@ use std::io::SeekFrom;
 */
 
 pub struct Plot {
-    path: String,
     size: usize,
     file: File,
     map: HashMap<usize, u64>,
 }
 
 impl Plot {
-    pub async fn new(path: String, size: usize) -> Plot {
+    pub async fn new(path: &Path, size: usize) -> Plot {
+        let parent = path.parent().expect("Can't find parent directory for plot");
+        if !parent.exists().await {
+            async_std::fs::create_dir_all(parent)
+                .await
+                .expect("Failed to create directory for plot");
+        }
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(&path)
+            .open(path)
             .await
             .expect("Unable to open");
 
@@ -37,12 +44,7 @@ impl Plot {
 
         let map: HashMap<usize, u64> = HashMap::new();
 
-        Plot {
-            path: String::from(&path),
-            size,
-            file,
-            map,
-        }
+        Plot { size, file, map }
     }
 
     pub async fn read(&mut self, index: usize) -> Piece {
