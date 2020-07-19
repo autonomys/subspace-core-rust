@@ -13,7 +13,7 @@ use crate::Piece;
 use rug::ops::NegAssign;
 use rug::{integer::IsPrime, integer::Order, ops::BitXorFrom, Integer};
 use std::iter;
-use std::ops::AddAssign;
+use std::ops::{AddAssign, Deref};
 
 /*  ToDo
  * only store expanded IV in integer form for encoding
@@ -58,6 +58,22 @@ fn piece_to_first_block_and_feedback(piece: &mut [Integer]) -> (&mut Integer, &I
     // At this point last block is already decoded, so we can use it as an IV to previous iteration
     let iv = &remainder[remainder.len() - 1];
     (&mut first_block[0], &iv)
+}
+
+enum Feedback<'a> {
+    Iv(&'a Integer),
+    Block(Integer),
+}
+
+impl<'a> Deref for Feedback<'a> {
+    type Target = Integer;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Feedback::Iv(integer) => integer,
+            Feedback::Block(integer) => integer,
+        }
+    }
 }
 
 pub struct Sloth {
@@ -124,7 +140,7 @@ impl Sloth {
     }
 
     /// Sequentially encodes a 4096 byte piece s.t. a minimum amount of wall clock time elapses
-    pub fn encode(&self, piece: &mut Piece, expanded_iv: ExpandedIV, layers: usize) {
+    pub fn encode(&self, piece: &mut Piece, expanded_iv: &Integer, layers: usize) {
         // convert piece to integer representation
         let mut integer_piece: Vec<Integer> = piece
             .chunks_exact(self.block_size_bytes)
@@ -132,19 +148,19 @@ impl Sloth {
             .collect();
 
         // init feedback as expanded IV
-        let mut feedback = Integer::from_digits(&expanded_iv, Order::Lsf);
+        let mut feedback = Feedback::Iv(expanded_iv);
 
         // apply the block cipher
         for _ in 0..layers {
             for block in integer_piece.iter_mut() {
                 // xor block with feedback
-                block.bitxor_from(feedback);
+                block.bitxor_from(feedback.deref());
 
                 // apply sqrt permutation
                 self.sqrt_permutation(block);
 
                 // carry forward the feedback
-                feedback = block.clone();
+                feedback = Feedback::Block(block.clone());
             }
         }
 
@@ -161,18 +177,15 @@ impl Sloth {
             .collect();
 
         for layer in 0..layers {
-            for i in (0..(PIECE_SIZE / self.block_size_bytes)).rev() {
-                if i == 0 {
-                    let (block, feedback) = piece_to_first_block_and_feedback(&mut integer_piece);
-                    self.inverse_sqrt(block);
-                    if layer != layers - 1 {
-                        block.bitxor_from(feedback);
-                    }
-                } else {
-                    let (block, feedback) = piece_to_block_and_feedback(&mut integer_piece, i);
-                    self.inverse_sqrt(block);
-                    block.bitxor_from(feedback);
-                }
+            for i in (1..(PIECE_SIZE / self.block_size_bytes)).rev() {
+                let (block, feedback) = piece_to_block_and_feedback(&mut integer_piece, i);
+                self.inverse_sqrt(block);
+                block.bitxor_from(feedback);
+            }
+            let (block, feedback) = piece_to_first_block_and_feedback(&mut integer_piece);
+            self.inverse_sqrt(block);
+            if layer != layers - 1 {
+                block.bitxor_from(feedback);
             }
         }
 
@@ -235,13 +248,14 @@ fn test_random_data_for_all_primes() {
 fn test_random_piece_for_all_primes() {
     let iv = crypto::random_bytes_32();
     let expanded_iv = crypto::expand_iv(iv);
+    let integer_expanded_iv = Integer::from_digits(&expanded_iv, Order::Lsf);
 
     for &bits in [256, 512, 1024, 2048, 4096].iter() {
         let piece = crypto::generate_random_piece();
         let sloth = Sloth::init(bits);
         let layers = PIECE_SIZE / sloth.block_size_bytes;
         let mut encoding = piece.clone();
-        sloth.encode(&mut encoding, expanded_iv, layers);
+        sloth.encode(&mut encoding, &integer_expanded_iv, layers);
         let mut decoding = encoding.clone();
         sloth.decode(&mut decoding, expanded_iv, layers);
 

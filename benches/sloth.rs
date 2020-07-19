@@ -1,6 +1,7 @@
 use criterion::criterion_group;
 use criterion::criterion_main;
 use criterion::Criterion;
+use rug::integer::Order;
 use rug::{rand::RandState, Integer};
 use std::time::{SystemTime, UNIX_EPOCH};
 use subspace_core_rust::crypto;
@@ -37,12 +38,13 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 
         let iv = crypto::random_bytes_32();
         let expanded_iv = crypto::expand_iv(iv);
+        let integer_expanded_iv = Integer::from_digits(&expanded_iv, Order::Lsf);
         let mut piece = crypto::generate_random_piece();
         let layers = PIECE_SIZE / sloth.block_size_bytes;
 
         group.bench_function(format!("{} bits/encode-piece", prime_size), |b| {
             b.iter(|| {
-                sloth.encode(&mut piece, expanded_iv, layers);
+                sloth.encode(&mut piece, &integer_expanded_iv, layers);
             })
         });
 

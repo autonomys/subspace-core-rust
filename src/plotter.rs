@@ -3,6 +3,8 @@
 use super::*;
 use indicatif::ProgressBar;
 use rayon::prelude::*;
+use rug::integer::Order;
+use rug::Integer;
 use std::env;
 use std::path::Path;
 use std::time::Instant;
@@ -43,6 +45,7 @@ pub fn plot() {
     // generate random seed data
     let iv = crypto::random_bytes_32();
     let expanded_iv = crypto::expand_iv(iv);
+    let integer_expanded_iv = Integer::from_digits(&expanded_iv, Order::Lsf);
 
     let mut pieces: Vec<Piece> = vec![];
     for _ in 0..PLOT_SIZE {
@@ -69,7 +72,7 @@ pub fn plot() {
     println!("\nPlotting {} pieces!\n", PLOT_SIZE);
 
     pieces.par_iter_mut().for_each(|piece| {
-        sloth.encode(piece, expanded_iv, layers);
+        sloth.encode(piece, &integer_expanded_iv, layers);
         bar.inc(1);
     });
 
