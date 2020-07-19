@@ -17,50 +17,92 @@ use std::io::SeekFrom;
 */
 
 pub struct Plot {
-    size: usize,
-    file: File,
     map: HashMap<usize, u64>,
+    map_file: File,
+    plot_file: File,
+    size: usize,
+    updates: usize,
 }
 
 impl Plot {
     pub async fn new(path: &Path, size: usize) -> Plot {
-        let parent = path.parent().expect("Can't find parent directory for plot");
-        if !parent.exists().await {
-            async_std::fs::create_dir_all(parent)
+        if !path.exists().await {
+            async_std::fs::create_dir_all(path)
                 .await
                 .expect("Failed to create directory for plot");
         }
 
-        let file = OpenOptions::new()
+        let plot_file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(path)
+            .open(path.join("plot.bin"))
             .await
-            .expect("Unable to open");
+            .expect("Unable to open plot file");
 
-        // file.set_len(size as u64).unwrap();
+        let map_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path.join("plot-map.bin"))
+            .await
+            .expect("Unable to open plot  file");
 
-        let map: HashMap<usize, u64> = HashMap::new();
+        let map = HashMap::new();
+        let updates = 0;
 
-        Plot { size, file, map }
+        Plot {
+            map,
+            map_file,
+            plot_file,
+            size,
+            updates,
+        }
     }
 
     pub async fn read(&mut self, index: usize) -> Piece {
         let position = self.map.get(&index).unwrap();
-        self.file.seek(SeekFrom::Start(*position)).await.unwrap();
+        self.plot_file
+            .seek(SeekFrom::Start(*position))
+            .await
+            .unwrap();
         let mut buffer = [0u8; PIECE_SIZE];
-        self.file.read_exact(&mut buffer).await.unwrap();
+        self.plot_file.read_exact(&mut buffer).await.unwrap();
         buffer
     }
 
     pub async fn write(&mut self, encoding: &Piece, index: usize) {
-        let position = self.file.seek(SeekFrom::Current(0)).await.unwrap();
-        self.file.write_all(&encoding[0..PIECE_SIZE]).await.unwrap();
+        let position = self.plot_file.seek(SeekFrom::Current(0)).await.unwrap();
+        self.plot_file
+            .write_all(&encoding[0..PIECE_SIZE])
+            .await
+            .unwrap();
         self.map.insert(index, position);
+        self.handle_update().await;
     }
 
     pub async fn remove(&mut self, index: usize) {
         self.map.remove(&index);
+        self.handle_update().await;
+    }
+
+    pub async fn force_write_map(&mut self) {
+        self.handle_update().await;
+    }
+
+    async fn handle_update(&mut self) {
+        self.updates = self.updates.wrapping_add(1);
+
+        if self.updates % 10000 == 0 {
+            // TODO: Writing everything every time is probably not the smartest idea
+            self.map_file.seek(SeekFrom::Start(0)).await.unwrap();
+            for (index, offset) in self.map.iter() {
+                self.map_file.write_all(&index.to_le_bytes()).await.unwrap();
+                self.map_file
+                    .write_all(&offset.to_le_bytes())
+                    .await
+                    .unwrap();
+            }
+        }
     }
 }

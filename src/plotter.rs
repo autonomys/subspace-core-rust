@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use super::*;
+use crate::plot::Plot;
 use async_std::task;
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
@@ -33,7 +34,6 @@ pub fn plot() {
             .join("subspace")
             .join("results"),
     };
-    let path = path.join("plot.bin");
 
     let (plot_piece_sender, plot_piece_receiver) = mpsc::channel::<(Piece, usize)>(10);
 
@@ -41,10 +41,11 @@ pub fn plot() {
         let mut plot_piece_receiver = plot_piece_receiver;
         task::block_on(async move {
             // init plotter
-            let mut plot = plot::Plot::new(path.deref().into(), PLOT_SIZE).await;
+            let mut plot = Plot::new(path.deref().into(), PLOT_SIZE).await;
             while let Some((piece, index)) = plot_piece_receiver.next().await {
                 plot.write(&piece, index).await;
             }
+            plot.force_write_map().await;
         });
     });
 
