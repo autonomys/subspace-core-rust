@@ -26,7 +26,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 
         group.bench_function(format!("{} bits/encode-block", prime_size), |b| {
             b.iter(|| {
-                sloth.sqrt_permutation(&mut data);
+                sloth.sqrt_permutation(&mut data).unwrap();
             })
         });
 
@@ -44,7 +44,9 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 
         group.bench_function(format!("{} bits/encode-piece", prime_size), |b| {
             b.iter(|| {
-                sloth.encode(&mut piece, &integer_expanded_iv, layers);
+                sloth
+                    .encode(&mut piece, &integer_expanded_iv, layers)
+                    .unwrap();
             })
         });
 

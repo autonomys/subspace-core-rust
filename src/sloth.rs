@@ -60,6 +60,9 @@ fn piece_to_first_block_and_feedback(piece: &mut [Integer]) -> (&mut Integer, &I
     (&mut first_block[0], &iv)
 }
 
+#[derive(Debug)]
+pub struct DataBiggerThanPrime;
+
 enum Feedback<'a> {
     Iv(&'a Integer),
     Block(Integer),
@@ -107,9 +110,11 @@ impl Sloth {
     }
 
     /// Computes the modular square root of data, for data smaller than prime (w.h.p.)
-    pub fn sqrt_permutation(&self, data: &mut Integer) {
+    pub fn sqrt_permutation(&self, data: &mut Integer) -> Result<(), DataBiggerThanPrime> {
         // better error handling
-        assert!(data.as_ref() < self.prime.as_ref());
+        if data.as_ref() >= self.prime.as_ref() {
+            return Err(DataBiggerThanPrime);
+        }
 
         if data.jacobi(&self.prime) == 1 {
             data.pow_mod_mut(&self.exponent, &self.prime).unwrap();
@@ -126,6 +131,8 @@ impl Sloth {
                 data.add_assign(&self.prime);
             }
         }
+
+        Ok(())
     }
 
     /// Inverts the sqrt permutation with a single squaring mod prime
@@ -140,7 +147,12 @@ impl Sloth {
     }
 
     /// Sequentially encodes a 4096 byte piece s.t. a minimum amount of wall clock time elapses
-    pub fn encode(&self, piece: &mut Piece, expanded_iv: &Integer, layers: usize) {
+    pub fn encode(
+        &self,
+        piece: &mut Piece,
+        expanded_iv: &Integer,
+        layers: usize,
+    ) -> Result<(), DataBiggerThanPrime> {
         // convert piece to integer representation
         let mut integer_piece: Vec<Integer> = piece
             .chunks_exact(self.block_size_bytes)
@@ -157,7 +169,7 @@ impl Sloth {
                 block.bitxor_from(feedback.deref());
 
                 // apply sqrt permutation
-                self.sqrt_permutation(block);
+                self.sqrt_permutation(block)?;
 
                 // carry forward the feedback
                 feedback = Feedback::Block(block.clone());
@@ -166,6 +178,8 @@ impl Sloth {
 
         // transform integers back to bytes
         write_integers_to_array(&integer_piece, piece, self.block_size_bytes);
+
+        Ok(())
     }
 
     /// Sequentially decodes a 4096 byte encoding in time << encode time
@@ -230,7 +244,7 @@ fn test_random_data_for_all_primes() {
         let data = Integer::from(Integer::random_bits(bits, &mut rand));
         let sloth = Sloth::init(bits as usize);
         let mut encoding = data.clone();
-        sloth.sqrt_permutation(&mut encoding);
+        sloth.sqrt_permutation(&mut encoding).unwrap();
         let mut decoding = encoding.clone();
         sloth.inverse_sqrt(&mut decoding);
 
@@ -255,7 +269,9 @@ fn test_random_piece_for_all_primes() {
         let sloth = Sloth::init(bits);
         let layers = PIECE_SIZE / sloth.block_size_bytes;
         let mut encoding = piece.clone();
-        sloth.encode(&mut encoding, &integer_expanded_iv, layers);
+        sloth
+            .encode(&mut encoding, &integer_expanded_iv, layers)
+            .unwrap();
         let mut decoding = encoding.clone();
         sloth.decode(&mut decoding, expanded_iv, layers);
 
