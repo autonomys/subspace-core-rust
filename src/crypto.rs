@@ -1,15 +1,15 @@
 #![allow(dead_code)]
 
 use super::*;
-use crate::{IV, Piece};
-use ring::{digest};
+use crate::{Piece, IV};
+use ring::digest;
 // use rand::rngs::OsRng;
 use rand::Rng;
 
 // ToDo
-    // fix workspaces
-        // one lib crate w/lib.rs
-        // one binary crate w/main.rs for app
+// fix workspaces
+// one lib crate w/lib.rs
+// one binary crate w/main.rs for app
 
 pub fn random_bytes_32() -> [u8; 32] {
     let mut bytes = [0u8; 32];
@@ -41,7 +41,7 @@ pub fn expand_iv(iv: IV) -> ExpandedIV {
     let mut feedback = iv.to_vec();
     let mut block_offset = 0;
 
-    for _ in 0..PRIME_SIZE_BYTES/IV_SIZE {
+    for _ in 0..PRIME_SIZE_BYTES / IV_SIZE {
         feedback = digest_sha_256(&feedback).to_vec();
         expanded_iv[block_offset..(IV_SIZE + block_offset)].clone_from_slice(&feedback[..32]);
         block_offset += IV_SIZE;
