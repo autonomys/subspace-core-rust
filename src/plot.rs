@@ -7,11 +7,11 @@ use std::io::prelude::*;
 use std::io::SeekFrom;
 
 /*
-    *   Add tests
-    *   Init plot as singe file of plot size
-    *   Retain plot between runs
-    *   Store plot index to disk
-    *
+ *   Add tests
+ *   Init plot as singe file of plot size
+ *   Retain plot between runs
+ *   Store plot index to disk
+ *
 */
 
 pub struct Plot {
