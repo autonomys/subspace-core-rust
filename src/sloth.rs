@@ -9,7 +9,7 @@ With extensions for a proof-of-replication
 */
 
 use super::*;
-use crate::{Encoding, Piece};
+use crate::Piece;
 use rug::ops::NegAssign;
 use rug::{integer::IsPrime, integer::Order, ops::BitXorFrom, Integer};
 use std::ops::AddAssign;
@@ -125,8 +125,8 @@ impl Sloth {
     }
 
     /// Sequentially encodes a 4096 byte piece s.t. a minimum amount of wall clock time elapses
-    pub fn encode(&self, piece: &mut Piece, expanded_iv: ExpandedIV, layers: usize) -> Encoding {
-        let mut encoding: Encoding = [0u8; PIECE_SIZE];
+    pub fn encode(&self, piece: &mut Piece, expanded_iv: ExpandedIV, layers: usize) -> Piece {
+        let mut encoding: Piece = [0u8; PIECE_SIZE];
         let mut int_encoding: Vec<Integer> = vec![];
 
         // convert piece to integer representation
@@ -164,7 +164,7 @@ impl Sloth {
     }
 
     /// Sequentially decodes a 4096 byte encoding in time << encode time
-    pub fn decode(&self, encoding: &mut Encoding, expanded_iv: ExpandedIV, layers: usize) -> Piece {
+    pub fn decode(&self, encoding: &mut Piece, expanded_iv: ExpandedIV, layers: usize) -> Piece {
         let mut piece: Piece = [0u8; PIECE_SIZE];
         let mut int_piece: Vec<Integer> = vec![];
 
