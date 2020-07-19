@@ -78,7 +78,22 @@ pub fn plot() {
     //   bar.inc(1);
     // }
 
-    println!("\nPlotting {} pieces!\n", PLOT_SIZE);
+    println!("\nPlotting {} pieces!", PLOT_SIZE);
+    println!(
+        r#"
+          `""==,,__
+            `"==..__"=..__ _    _..-==""_
+                 .-,`"=/ /\ \""/_)==""``
+                ( (    | | | \/ |
+                 \ '.  |  \;  \ /
+                  |  \ |   |   ||
+             ,-._.'  |_|   |   ||
+            .\_/\     -'   ;   Y
+           |  `  |        /    |-.
+           '. __/_    _.-'     /'
+                  `'-.._____.-'
+        "#
+    );
 
     (0..PLOT_SIZE).into_par_iter().for_each(|index| {
         let mut piece = piece;
