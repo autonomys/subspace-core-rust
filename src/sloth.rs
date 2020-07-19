@@ -12,6 +12,7 @@ use super::*;
 use crate::Piece;
 use rug::ops::NegAssign;
 use rug::{integer::IsPrime, integer::Order, ops::BitXorFrom, Integer};
+use std::iter;
 use std::ops::AddAssign;
 
 /*  ToDo
@@ -186,19 +187,16 @@ impl Sloth {
 fn write_integers_to_array(integer_piece: &[Integer], piece: &mut Piece, block_size_bytes: usize) {
     integer_piece
         .iter()
-        .zip(piece.chunks_exact_mut(block_size_bytes))
-        .for_each(|(integer, chunk)| {
+        .flat_map(|integer| {
             let integer_bytes = integer.to_digits::<u8>(Order::Lsf);
             let integer_bytes_len = integer_bytes.len();
             integer_bytes
                 .into_iter()
-                .zip(chunk.iter_mut())
-                .for_each(|(from_byte, to_byte)| {
-                    *to_byte = from_byte;
-                });
-            chunk[integer_bytes_len..block_size_bytes]
-                .iter_mut()
-                .for_each(|byte| *byte = 0);
+                .chain(iter::repeat(0).take(block_size_bytes - integer_bytes_len))
+        })
+        .zip(piece.iter_mut())
+        .for_each(|(from_byte, to_byte)| {
+            *to_byte = from_byte;
         });
 }
 
