@@ -10,6 +10,7 @@ With extensions for a proof-of-replication
 
 use super::*;
 use crate::Piece;
+use rayon::prelude::*;
 use rug::ops::NegAssign;
 use rug::{integer::IsPrime, integer::Order, ops::BitXorFrom, Integer};
 use std::iter;
@@ -209,6 +210,41 @@ impl Sloth {
         // transform integers back to bytes
         write_integers_to_array(&integer_piece, piece, self.block_size_bytes);
     }
+
+    /// Decodes a 4096 byte encoding in parallel in time << encode time
+    pub fn decode_parallel(&self, piece: &mut Piece, expanded_iv: ExpandedIV, layers: usize) {
+        // convert encoding to integer representation
+        let mut integer_piece: Vec<Integer> = piece
+            .chunks_exact(self.block_size_bytes)
+            .map(|block| Integer::from_digits(&block, Order::Lsf))
+            .collect();
+
+        for layer in 0..layers {
+            let integer_piece_copy = integer_piece.clone();
+            integer_piece
+                .iter_mut()
+                .skip(1)
+                .rev()
+                .zip(integer_piece_copy.iter().rev().skip(1))
+                .par_bridge()
+                .for_each(|(block, feedback)| {
+                    self.inverse_sqrt(block);
+                    block.bitxor_from(feedback);
+                });
+
+            let (block, feedback) = piece_to_first_block_and_feedback(&mut integer_piece);
+            self.inverse_sqrt(block);
+            if layer != layers - 1 {
+                block.bitxor_from(feedback);
+            }
+        }
+
+        // remove the IV (last round)
+        integer_piece[0].bitxor_from(&Integer::from_digits(&expanded_iv, Order::Lsf));
+
+        // transform integers back to bytes
+        write_integers_to_array(&integer_piece, piece, self.block_size_bytes);
+    }
 }
 
 fn write_integers_to_array(integer_piece: &[Integer], piece: &mut Piece, block_size_bytes: usize) {
@@ -278,6 +314,11 @@ fn test_random_piece_for_all_primes() {
         // println!("\nPiece is {:?}\n", piece.to_vec());
         // println!("\nDecoding is {:?}\n", decoding.to_vec());
         // println!("\nEncoding is {:?}\n", encoding.to_vec());
+
+        assert_eq!(piece.to_vec(), decoding.to_vec());
+
+        let mut decoding = encoding.clone();
+        sloth.decode_parallel(&mut decoding, expanded_iv, layers);
 
         assert_eq!(piece.to_vec(), decoding.to_vec());
     }

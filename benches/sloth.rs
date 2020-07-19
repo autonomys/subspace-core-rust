@@ -50,9 +50,15 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             })
         });
 
-        group.bench_function(format!("{} bits/decode-piece", prime_size), |b| {
+        group.bench_function(format!("{} bits/decode-piece-single", prime_size), |b| {
             b.iter(|| {
                 sloth.decode(&mut piece, expanded_iv, layers);
+            })
+        });
+
+        group.bench_function(format!("{} bits/decode-piece-parallel", prime_size), |b| {
+            b.iter(|| {
+                sloth.decode_parallel(&mut piece, expanded_iv, layers);
             })
         });
     }
