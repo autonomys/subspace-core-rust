@@ -32,13 +32,6 @@ use std::ops::AddAssign;
  * test: hardcode in correct prime and ensure those are generated correctly (once prime is chosen)
 */
 
-pub struct Sloth {
-    pub block_size_bits: usize,
-    pub block_size_bytes: usize,
-    prime: Integer,
-    exponent: Integer,
-}
-
 /// Finds the next smallest prime number
 fn prev_prime(prime: &mut Integer) {
     if prime.is_even() {
@@ -59,17 +52,22 @@ fn piece_to_block_and_feedback(piece: &mut [Integer], index: usize) -> (&mut Int
 }
 
 /// Returns (block, feedback) tuple given piece and optional feedback
-fn piece_to_first_block_and_feedback<'a>(
-    piece: &'a mut [Integer],
-) -> (&'a mut Integer, &'a Integer) {
+fn piece_to_first_block_and_feedback(piece: &mut [Integer]) -> (&mut Integer, &Integer) {
     let (first_block, remainder) = piece.split_at_mut(1);
     // At this point last block is already decoded, so we can use it as an IV to previous iteration
     let iv = &remainder[remainder.len() - 1];
     (&mut first_block[0], &iv)
 }
 
+pub struct Sloth {
+    pub block_size_bits: usize,
+    pub block_size_bytes: usize,
+    prime: Integer,
+    exponent: Integer,
+}
+
 impl Sloth {
-    /// Inits sloth for a given prime size, determinsitcally deriving the largest prime and computing the exponent
+    /// Inits sloth for a given prime size, deterministically deriving the largest prime and computing the exponent
     pub fn init(bits: usize) -> Self {
         let block_size_bits = bits;
         let block_size_bytes = bits / 8;
