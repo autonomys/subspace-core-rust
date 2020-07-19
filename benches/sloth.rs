@@ -22,17 +22,16 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         rand.seed(&seed);
         let mut data = Integer::from(Integer::random_bits(prime_size as u32, &mut rand));
         let sloth = Sloth::init(prime_size);
-        let mut encoding = sloth.sqrt_permutation(&data);
 
         group.bench_function(format!("{} bits/encode-block", prime_size), |b| {
             b.iter(|| {
-                data = sloth.sqrt_permutation(&data);
+                sloth.sqrt_permutation(&mut data);
             })
         });
 
         group.bench_function(format!("{} bits/decode-block", prime_size), |b| {
             b.iter(|| {
-                encoding = sloth.inverse_sqrt(&encoding);
+                data = sloth.inverse_sqrt(&data);
             })
         });
 

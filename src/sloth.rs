@@ -10,8 +10,9 @@ With extensions for a proof-of-replication
 
 use super::*;
 use crate::{Encoding, Piece};
+use rug::ops::NegAssign;
 use rug::{integer::IsPrime, integer::Order, ops::BitXorFrom, Integer};
-use std::cmp::Ordering;
+use std::ops::AddAssign;
 
 /*  ToDo
  * only store expanded IV in integer form for encoding
@@ -91,27 +92,25 @@ impl Sloth {
     }
 
     /// Computes the modular square root of data, for data smaller than prime (w.h.p.)
-    pub fn sqrt_permutation(&self, data: &Integer) -> Integer {
+    pub fn sqrt_permutation(&self, data: &mut Integer) {
         // better error handling
-        assert_eq!(data.cmp(&self.prime), Ordering::Less);
-
-        // clean api to mutate in place
-        let mut encoding = data.clone();
+        assert!(data.as_ref() < self.prime.as_ref());
 
         if data.jacobi(&self.prime) == 1 {
-            encoding.pow_mod_mut(&self.exponent, &self.prime).unwrap();
-            if encoding.is_odd() {
-                encoding = self.prime.clone() - encoding
+            data.pow_mod_mut(&self.exponent, &self.prime).unwrap();
+            if data.is_odd() {
+                data.neg_assign();
+                data.add_assign(&self.prime);
             }
         } else {
-            encoding = self.prime.clone() - encoding;
-            encoding.pow_mod_mut(&self.exponent, &self.prime).unwrap();
-            if encoding.is_even() {
-                encoding = self.prime.clone() - encoding
-            };
+            data.neg_assign();
+            data.add_assign(&self.prime);
+            data.pow_mod_mut(&self.exponent, &self.prime).unwrap();
+            if data.is_even() {
+                data.neg_assign();
+                data.add_assign(&self.prime);
+            }
         }
-
-        encoding
     }
 
     /// Inverts the sqrt permutation with a single squaring mod prime
@@ -150,7 +149,7 @@ impl Sloth {
                 block.bitxor_from(feedback);
 
                 // apply sqrt permutation
-                *block = self.sqrt_permutation(&block);
+                self.sqrt_permutation(block);
 
                 // carry forward the feedback
                 feedback = block.clone();
@@ -230,7 +229,8 @@ fn test_random_data_for_all_primes() {
         rand.seed(&seed);
         let data = Integer::from(Integer::random_bits(bits, &mut rand));
         let sloth = Sloth::init(bits as usize);
-        let encoding = sloth.sqrt_permutation(&data);
+        let mut encoding = data.clone();
+        sloth.sqrt_permutation(&mut encoding);
         let decoding = sloth.inverse_sqrt(&encoding);
 
         println!("For prime and data of size {}", bits);
@@ -239,7 +239,7 @@ fn test_random_data_for_all_primes() {
         println!("Encoding: {}", encoding.to_string_radix(10));
         println!("Decoding: {}\n\n", decoding.to_string_radix(10));
 
-        assert_eq!(data.cmp(&decoding), Ordering::Equal);
+        assert_eq!(&data, &decoding);
     }
 }
 
