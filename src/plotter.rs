@@ -3,7 +3,7 @@
 use super::*;
 use crate::plot::Plot;
 use async_std::task;
-use futures::channel::mpsc;
+use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, StreamExt};
 use indicatif::ProgressBar;
 use rayon::prelude::*;
@@ -17,7 +17,6 @@ use std::{env, thread};
 /* ToDo
  * 
  * -- Functionality --
- * Move constants for plot size and layers into lib.rs
  * 
  * 
  * -- Polish --
@@ -27,9 +26,10 @@ use std::{env, thread};
  * 
 */
 
-const PLOT_SIZE: usize = 256 * 1;
-
-pub fn plot() {
+pub async fn plot(
+  node_id: NodeID, 
+  genesis_piece: Piece
+) -> Plot {
     let args: Vec<String> = env::args().collect();
     // set storage path
     let path = match args.get(1) {
@@ -40,8 +40,11 @@ pub fn plot() {
             .join("results"),
     };
 
-    let (plot_piece_sender, plot_piece_receiver) = mpsc::channel::<(Piece, usize)>(10);
+    println!("New plot initialized at {:?}", path.to_str());
 
+    let (plot_piece_sender, plot_piece_receiver) = mpsc::channel::<(Piece, usize)>(10);
+    let (plot_sender, plot_receiver) = oneshot::channel::<Plot>();
+    
     thread::spawn(move || {
         let mut plot_piece_receiver = plot_piece_receiver;
         task::block_on(async move {
@@ -51,19 +54,17 @@ pub fn plot() {
                 plot.write(&piece, index).await.unwrap();
             }
             plot.force_write_map().await.unwrap();
+            plot_sender.send(plot).ok();
         });
     });
 
-    // generate random seed data
-    let iv = crypto::random_bytes_32();
-    let expanded_iv = crypto::expand_iv(iv);
+    let expanded_iv = crypto::expand_iv(node_id);
     let integer_expanded_iv = Integer::from_digits(&expanded_iv, Order::Lsf);
-
-    let piece = crypto::generate_random_piece();
+    let piece = genesis_piece;
 
     // init sloth
-    let prime_size = 256;
-    let layers = PIECE_SIZE / (prime_size / 8);
+    let prime_size = PRIME_SIZE_BITS;
+    let layers = ENCODING_LAYERS_TEST;
     let sloth = sloth::Sloth::init(prime_size);
 
     let bar = ProgressBar::new(PLOT_SIZE as u64);
@@ -89,7 +90,7 @@ pub fn plot() {
     (0..PLOT_SIZE).into_par_iter().for_each(|index| {
         let mut piece = piece;
 
-        // xor first 16 bytes of piece with the index to get a unqiue piece
+        // xor first 16 bytes of piece with the index to get a unqiue piece for each iteration
         let index_bytes = utils::usize_to_bytes(index);
         for i in 0..16 {
           piece[i] = piece[i] ^ index_bytes[i];
@@ -103,6 +104,8 @@ pub fn plot() {
     });
 
     bar.finish();
+
+    // await oneshot
 
     let total_plot_time = plot_time.elapsed();
     let average_plot_time =
@@ -123,4 +126,6 @@ pub fn plot() {
         ((PLOT_SIZE as u64 * PIECE_SIZE as u64) / (1000 * 1000)) as f32
             / (total_plot_time.as_secs_f32())
     );
+
+    plot_receiver.await.unwrap()
 }

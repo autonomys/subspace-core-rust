@@ -26,8 +26,6 @@ pub enum PlotCreationError {
  *
 */
 
-
-
 pub struct Plot {
     map: HashMap<usize, u64>,
     map_file: File,
@@ -65,7 +63,7 @@ impl Plot {
 
         let map = HashMap::new();
         let updates = 0;
-        let update_interval = crate::UPDATE_INTERVAL;
+        let update_interval = crate::PLOT_UPDATE_INTERVAL;
 
         Ok(Plot {
             map,
