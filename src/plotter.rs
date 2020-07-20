@@ -17,6 +17,7 @@ use std::{env, thread};
 /* ToDo
  * 
  * -- Functionality --
+ * Move constants for plot size and layers into lib.rs
  * 
  * 
  * -- Polish --

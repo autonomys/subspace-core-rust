@@ -26,6 +26,8 @@ pub enum PlotCreationError {
  *
 */
 
+
+
 pub struct Plot {
     map: HashMap<usize, u64>,
     map_file: File,
