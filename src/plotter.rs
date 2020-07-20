@@ -15,14 +15,18 @@ use std::time::Instant;
 use std::{env, thread};
 
 /* ToDo
- * Print Sloth Art (Nazar)
+ * 
+ * -- Functionality --
+ * 
+ * 
+ * -- Polish --
  * Read drives and free disk space (sysinfo)
  * Accept user input
- * Show stats when done: time, space, throughput
  * prevent computer from sleeping (enigo)
+ * 
 */
 
-const PLOT_SIZE: usize = 256 * 100;
+const PLOT_SIZE: usize = 256 * 1;
 
 pub fn plot() {
     let args: Vec<String> = env::args().collect();
@@ -59,20 +63,12 @@ pub fn plot() {
     // init sloth
     let prime_size = 256;
     let layers = PIECE_SIZE / (prime_size / 8);
-    let sloth = sloth::Sloth::init(256);
+    let sloth = sloth::Sloth::init(prime_size);
 
     let bar = ProgressBar::new(PLOT_SIZE as u64);
     let plot_time = Instant::now();
 
-    // let mut piece = crypto::generate_random_piece();
-
-    // for i in 0..PLOT_SIZE {
-    //   let encoding = sloth.encode(&mut pieces[i], expanded_iv, layers);
-    //   plot.add(&encoding, i);
-    //   bar.inc(1);
-    // }
-
-    println!("\nPlotting {} pieces!", PLOT_SIZE);
+    println!("\nSloth is slowly plotting {} pieces...", PLOT_SIZE);
     println!(
         r#"
           `""==,,__
@@ -91,6 +87,13 @@ pub fn plot() {
 
     (0..PLOT_SIZE).into_par_iter().for_each(|index| {
         let mut piece = piece;
+
+        // xor first 16 bytes of piece with the index to get a unqiue piece
+        let index_bytes = utils::usize_to_bytes(index);
+        for i in 0..16 {
+          piece[i] = piece[i] ^ index_bytes[i];
+        }
+
         sloth
             .encode(&mut piece, &integer_expanded_iv, layers)
             .unwrap();
