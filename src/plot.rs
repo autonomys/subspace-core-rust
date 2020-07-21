@@ -6,10 +6,10 @@ use async_std::fs::File;
 use async_std::fs::OpenOptions;
 use async_std::io::prelude::*;
 use async_std::path::Path;
+use solver::Solution;
 use std::collections::HashMap;
 use std::io;
 use std::io::SeekFrom;
-use solver::Solution;
 
 #[derive(Debug)]
 pub enum PlotCreationError {
@@ -19,13 +19,13 @@ pub enum PlotCreationError {
 }
 
 /* ToDo
- * 
+ *
  * Return result for solve()
  * Detect if plot exists on startup and load
  * Delete entire plot (perhaps with script) for testing
  * Extend tests
  * Resize plot by removing the last x indices and adjusting struct params
- *   
+ *
  *
 */
 
@@ -39,7 +39,6 @@ pub struct Plot {
 }
 
 impl Plot {
-
     /// Creates a new plot for persisting encoded pieces to disk
     pub async fn new(path: &Path, size: usize) -> Result<Plot, PlotCreationError> {
         if !path.exists().await {

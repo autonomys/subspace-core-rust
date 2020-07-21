@@ -1,16 +1,16 @@
-use subspace_core_rust::*;
 use async_std::sync::channel;
 use async_std::task;
 use futures::join;
 use manager::ProtocolMessage;
+use subspace_core_rust::*;
 
 /* ToDo
- * 
+ *
  * Run a solve/prove/verify loop
  * Add new blocks to the ledger
  * Share over the network
  * Store keys and node id in wallet struct
- * 
+ *
 */
 
 #[async_std::main]
@@ -66,7 +66,8 @@ async fn main() {
         .await;
     });
 
+    // network loop
+
     // join threads
     join!(main, solve);
-
 }

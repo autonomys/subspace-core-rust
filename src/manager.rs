@@ -3,12 +3,12 @@
 use super::*;
 use async_std::sync::{Receiver, Sender};
 use futures::join;
+use ledger::{Block, BlockStatus, Proof};
 use solver::Solution;
-use ledger::{Block, Proof, BlockStatus};
 
 pub enum ProtocolMessage {
     BlockChallenge([u8; 32]), // Main sends challenge to solver for evaluation
-    BlockSolution(Solution), // Solver sends solution back to main for application
+    BlockSolution(Solution),  // Solver sends solution back to main for application
 }
 
 pub async fn run(

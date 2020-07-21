@@ -4,12 +4,12 @@ use super::*;
 use crate::{Piece, IV};
 use ed25519_dalek::Keypair;
 use merkle_tree_binary::Tree;
-use ring::{digest, hmac};
 use rand::rngs::OsRng;
 use rand::Rng;
+use ring::{digest, hmac};
 
 /* ToDo
- * 
+ *
  * Write tests
  * Make expanded IV simpler
  * Ensure hmac is used correctly

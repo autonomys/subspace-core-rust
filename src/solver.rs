@@ -7,10 +7,10 @@ use manager::ProtocolMessage;
 use std::time::Duration;
 
 /* ToDo
- * 
+ *
  * Change plot_size to block_height
  * Hanlde exceptions correctly
- * 
+ *
 */
 
 #[derive(Copy, Clone)]

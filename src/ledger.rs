@@ -220,18 +220,14 @@ impl FullBlock {
         let layers = ENCODING_LAYERS_TEST;
         let mut decoding = self.proof.encoding.clone();
 
-        sloth.decode(
-            &mut decoding[..],
-            expanded_iv,
-            layers,
-        );
+        sloth.decode(&mut decoding[..], expanded_iv, layers);
 
         // subtract out the index when comparing to the genesis piece
         let index_bytes = utils::usize_to_bytes(self.proof.piece_index as usize);
         for i in 0..16 {
-          decoding[i] = decoding[i] ^ index_bytes[i];
+            decoding[i] = decoding[i] ^ index_bytes[i];
         }
-        
+
         let decoding_hash = crypto::digest_sha_256(&decoding.to_vec());
         if genesis_piece_hash.cmp(&decoding_hash) != Ordering::Equal {
             println!("Invalid full block, encoding is invalid");
@@ -242,7 +238,10 @@ impl FullBlock {
         // verify the signature
         let public_key = PublicKey::from_bytes(&self.block.public_key).unwrap();
         let signature = Signature::from_bytes(&self.block.signature).unwrap();
-        if public_key.verify_strict(&self.block.tag, &signature).is_err() {
+        if public_key
+            .verify_strict(&self.block.tag, &signature)
+            .is_err()
+        {
             println!("Invalid full block, signature is invalid");
             return false;
         }
@@ -282,7 +281,6 @@ impl Ledger {
         genesis_piece_hash: [u8; 32],
         quality_threshold: u8,
     ) -> Ledger {
-
         // init sloth
         let prime_size = PRIME_SIZE_BITS;
         let sloth = sloth::Sloth::init(prime_size);
@@ -331,6 +329,7 @@ impl Ledger {
                             "Got child full block with id: {}",
                             hex::encode(full_block.block.get_id())
                         );
+
                         // ensure the block is not in the ledger already
                         if self.is_block_applied(&full_block.block.get_id()) {
                             panic!("Logic error, attempting to apply a pending block that is already in the ledger");

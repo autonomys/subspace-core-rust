@@ -15,21 +15,18 @@ use std::time::Instant;
 use std::{env, thread};
 
 /* ToDo
- * 
+ *
  * -- Functionality --
- * 
- * 
+ *
+ *
  * -- Polish --
  * Read drives and free disk space (sysinfo)
  * Accept user input
  * prevent computer from sleeping (enigo)
- * 
+ *
 */
 
-pub async fn plot(
-  node_id: NodeID, 
-  genesis_piece: Piece
-) -> Plot {
+pub async fn plot(node_id: NodeID, genesis_piece: Piece) -> Plot {
     let args: Vec<String> = env::args().collect();
     // set storage path
     let path = match args.get(1) {
@@ -44,20 +41,19 @@ pub async fn plot(
 
     let (plot_piece_sender, plot_piece_receiver) = mpsc::channel::<(Piece, usize)>(10);
     let (plot_sender, plot_receiver) = oneshot::channel::<Plot>();
-    
+
     thread::spawn(move || {
         let mut plot_piece_receiver = plot_piece_receiver;
         task::block_on(async move {
             // init plotter
             let mut plot = Plot::new(path.deref().into(), PLOT_SIZE).await.unwrap();
+
             while let Some((piece, index)) = plot_piece_receiver.next().await {
                 plot.write(&piece, index).await.unwrap();
             }
+
             plot.force_write_map().await.unwrap();
-            plot_sender.send(plot).ok();
-            // thread::spawn(|| {
-                
-            // });
+            let _ = plot_sender.send(plot);
         });
     });
 
@@ -96,7 +92,7 @@ pub async fn plot(
         // xor first 16 bytes of piece with the index to get a unqiue piece for each iteration
         let index_bytes = utils::usize_to_bytes(index);
         for i in 0..16 {
-          piece[i] = piece[i] ^ index_bytes[i];
+            piece[i] = piece[i] ^ index_bytes[i];
         }
 
         sloth
@@ -105,6 +101,8 @@ pub async fn plot(
         task::block_on(plot_piece_sender.clone().send((piece, index))).unwrap();
         bar.inc(1);
     });
+
+    drop(plot_piece_sender);
 
     bar.finish();
 
@@ -127,11 +125,6 @@ pub async fn plot(
         ((PLOT_SIZE as u64 * PIECE_SIZE as u64) / (1000 * 1000)) as f32
             / (total_plot_time.as_secs_f32())
     );
-
-    // futures::executor::block_on(async {
-    //     println!("waiting...");
-        
-    // })
 
     plot_receiver.await.unwrap()
 }
