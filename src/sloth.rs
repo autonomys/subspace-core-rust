@@ -54,7 +54,7 @@ fn piece_to_first_block_and_feedback(piece: &mut [Integer]) -> (&mut Integer, &I
 }
 
 /// Converts a 4096 byte piece from an array of GMP big integers back to raw bytes
-fn write_integers_to_array(integer_piece: &[Integer], piece: &mut Piece, block_size_bytes: usize) {
+fn write_integers_to_array(integer_piece: &[Integer], piece: &mut [u8], block_size_bytes: usize) {
     integer_piece
         .iter()
         .flat_map(|integer| {
@@ -193,7 +193,7 @@ impl Sloth {
     }
 
     /// Sequentially decodes a 4096 byte encoding in time << encode time
-    pub fn decode(&self, piece: &mut Piece, expanded_iv: ExpandedIV, layers: usize) {
+    pub fn decode(&self, piece: &mut [u8], expanded_iv: ExpandedIV, layers: usize) {
         // convert encoding to integer representation
         let mut integer_piece: Vec<Integer> = piece
             .chunks_exact(self.block_size_bytes)

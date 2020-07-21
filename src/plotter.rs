@@ -55,6 +55,9 @@ pub async fn plot(
             }
             plot.force_write_map().await.unwrap();
             plot_sender.send(plot).ok();
+            // thread::spawn(|| {
+                
+            // });
         });
     });
 
@@ -105,8 +108,6 @@ pub async fn plot(
 
     bar.finish();
 
-    // await oneshot
-
     let total_plot_time = plot_time.elapsed();
     let average_plot_time =
         (total_plot_time.as_nanos() / PLOT_SIZE as u128) as f32 / (1000f32 * 1000f32);
@@ -126,6 +127,11 @@ pub async fn plot(
         ((PLOT_SIZE as u64 * PIECE_SIZE as u64) / (1000 * 1000)) as f32
             / (total_plot_time.as_secs_f32())
     );
+
+    // futures::executor::block_on(async {
+    //     println!("waiting...");
+        
+    // })
 
     plot_receiver.await.unwrap()
 }

@@ -1,7 +1,10 @@
 pub mod crypto;
+pub mod ledger;
+pub mod manager;
 pub mod plot;
 pub mod plotter;
 pub mod sloth;
+pub mod solver;
 pub mod utils;
 
 pub const PRIME_SIZE_BITS: usize = 256;

@@ -1,7 +1,14 @@
 use subspace_core_rust::*;
+use async_std::sync::channel;
+use async_std::task;
+use futures::join;
+use manager::ProtocolMessage;
 
 /* ToDo
  * 
+ * Run a solve/prove/verify loop
+ * Add new blocks to the ledger
+ * Share over the network
  * Store keys and node id in wallet struct
  * 
 */
@@ -15,15 +22,51 @@ async fn main() {
     let binary_public_key: [u8; 32] = keys.public.to_bytes();
     let node_id = crypto::digest_sha_256(&binary_public_key);
 
-    // create genesis piece and plot
+    // derive genesis piece
     let genesis_piece = crypto::genesis_piece_from_seed("SUBSPACE");
     let genesis_piece_hash = crypto::digest_sha_256(&genesis_piece);
+
+    // create the plot (slow...)
+    let mut plot = plotter::plot(node_id, genesis_piece).await;
+
+    println!("Finished plotting");
+
+    // setup the solve loop values
     let wait_time: u64 = 1000; // solve wait time in milliseconds
+    let (merkle_proofs, merkle_root) = crypto::build_merkle_tree();
+    let quality_threshold: u8 = 0;
+    let tx_payload = crypto::generate_random_piece().to_vec();
 
-    // plot pieces, return the plot
-    let plot = plotter::plot(node_id, genesis_piece).await;
+    // create the ledger
+    let mut ledger = ledger::Ledger::new(merkle_root, genesis_piece_hash, quality_threshold);
 
-    // start eval loop from seed
+    // create channels between background tasks
+    let (main_to_sol_tx, main_to_sol_rx) = channel::<ProtocolMessage>(32);
+    let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(32);
+    let sol_to_main_tx = any_to_main_tx.clone();
 
+    // solve loop
+    let solve = task::spawn(async move {
+        solver::run(wait_time, main_to_sol_rx, sol_to_main_tx, &mut plot).await;
+    });
+
+    // manager loop
+    let main = task::spawn(async move {
+        manager::run(
+            genesis_piece_hash,
+            quality_threshold,
+            binary_public_key,
+            keys,
+            merkle_proofs,
+            tx_payload,
+            &mut ledger,
+            any_to_main_rx,
+            main_to_sol_tx,
+        )
+        .await;
+    });
+
+    // join threads
+    join!(main, solve);
 
 }

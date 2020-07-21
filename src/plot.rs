@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use super::*;
 use crate::{Piece, PIECE_SIZE};
 use async_std::fs::File;
 use async_std::fs::OpenOptions;
@@ -8,6 +9,7 @@ use async_std::path::Path;
 use std::collections::HashMap;
 use std::io;
 use std::io::SeekFrom;
+use solver::Solution;
 
 #[derive(Debug)]
 pub enum PlotCreationError {
@@ -18,6 +20,7 @@ pub enum PlotCreationError {
 
 /* ToDo
  * 
+ * Return result for solve()
  * Detect if plot exists on startup and load
  * Delete entire plot (perhaps with script) for testing
  * Extend tests
@@ -96,6 +99,21 @@ impl Plot {
     pub async fn remove(&mut self, index: usize) -> io::Result<()> {
         self.map.remove(&index);
         self.handle_update().await
+    }
+
+    pub async fn solve(&mut self, challenge: [u8; 32], piece_count: usize) -> Solution {
+        let index = utils::modulo(&challenge, piece_count);
+        let encoding = self.read(index).await.unwrap();
+        let tag = crypto::create_hmac(&encoding[0..4096], &challenge);
+        let quality = utils::measure_quality(&tag);
+
+        Solution {
+            challenge,
+            index: index as u64,
+            tag,
+            quality,
+            encoding,
+        }
     }
 
     /// Writes the map to disk to persist between sessions (does not load on startup yet)

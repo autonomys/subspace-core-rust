@@ -12,7 +12,6 @@ use rand::Rng;
  * 
  * Write tests
  * Make expanded IV simpler
- * Ensure keys are generated with CSPRNG
  * Ensure hmac is used correctly
  * Ensure merkle tree is secure (two hash functions?)
  *
@@ -43,6 +42,11 @@ pub fn digest_sha_256(data: &[u8]) -> [u8; 32] {
 /// Returns the SHA-256 hash of some input data as a 32 byte vec.
 pub fn digest_sha_256_simple(data: &[u8]) -> Vec<u8> {
     digest::digest(&digest::SHA256, data).as_ref().to_vec()
+}
+
+/// Returns the SHA-512 hash of some input data as a digest
+pub fn digest_sha_512(data: &[u8]) -> digest::Digest {
+    digest::digest(&digest::SHA512, data)
 }
 
 /// Returns a deterministically generated genesis piece from a string seed.
