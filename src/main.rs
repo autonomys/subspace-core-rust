@@ -5,11 +5,45 @@ use manager::ProtocolMessage;
 use subspace_core_rust::*;
 
 /* ToDo
- *
- * Run a solve/prove/verify loop
- * Add new blocks to the ledger
- * Share over the network
- * Store keys and node id in wallet struct
+ * 
+ * Overview
+ * 
+ * First get something that works
+ * Then measure its performance
+ * Then stress test it against attacks
+ * Then build out the remaining features for mvp
+ * 
+ * 
+ * Basic Functionality
+ * 
+ * Ensure self-generated blocks are valid
+ * Reread ledger and solver code for understanding
+ * Base piece audits on block height and piece index correctly
+ * Determine what needs to be done to support forks in the ledger
+ * Create protocol spec, ensure code matches
+ * Decide on a transport layer for network and implement
+ * Implement a timeout based on deadlines
+ * Implement difficulty threshold correctly
+ * 
+ * Security
+ * 
+ * Ensure that block and tx signatures are not malleable
+ * Ensure that an attacker cannot crash a node by intentionally creating a panic condition
+ * No way to malleate on the work difficulty threshold
+ * Run security simulations
+ * 
+ * Production Ready
+ * 
+ * CUDA plotter
+ * Secure wallet implementation
+ * Add a notion of transactions
+ * Erasure code state, build the state chain, light client syc
+ * 
+ * Later
+ * 
+ * Implement with GHOST
+ * OpenCL Plotter (based on ff-cl-gen / ff)
+ * 
  *
 */
 

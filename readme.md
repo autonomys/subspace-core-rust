@@ -2,6 +2,8 @@
 
 A simple blockchain based on proofs-of-replication for the [Subspace Network](https://www.subspace.network), implemented in pure Rust.
 
+Read the [specifications](/spec/overview.md) (wip) for more details.
+
 
 ### Install
 
