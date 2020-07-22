@@ -100,6 +100,7 @@ impl Plot {
         self.handle_update().await
     }
 
+    /// fetches the encoding for an audit and returns the solution
     pub async fn solve(&mut self, challenge: [u8; 32], piece_count: usize) -> Solution {
         let index = utils::modulo(&challenge, piece_count);
         let encoding = self.read(index).await.unwrap();

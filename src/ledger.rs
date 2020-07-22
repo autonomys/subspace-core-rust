@@ -8,22 +8,14 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/*
-  ToDo
-
-  Iterations
-    X 1. Single Chain / Single Farmer
-      2. Single Chain / Many Farmers
-      3. Many Chains / Single Farmer
-      4. Many Chains / Many Farmers
-
-    - add in a random delay
-    - run two farmers in parallel
-    - reduce the delay and handle forks
-    - track heads of forks
-    - Make quality a vec of different heads
-    - add in parallel chains
-    - eliminate the delay and handle forks
+/* ToDo
+ *
+ * Commits to the ledger should be atmoic (if we fail part way through)
+ * Properly handle forks
+ * Track quality of each fork
+ * Make delay random time following a poission distribution around a mean
+ * Slowly remove delay until zero erros
+ * 
 */
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
@@ -79,18 +71,18 @@ impl Block {
 
     // TODO: Should probably be a `validate()` method that returns `Result<(), BlockValidationError>`
     //  or `BlockValidationResult` instead of printing to the stdout
-    pub fn is_valid(&self) -> bool {
-        // verify the signature
-        let public_key = PublicKey::from_bytes(&self.public_key).unwrap();
-        let signature = Signature::from_bytes(&self.signature).unwrap();
+    // pub fn is_valid(&self) -> bool {
+    //     // verify the signature
+    //     let public_key = PublicKey::from_bytes(&self.public_key).unwrap();
+    //     let signature = Signature::from_bytes(&self.signature).unwrap();
 
-        if public_key.verify_strict(&self.tag, &signature).is_err() {
-            println!("Invalid block, signature is invalid");
-            return false;
-        }
+    //     if public_key.verify_strict(&self.tag, &signature).is_err() {
+    //         println!("Invalid block, signature is invalid");
+    //         return false;
+    //     }
 
-        true
-    }
+    //     true
+    // }
 
     pub fn print(&self) {
         #[derive(Debug)]
@@ -250,6 +242,7 @@ impl FullBlock {
     }
 }
 
+// to track known children, for managing forks
 pub struct BlockWrapper {
     pub block: Block,
     pub children: Vec<[u8; 32]>,
@@ -262,17 +255,17 @@ pub enum BlockStatus {
 }
 
 pub struct Ledger {
-    balances: HashMap<[u8; 32], usize>,
-    blocks_by_id: HashMap<[u8; 32], BlockWrapper>,
-    block_ids_by_index: HashMap<u32, Vec<[u8; 32]>>,
-    pending_blocks: HashMap<[u8; 32], FullBlock>, // <block_id, FullBlock>
-    pending_parents: HashMap<[u8; 32], [u8; 32]>, // <parent_id, child_id>
-    pub height: u32,
-    pub quality: u32,
-    pub merkle_root: Vec<u8>,
-    pub genesis_piece_hash: [u8; 32],
-    pub quality_threshold: u8,
-    sloth: sloth::Sloth,
+    balances: HashMap<[u8; 32], usize>, // the current balance of all accounts
+    applied_blocks_by_id: HashMap<[u8; 32], BlockWrapper>, // all applied blocks, stored by hash
+    applied_block_ids_by_index: HashMap<u32, Vec<[u8; 32]>>, // hash for applied blocks, by block height
+    pending_blocks_by_id: HashMap<[u8; 32], FullBlock>, // all pending blocks (unseen parent) by hash
+    pending_parents_by_id: HashMap<[u8; 32], [u8; 32]>, // all parents we are expecting, with their child (which will be in pending blocks)
+    pub height: u32, // current block height
+    pub quality: u32, // aggregate quality for this chain
+    pub merkle_root: Vec<u8>, // only inlcuded for test ledger
+    pub genesis_piece_hash: [u8; 32], 
+    pub quality_threshold: u8, // current quality target
+    sloth: sloth::Sloth, // a sloth instance for decoding (verifying)
 }
 
 impl Ledger {
@@ -287,10 +280,10 @@ impl Ledger {
 
         Ledger {
             balances: HashMap::new(),
-            blocks_by_id: HashMap::new(),
-            block_ids_by_index: HashMap::new(),
-            pending_blocks: HashMap::new(),
-            pending_parents: HashMap::new(),
+            applied_blocks_by_id: HashMap::new(),
+            applied_block_ids_by_index: HashMap::new(),
+            pending_blocks_by_id: HashMap::new(),
+            pending_parents_by_id: HashMap::new(),
             height: 0,
             quality: 0,
             merkle_root,
@@ -300,30 +293,110 @@ impl Ledger {
         }
     }
 
+    /// Check if you have applied a block to the ledger
+    pub fn is_block_applied(&self, id: &[u8; 32]) -> bool {
+        self.applied_blocks_by_id.contains_key(id)
+    }
+
     /// Check if a block is the parent of some cached block.
     pub fn is_pending_parent(&self, block_id: &[u8; 32]) -> bool {
-        self.pending_parents.contains_key(block_id)
+        self.pending_parents_by_id.contains_key(block_id)
+    }
+
+    /// Retrieve the first block at a given index (block height)
+    pub fn get_block_by_index(&self, index: u32) -> Option<Block> {
+        // ToDo
+        // for now take the first id in the vec
+        // later we will have to handle forks and reorgs
+        self.applied_block_ids_by_index.get(&index).and_then(|block_ids| {
+            Some(
+                self.applied_blocks_by_id
+                    .get(&block_ids[0])
+                    .expect("Block index and blocks map have gotten out of sync!")
+                    .block
+                    .clone(),
+            )
+        })
+    }
+
+    /// Retrieve a block by id (hash)
+    pub fn get_block_by_id(&self, id: &[u8; 32]) -> Block {
+        self.applied_blocks_by_id.get(id).unwrap().block.clone()
+    }
+
+    /// Apply a new block to the ledger by id (hash)
+    pub fn apply_block_by_id(&mut self, block: &Block) -> BlockStatus {
+        let block_id = block.get_id();
+
+        // if not the genesis block then update parent with id
+        if self.height > 0 {
+            // does parent exist in block map
+            match self.applied_blocks_by_id.get_mut(&block.parent_id) {
+                Some(parent_block_wrapper) => {
+                    if parent_block_wrapper.children.is_empty() {
+                        // first block seen at this level, apply
+                        parent_block_wrapper.children.push(block_id);
+                    } else {
+                        // we have a fork, must compare quality, for now return invalid
+                        println!("\n *** Warning -- A FORK has occurred ***");
+                        return BlockStatus::Invalid;
+                    }
+                }
+                None => {
+                    println!(
+                        "Could not find parent block in blocks_by_id with id: {}",
+                        hex::encode(&block.parent_id)
+                    );
+                    return BlockStatus::Pending;
+                }
+            }
+        }
+
+        // update height
+        self.height += 1;
+
+        // update quality
+        self.quality += block.get_quality() as u32;
+
+        // update balances, get or add account
+        self.balances
+            .entry(block_id)
+            .and_modify(|balance| *balance += block.reward as usize)
+            .or_insert(block.reward as usize);
+
+        // add new block to block map
+        let block_wrapper = BlockWrapper {
+            block: block.clone(),
+            children: Vec::new(),
+        };
+
+        self.applied_blocks_by_id.insert(block_id, block_wrapper);
+
+        // Adds a pointer to this block id for the given index in the ledger
+        // Multiple blocks may exist at the same index, the first block reflects the longest chain
+        self.applied_block_ids_by_index
+            .entry(self.height - 1)
+            .and_modify(|v| v.push(block_id))
+            .or_insert_with(|| vec![block_id]);
+
+        println!("Added block with id: {}", hex::encode(block_id));
+
+        BlockStatus::Applied
     }
 
     /// Cache a pending block and add parent to watch list. When parent is received, it will be applied to the ledger.
     pub fn cache_pending_block(&mut self, full_block: FullBlock) {
         let block_id = full_block.block.get_id();
-        self.pending_parents
+        self.pending_parents_by_id
             .insert(full_block.block.parent_id, block_id.clone());
-        self.pending_blocks.insert(block_id, full_block);
-    }
-
-    /// Remove a pending block from and remove parent from watch list
-    pub fn remove_pending_block(&mut self, pending_block: &Block) {
-        self.pending_blocks.remove(&pending_block.get_id());
-        self.pending_parents.remove(&pending_block.parent_id);
+        self.pending_blocks_by_id.insert(block_id, full_block);
     }
 
     /// Apply a pending block that is cached to the ledger, recursively checking to see if it is the parent of some other pending block. Ledger should be fully synced when complete.
     pub fn apply_pending_block(&mut self, parent_id: [u8; 32]) -> [u8; 32] {
-        match self.pending_parents.get(&parent_id) {
+        match self.pending_parents_by_id.get(&parent_id) {
             Some(child_id) => {
-                match self.pending_blocks.get(child_id) {
+                match self.pending_blocks_by_id.get(child_id) {
                     Some(full_block) => {
                         println!(
                             "Got child full block with id: {}",
@@ -354,10 +427,13 @@ impl Ledger {
                         }
 
                         let block_copy = full_block.block.clone();
-                        self.remove_pending_block(&block_copy);
+
+                        // remove from pending blocks and pending parents
+                        self.pending_blocks_by_id.remove(&block_copy.get_id());
+                        self.pending_parents_by_id.remove(&block_copy.parent_id);
 
                         // add the block by id
-                        match self.add_block_by_id(&block_copy) {
+                        match self.apply_block_by_id(&block_copy) {
                             BlockStatus::Applied => {
                                 // either continue (call recursive) or solve
                                 println!("Successfully applied pending block!");
@@ -387,92 +463,6 @@ impl Ledger {
                 panic!("Pending blocks are out of sync, cannot retrieve parent reference");
             }
         }
-    }
-
-    /// Apply a new block to the ledger
-    pub fn add_block_by_id(&mut self, block: &Block) -> BlockStatus {
-        let block_id = block.get_id();
-
-        // if not the genesis block then update parent with id
-        if self.height > 0 {
-            // does parent exist in block map
-            match self.blocks_by_id.get_mut(&block.parent_id) {
-                Some(parent_block_wrapper) => {
-                    if parent_block_wrapper.children.is_empty() {
-                        parent_block_wrapper.children.push(block_id);
-                    } else {
-                        // we have a fork, must compare quality, for now return invalid
-                        println!("\n *** Warning -- A FORK has occurred ***");
-                        return BlockStatus::Invalid;
-                    }
-                }
-                None => {
-                    println!(
-                        "Could not find parent block in blocks_by_id with id: {}",
-                        hex::encode(&block.parent_id)
-                    );
-                    return BlockStatus::Pending;
-                }
-            }
-        }
-
-        // update height
-        self.height += 1;
-
-        // update quality
-        self.quality += block.get_quality() as u32;
-
-        // update balances, get or add account
-        self.balances
-            .entry(block_id)
-            .and_modify(|balance| *balance += block.reward as usize)
-            .or_insert(block.reward as usize);
-        // add new block to block map
-        let block_wrapper = BlockWrapper {
-            block: block.clone(),
-            children: Vec::new(),
-        };
-
-        self.blocks_by_id.insert(block_id, block_wrapper);
-        self.add_block_by_index(self.height - 1, block_id);
-        println!("Added block with id: {}", hex::encode(block_id));
-
-        BlockStatus::Applied
-    }
-
-    /// Adds a pointer to this block id for the given index in the ledger
-    /// Multiple blocks may exist at the same index, the first block reflects the longest chain
-    fn add_block_by_index(&mut self, index: u32, id: [u8; 32]) {
-        self.block_ids_by_index
-            .entry(index)
-            .and_modify(|v| v.push(id))
-            .or_insert_with(|| vec![id]);
-    }
-
-    /// Retrieve a block by id
-    pub fn get_block_by_id(&self, id: &[u8; 32]) -> Block {
-        self.blocks_by_id.get(id).unwrap().block.clone()
-    }
-
-    /// Check if you have applied a block to the ledger
-    pub fn is_block_applied(&self, id: &[u8; 32]) -> bool {
-        self.blocks_by_id.contains_key(id)
-    }
-
-    /// Retrieve the first block at a given index
-    pub fn get_block_by_index(&self, index: u32) -> Option<Block> {
-        // ToDo
-        // for now take the first id in the vec
-        // later we will have to handle forks and reorgs
-        self.block_ids_by_index.get(&index).and_then(|block_ids| {
-            Some(
-                self.blocks_by_id
-                    .get(&block_ids[0])
-                    .expect("Block index and blocks map have gotten out of sync!")
-                    .block
-                    .clone(),
-            )
-        })
     }
 
     /// Retrieve the balance for a given node id

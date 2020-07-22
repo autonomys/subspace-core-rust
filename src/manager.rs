@@ -48,7 +48,7 @@ pub async fn run(
                         );
 
                         // add block to ledger
-                        match ledger.add_block_by_id(&block) {
+                        match ledger.apply_block_by_id(&block) {
                             BlockStatus::Applied => {
                                 // valid extension to the ledger, gossip to the network
                                 println!("Applied new block generated locally to the ledger!");

@@ -21,6 +21,7 @@ use std::ops::{AddAssign, Deref};
  * implement for GPU in CUDA with CGBN
  * implement for GPU in OpenCL with ff-cl-gen
  * ensure correct number of levels are applied for security guarantee
+ * should this also take an IV?
  *
  * test: data larger than prime should fail
  * test: hardcode in correct prime and ensure those are generated correctly (once prime is chosen)

@@ -16,14 +16,15 @@ use subspace_core_rust::*;
  * 
  * Basic Functionality
  * 
- * Ensure self-generated blocks are valid
- * Reread ledger and solver code for understanding
  * Base piece audits on block height and piece index correctly
+ * Refactor audits / reads to use piece indcies instead of hashes throughout (map arch)
  * Determine what needs to be done to support forks in the ledger
- * Create protocol spec, ensure code matches
+ * Compare quality to target based on size, not leading zeros
+ * 
  * Decide on a transport layer for network and implement
- * Implement a timeout based on deadlines
  * Implement difficulty threshold correctly
+ * Implement a timeout based on deadlines
+ * 
  * 
  * Security
  * 
@@ -62,8 +63,6 @@ async fn main() {
 
     // create the plot (slow...)
     let mut plot = plotter::plot(node_id, genesis_piece).await;
-
-    println!("Finished plotting");
 
     // setup the solve loop values
     let wait_time: u64 = 1000; // solve wait time in milliseconds

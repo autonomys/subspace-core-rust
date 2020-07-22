@@ -39,20 +39,28 @@ pub async fn plot(node_id: NodeID, genesis_piece: Piece) -> Plot {
 
     println!("New plot initialized at {:?}", path.to_str());
 
+    // channel to send plot writes to an async background task so disk is not blocking
     let (plot_piece_sender, plot_piece_receiver) = mpsc::channel::<(Piece, usize)>(10);
+
+    // channel to send plot back once plotting is complete
     let (plot_sender, plot_receiver) = oneshot::channel::<Plot>();
 
+    // background taks for adding pieces to plot
     thread::spawn(move || {
         let mut plot_piece_receiver = plot_piece_receiver;
         task::block_on(async move {
-            // init plotter
+            // init plot
             let mut plot = Plot::new(path.deref().into(), PLOT_SIZE).await.unwrap();
 
+            // receive encodings as they are made
             while let Some((piece, index)) = plot_piece_receiver.next().await {
                 plot.write(&piece, index).await.unwrap();
             }
 
+            // save the plot map to disk
             plot.force_write_map().await.unwrap();
+
+            // return the plot
             let _ = plot_sender.send(plot);
         });
     });
@@ -86,6 +94,8 @@ pub async fn plot(node_id: NodeID, genesis_piece: Piece) -> Plot {
         "#
     );
 
+    // plot pieces in parallel on all cores, using IV as a source of randomness
+    // this is just for effecient testing atm
     (0..PLOT_SIZE).into_par_iter().for_each(|index| {
         let mut piece = piece;
 
