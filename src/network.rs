@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use log::*;
 
 /* Todo
  *
@@ -168,7 +169,7 @@ impl Router {
     /// send a message to specific node by node_id
     pub async fn send(&self, receiver: &SocketAddr, message: NetworkMessage) {
         let client_sender = self.get_connection(receiver);
-        println!("Sending a {:?} message to {:?}", message.name, receiver);
+        info!("Sending a {:?} message to {:?}", message.name, receiver);
         client_sender.send(message).await
     }
 
@@ -273,7 +274,7 @@ async fn connect(peer_addr: SocketAddr, broker_sender: Sender<NetworkEvent>) {
                 (Some(message), remaining_buffer) => {
                     buffer = remaining_buffer;
                     let message = NetworkMessage::from_bytes(&message);
-                    // println!("{:?}", message);
+                    // info!("{:?}", message);
                     broker_sender
                         .send(NetworkEvent::InboundMessage { peer_addr, message })
                         .await;
@@ -308,11 +309,11 @@ pub async fn run(
     }
 
     let mut connections = socket.incoming();
-    println!("Network is listening on TCP socket for inbound connections");
+    info!("Network is listening on TCP socket for inbound connections");
 
     // receives protocol messages from manager
     let protocol_receiver_loop = async {
-        println!("Network is listening for protocol messages");
+        info!("Network is listening for protocol messages");
         loop {
             if let Some(message) = main_to_net_rx.recv().await.ok() {
                 // forward to broker as protocol message
@@ -329,7 +330,7 @@ pub async fn run(
             let broker_sender_clone = broker_sender.clone();
 
             async_std::task::spawn(async move {
-                println!("New inbound TCP connection initiated");
+                info!("New inbound TCP connection initiated");
 
                 let mut last_buffer = BytesMut::new();
                 let mut current_buffer = BytesMut::with_capacity(16 * 1024 + 2);
@@ -369,7 +370,7 @@ pub async fn run(
                             (Some(message), remaining_buffer) => {
                                 buffer = remaining_buffer;
                                 let message = NetworkMessage::from_bytes(&message);
-                                // println!("{:?}", message);
+                                // info!("{:?}", message);
                                 broker_sender_clone
                                     .send(NetworkEvent::InboundMessage { peer_addr, message })
                                     .await;
@@ -393,7 +394,7 @@ pub async fn run(
             match event {
                 NetworkEvent::InboundMessage { peer_addr, message } => {
                     // messages received over the network from another peer, send to manager or handle internally
-                    println!(
+                    info!(
                         "Received a {:?} network message from {:?}",
                         message.name, peer_addr
                     );
@@ -443,7 +444,7 @@ pub async fn run(
                         NetworkMessageName::BlockResponse => {
                             // if empty block response, request from a different peer
                             if message.data.len() == 4 {
-                                println!("Peer did not have block at desired index, requesting from a different peer");
+                                info!("Peer did not have block at desired index, requesting from a different peer");
 
                                 let request = NetworkMessage {
                                     name: NetworkMessageName::BlockRequest,
@@ -525,14 +526,14 @@ pub async fn run(
                             router.gossip(message).await;
                         }
                         _ => {
-                            (panic!(
+                            panic!(
                             "Network protocol listener has received an unknown protocol message!"
-                        ))
+                        )
                         }
                     }
                 }
                 NetworkEvent::NewPeer { peer_addr, stream } => {
-                    println!("Broker is adding a new peer");
+                    info!("Broker is adding a new peer");
                     let (client_sender, mut client_receiver) = channel::<NetworkMessage>(32);
                     router.add(peer_addr, client_sender);
 
@@ -551,7 +552,7 @@ pub async fn run(
                 }
                 NetworkEvent::DroppedPeer { peer_addr } => {
                     router.drop(peer_addr);
-                    println!("Broker has dropped a peer who disconnected");
+                    info!("Broker has dropped a peer who disconnected");
                 }
             }
         }
@@ -560,7 +561,7 @@ pub async fn run(
     let network_startup = async {
         // if not gateway, connect to the gateway
         if mode != NodeType::Gateway {
-            println!("Connecting to gateway node");
+            info!("Connecting to gateway node");
 
             let broker_sender_clone = broker_sender.clone();
             async_std::task::spawn(async move {

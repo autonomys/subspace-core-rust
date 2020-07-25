@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use log::*;
 use super::*;
 use crate::plot::Plot;
 use async_std::task;
@@ -38,7 +39,7 @@ pub async fn plot(node_id: NodeID, genesis_piece: Piece) -> Plot {
             .join(hex::encode(&node_id)),
     };
 
-    println!("New plot initialized at {:?}", path.to_str());
+    info!("New plot initialized at {:?}", path.to_str());
 
     // channel to send plot writes to an async background task so disk is not blocking
     let (plot_piece_sender, plot_piece_receiver) = mpsc::channel::<(Piece, usize)>(10);
@@ -78,7 +79,7 @@ pub async fn plot(node_id: NodeID, genesis_piece: Piece) -> Plot {
     let bar = ProgressBar::new(PLOT_SIZE as u64);
     let plot_time = Instant::now();
 
-    println!("\nSloth is slowly plotting {} pieces...", PLOT_SIZE);
+    info!("Sloth is slowly plotting {} pieces...", PLOT_SIZE);
     println!(
         r#"
           `""==,,__
@@ -121,17 +122,17 @@ pub async fn plot(node_id: NodeID, genesis_piece: Piece) -> Plot {
     let average_plot_time =
         (total_plot_time.as_nanos() / PLOT_SIZE as u128) as f32 / (1000f32 * 1000f32);
 
-    println!(
-        "\nAverage plot time is {:.3} ms per piece",
+    info!(
+        "Average plot time is {:.3} ms per piece",
         average_plot_time
     );
 
-    println!(
+    info!(
         "Total plot time is {:.3} minutes",
         total_plot_time.as_secs_f32() / 60f32
     );
 
-    println!(
+    info!(
         "Plotting throughput is {} mb/sec\n",
         ((PLOT_SIZE as u64 * PIECE_SIZE as u64) / (1000 * 1000)) as f32
             / (total_plot_time.as_secs_f32())

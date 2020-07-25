@@ -5,6 +5,7 @@ use async_std::sync::{Receiver, Sender};
 use async_std::task;
 use manager::ProtocolMessage;
 use std::time::Duration;
+use log::*;
 
 /* ToDo
  *
@@ -27,7 +28,7 @@ pub async fn run(
     sol_to_main_tx: Sender<ProtocolMessage>,
     plot: &mut plot::Plot,
 ) {
-    println!("Solve loop is running...");
+    info!("Solve loop is running...");
     loop {
         match main_to_sol_rx.recv().await.unwrap() {
             ProtocolMessage::BlockChallenge(challenge) => {
@@ -38,7 +39,7 @@ pub async fn run(
                     .await;
             }
             _ => {
-                panic!("Solve loop has received a protocol message other than BlockChallenge...");
+                error!("Solve loop has received a protocol message other than BlockChallenge...");
             }
         }
     }

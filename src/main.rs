@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use log::*;
 use async_std::sync::channel;
 use async_std::task;
 use futures::join;
@@ -16,9 +17,8 @@ use subspace_core_rust::*;
  * Then stress test for known attacks
  * Then get it production ready
  *
- * Implement a basic logger
  * Implement a basic tui console
-*
+ *
  * Base piece audits on block height and piece index correctly
  * Refactor audits / reads to use piece indcies instead of hashes throughout (map arch)
  * Determine what needs to be done to support forks in the ledger
@@ -56,6 +56,8 @@ fn main() {
      *
      */
 
+    env_logger::init();
+
     let node_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let mode: NodeType;
     let args: Vec<String> = env::args().collect();
@@ -71,7 +73,7 @@ fn main() {
         None => mode = NodeType::Gateway,
     };
 
-    println!("Starting new Subspace {:?}", mode);
+    info!("Starting new Subspace {:?}", mode);
 
     // derive node identity
     let keys = crypto::gen_keys_random();

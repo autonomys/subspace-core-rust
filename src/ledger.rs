@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use log::*;
 
 /* ToDo
  *
@@ -77,7 +78,7 @@ impl Block {
         let signature = Signature::from_bytes(&self.signature).unwrap();
 
         if public_key.verify_strict(&self.tag, &signature).is_err() {
-            println!("Invalid block, signature is invalid");
+            info!("Invalid block, signature is invalid");
             return false;
         }
 
@@ -109,7 +110,7 @@ impl Block {
         };
 
         // Should probably return data structure, but not print to the stdout
-        println!("Block with id: {}\n{:#?}", id, pretty_block);
+        info!("Block with id: {}\n{:#?}", id, pretty_block);
     }
 }
 
@@ -157,7 +158,7 @@ impl Proof {
             piece_index: self.piece_index,
         };
 
-        println!("Aux data with id: {}\n{:#?}", id, pretty_proof);
+        info!("Aux data with id: {}\n{:#?}", id, pretty_proof);
     }
 }
 
@@ -185,14 +186,14 @@ impl FullBlock {
     ) -> bool {
         // ensure challenge index is correct
         if self.proof.piece_index != utils::modulo(&self.block.parent_id, piece_count) as u64 {
-            println!("Invalid full block, piece index does not match challenge and piece size");
+            info!("Invalid full block, piece index does not match challenge and piece size");
             return false;
         }
 
         // validate the tag
         let local_tag = crypto::create_hmac(&self.proof.encoding, &self.block.parent_id);
         if local_tag.cmp(&self.block.tag) != Ordering::Equal {
-            println!("Invalid full block, tag is invalid");
+            info!("Invalid full block, tag is invalid");
             return false;
         }
 
@@ -202,7 +203,7 @@ impl FullBlock {
             &self.proof.merkle_proof,
             merkle_root,
         ) {
-            println!("Invalid full block, merkle proof is invalid");
+            info!("Invalid full block, merkle proof is invalid");
             return false;
         }
 
@@ -222,7 +223,7 @@ impl FullBlock {
 
         let decoding_hash = crypto::digest_sha_256(&decoding.to_vec());
         if genesis_piece_hash.cmp(&decoding_hash) != Ordering::Equal {
-            println!("Invalid full block, encoding is invalid");
+            info!("Invalid full block, encoding is invalid");
             // utils::compare_bytes(&proof.encoding, &proof.encoding, &decoding);
             return false;
         }
@@ -234,7 +235,7 @@ impl FullBlock {
             .verify_strict(&self.block.tag, &signature)
             .is_err()
         {
-            println!("Invalid full block, signature is invalid");
+            info!("Invalid full block, signature is invalid");
             return false;
         }
 
@@ -336,12 +337,12 @@ impl Ledger {
                         parent_block_wrapper.children.push(block_id);
                     } else {
                         // we have a fork, must compare quality, for now return invalid
-                        println!("\n *** Warning -- A FORK has occurred ***");
+                        info!("\n *** Warning -- A FORK has occurred ***");
                         return BlockStatus::Invalid;
                     }
                 }
                 None => {
-                    println!(
+                    info!(
                         "Could not find parent block in blocks_by_id with id: {}",
                         hex::encode(&block.parent_id)
                     );
@@ -377,7 +378,7 @@ impl Ledger {
             .and_modify(|v| v.push(block_id))
             .or_insert_with(|| vec![block_id]);
 
-        println!("Added block with id: {}", hex::encode(block_id));
+        info!("Added block with id: {}", hex::encode(&block_id[0..8]));
 
         BlockStatus::Applied
     }
@@ -396,9 +397,9 @@ impl Ledger {
             Some(child_id) => {
                 match self.pending_blocks_by_id.get(child_id) {
                     Some(full_block) => {
-                        println!(
+                        info!(
                             "Got child full block with id: {}",
-                            hex::encode(full_block.block.get_id())
+                            hex::encode(&full_block.block.get_id()[0..8])
                         );
 
                         // ensure the block is not in the ledger already
@@ -434,7 +435,7 @@ impl Ledger {
                         match self.apply_block_by_id(&block_copy) {
                             BlockStatus::Applied => {
                                 // either continue (call recursive) or solve
-                                println!("Successfully applied pending block!");
+                                info!("Successfully applied pending block!");
                                 let block_id = block_copy.get_id();
                                 if self.is_pending_parent(&block_id) {
                                     self.apply_pending_block(block_id)
@@ -470,9 +471,9 @@ impl Ledger {
 
     /// Print the balance of all accounts in the ledger
     pub fn print_balances(&self) {
-        println!("Current balance of accounts:\n");
+        info!("Current balance of accounts:\n");
         for (id, balance) in self.balances.iter() {
-            println!("Account: {} \t {} \t credits", hex::encode(id), balance);
+            info!("Account: {} \t {} \t credits", hex::encode(id), balance);
         }
     }
 }

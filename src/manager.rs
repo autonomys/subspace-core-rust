@@ -9,6 +9,7 @@ use network::NodeType;
 use solver::Solution;
 use std::net::SocketAddr;
 use std::time::Duration;
+use log::*;
 
 pub enum ProtocolMessage {
     BlockRequest(u32), // On sync, main forwards block request to Net for tx by P1
@@ -34,7 +35,7 @@ pub async fn run(
     main_to_sol_tx: Sender<ProtocolMessage>,
 ) {
     let protocol_listener = async {
-        println!("Main protocol loop is running...");
+        info!("Main protocol loop is running...");
         loop {
             if let Some(message) = any_to_main_rx.recv().await.ok() {
                 match message {
@@ -54,7 +55,7 @@ pub async fn run(
                             BlockStatus::Applied => {
                                 // may still need to skip the loop before solving, in case any more pending blocks have queued
 
-                                println!("Applied new block received over the network during sync to the ledger");
+                                info!("Applied new block received over the network during sync to the ledger");
 
                                 let block_id = block.get_id();
 
@@ -63,7 +64,7 @@ pub async fn run(
                                     // fetch the pending full block that references this parent, will call recursive
                                     // let child_id = ledger.get_child_of_pending_parent(&block_id);
                                     let challenge = ledger.apply_pending_block(block_id);
-                                    println!("Synced the ledger!");
+                                    info!("Synced the ledger!");
 
                                     if mode == NodeType::Farmer || mode == NodeType::Gateway {
                                         main_to_sol_tx
@@ -93,7 +94,7 @@ pub async fn run(
 
                         // do you already have this block?
                         if ledger.is_block_applied(&block_id) {
-                            println!(
+                            info!(
                                 "Received a block proposal via gossip for known block, ignoring"
                             );
                             continue;
@@ -103,14 +104,14 @@ pub async fn run(
                         if !ledger.is_block_applied(&full_block.block.parent_id) {
                             // cache the block until fully synced
                             // either: still syncing the ledger from startup or received recent blocks out of order
-                            println!("Caching a block proposal that is ahead of local ledger with id: {}", hex::encode(full_block.block.get_id()));
+                            info!("Caching a block proposal that is ahead of local ledger with id: {}", hex::encode(&full_block.block.get_id()[0..8]));
                             ledger.cache_pending_block(full_block);
                             continue;
                         }
 
                         // check quality first
                         if full_block.block.get_quality() < ledger.quality_threshold {
-                            println!("Received block proposal with insufficient quality via gossip, ignoring");
+                            info!("Received block proposal with insufficient quality via gossip, ignoring");
                             continue;
                         }
 
@@ -121,14 +122,14 @@ pub async fn run(
                             &genesis_piece_hash,
                             &ledger.sloth,
                         ) {
-                            println!("Received invalid block proposal via gossip, ignoring");
+                            info!("Received invalid block proposal via gossip, ignoring");
                             continue;
                         }
 
                         // now we can finally apply the block
                         match ledger.apply_block_by_id(&full_block.block) {
                             BlockStatus::Applied => {
-                                println!("Applied new block received over the network via gossip to the ledger");
+                                info!("Applied new block received over the network via gossip to the ledger");
 
                                 // is this the parent of a pending block?
                                 if ledger.is_pending_parent(&block_id) {
@@ -153,18 +154,18 @@ pub async fn run(
                                 panic!("Logic error, add_block_by_id should not have been called if the parent is unknown...")
                             },
                             BlockStatus::Invalid => {
-                                println!("Could not apply block to ledger, illegal extension...");
+                                info!("Could not apply block to ledger, illegal extension...");
                             },
                         }
                     }
                     ProtocolMessage::BlockSolution(solution) => {
-                        println!(
+                        info!(
                             "Received a solution for challenge: {}",
-                            hex::encode(&solution.challenge)
+                            hex::encode(&solution.challenge[0..8])
                         );
                         // check solution quality is high enough
                         if solution.quality < ledger.quality_threshold {
-                            println!("Solution to block challenge does not meet quality threshold, ignoring");
+                            info!("Solution to block challenge does not meet quality threshold, ignoring");
                             continue;
                         }
 
@@ -181,7 +182,7 @@ pub async fn run(
                         match ledger.apply_block_by_id(&block) {
                             BlockStatus::Applied => {
                                 // valid extension to the ledger, gossip to the network
-                                println!("Applied new block generated locally to the ledger!");
+                                info!("Applied new block generated locally to the ledger!");
                                 // block.print();
 
                                 let proof = Proof::new(
@@ -201,7 +202,7 @@ pub async fn run(
                             BlockStatus::Invalid => {
                                 // illegal extension to the ledger, ignore
                                 // may have applied a better block received over the network while the solution was being generated
-                                println!("Attempted to add locally generated block to the ledger, but was no longer valid");
+                                info!("Attempted to add locally generated block to the ledger, but was no longer valid");
                             }
                             BlockStatus::Pending => {
                                 // this should not happen, control flow logic error
@@ -216,7 +217,7 @@ pub async fn run(
     };
 
     let protocol_startup = async {
-        println!("Calling protocol startup");
+        info!("Calling protocol startup");
 
         // main_to_sol_tx
         //     .send(ProtocolMessage::BlockChallenge(genesis_piece_hash))
@@ -226,9 +227,9 @@ pub async fn run(
             NodeType::Gateway => {
                 // send genesis challenge to solver
                 // this will start an eval loop = solve -> create block -> gossip -> solve ...
-                println!(
+                info!(
                     "Starting gateway with genesis challenge: {}",
-                    hex::encode(&genesis_piece_hash)
+                    hex::encode(&genesis_piece_hash[0..8])
                 );
                 main_to_sol_tx
                     .send(ProtocolMessage::BlockChallenge(genesis_piece_hash))
@@ -239,7 +240,7 @@ pub async fn run(
                 // this will start a sync loop that should complete when fully synced
                 // at that point node will simply listen and solve
                 task::sleep(Duration::from_secs(1)).await;
-                println!("New peer starting ledger sync with gateway");
+                info!("New peer starting ledger sync with gateway");
                 main_to_net_tx.send(ProtocolMessage::BlockRequest(0)).await;
             }
         }
