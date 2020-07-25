@@ -27,7 +27,7 @@ serde = { version = "1.0.104", features = ["derive"] }
 
 [dependencies.async-std]
 version = "1.6.2"
-features = ["unstable"]
+features = ["attributes", "unstable"]
 
 [dependencies.rug]
 version = "1.9.0"
