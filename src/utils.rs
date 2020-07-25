@@ -34,6 +34,24 @@ pub fn bytes_to_bigint(bytes: &[u8]) -> BigUint {
     BigUint::from_bytes_be(bytes)
 }
 
+/// Convert four bytes into u32 representation
+pub fn bytes_le_to_u32(array: &[u8]) -> u32 {
+    (array[0] as u32)
+        + ((array[1] as u32) << 8)
+        + ((array[2] as u32) << 16)
+        + ((array[3] as u32) << 24)
+}
+
+pub fn u16_to_bytes_le(number: u16) -> [u8; 2] {
+    let mut bytes = [0u8; 2];
+    bytes.as_mut().write_all(&number.to_le_bytes()).unwrap();
+    bytes
+}
+
+pub fn bytes_to_le_16(array: &[u8]) -> u16 {
+    (array[0] as u16) + ((array[1] as u16) << 8)
+}
+
 /// Convert usize to a big unsigned integer
 pub fn usize_to_bigint(number: usize) -> BigUint {
     ToBigUint::to_biguint(&number).unwrap()

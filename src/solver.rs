@@ -15,11 +15,11 @@ use std::time::Duration;
 
 #[derive(Copy, Clone)]
 pub struct Solution {
-    pub challenge: [u8; 32],        // hash of last block
-    pub index: u64,                 // derived piece_index
-    pub tag: [u8; 32],              // tag for hmac(challenge||encoding)
-    pub quality: u8,                // quality of the tag
-    pub encoding: Piece,            // the full encoding
+    pub challenge: [u8; 32], // hash of last block
+    pub index: u64,          // derived piece_index
+    pub tag: [u8; 32],       // tag for hmac(challenge||encoding)
+    pub quality: u8,         // quality of the tag
+    pub encoding: Piece,     // the full encoding
 }
 
 pub async fn run(

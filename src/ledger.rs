@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
  * Track quality of each fork
  * Make delay random time following a poission distribution around a mean
  * Slowly remove delay until zero erros
- * 
+ *
 */
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
@@ -71,18 +71,18 @@ impl Block {
 
     // TODO: Should probably be a `validate()` method that returns `Result<(), BlockValidationError>`
     //  or `BlockValidationResult` instead of printing to the stdout
-    // pub fn is_valid(&self) -> bool {
-    //     // verify the signature
-    //     let public_key = PublicKey::from_bytes(&self.public_key).unwrap();
-    //     let signature = Signature::from_bytes(&self.signature).unwrap();
+    pub fn is_valid(&self) -> bool {
+        // verify the signature
+        let public_key = PublicKey::from_bytes(&self.public_key).unwrap();
+        let signature = Signature::from_bytes(&self.signature).unwrap();
 
-    //     if public_key.verify_strict(&self.tag, &signature).is_err() {
-    //         println!("Invalid block, signature is invalid");
-    //         return false;
-    //     }
+        if public_key.verify_strict(&self.tag, &signature).is_err() {
+            println!("Invalid block, signature is invalid");
+            return false;
+        }
 
-    //     true
-    // }
+        true
+    }
 
     pub fn print(&self) {
         #[derive(Debug)]
@@ -260,12 +260,12 @@ pub struct Ledger {
     applied_block_ids_by_index: HashMap<u32, Vec<[u8; 32]>>, // hash for applied blocks, by block height
     pending_blocks_by_id: HashMap<[u8; 32], FullBlock>, // all pending blocks (unseen parent) by hash
     pending_parents_by_id: HashMap<[u8; 32], [u8; 32]>, // all parents we are expecting, with their child (which will be in pending blocks)
-    pub height: u32, // current block height
-    pub quality: u32, // aggregate quality for this chain
-    pub merkle_root: Vec<u8>, // only inlcuded for test ledger
-    pub genesis_piece_hash: [u8; 32], 
+    pub height: u32,                                    // current block height
+    pub quality: u32,                                   // aggregate quality for this chain
+    pub merkle_root: Vec<u8>,                           // only inlcuded for test ledger
+    pub genesis_piece_hash: [u8; 32],
     pub quality_threshold: u8, // current quality target
-    sloth: sloth::Sloth, // a sloth instance for decoding (verifying)
+    pub sloth: sloth::Sloth,   // a sloth instance for decoding (verifying)
 }
 
 impl Ledger {
@@ -308,15 +308,17 @@ impl Ledger {
         // ToDo
         // for now take the first id in the vec
         // later we will have to handle forks and reorgs
-        self.applied_block_ids_by_index.get(&index).and_then(|block_ids| {
-            Some(
-                self.applied_blocks_by_id
-                    .get(&block_ids[0])
-                    .expect("Block index and blocks map have gotten out of sync!")
-                    .block
-                    .clone(),
-            )
-        })
+        self.applied_block_ids_by_index
+            .get(&index)
+            .and_then(|block_ids| {
+                Some(
+                    self.applied_blocks_by_id
+                        .get(&block_ids[0])
+                        .expect("Block index and blocks map have gotten out of sync!")
+                        .block
+                        .clone(),
+                )
+            })
     }
 
     /// Retrieve a block by id (hash)

@@ -4,8 +4,9 @@ use super::*;
 use crate::{Piece, IV};
 use ed25519_dalek::Keypair;
 use merkle_tree_binary::Tree;
-use rand::rngs::OsRng;
+use rand::rngs::{OsRng, StdRng};
 use rand::Rng;
+use rand_core::SeedableRng;
 use ring::{digest, hmac};
 
 /* ToDo
@@ -87,9 +88,15 @@ pub fn create_hmac(message: &[u8], challenge: &[u8]) -> [u8; 32] {
 }
 
 /// Returns a ED25519 key pair from a randomly generated seed.
-pub fn gen_keys() -> ed25519_dalek::Keypair {
+pub fn gen_keys_random() -> ed25519_dalek::Keypair {
     let mut csprng = OsRng {};
     Keypair::generate(&mut csprng)
+}
+
+/// Returns an ED25519 key pair from a user provided seed
+pub fn gen_keys_from_seed(seed: u64) -> ed25519_dalek::Keypair {
+    let mut rng = StdRng::seed_from_u64(seed);
+    Keypair::generate(&mut rng)
 }
 
 /// Deterministically builds a merkle tree with leaves the indices 0 to 255. Used to simulate the work done to prove and verity state blocks without having to build a state chain.
