@@ -2,6 +2,8 @@
 
 A simple blockchain based on proofs-of-replication for the [Subspace Network](https://www.subspace.network), implemented in pure Rust.
 
+Read the [specifications](/spec/overview.md) (wip) for more details.
+
 
 ### Install
 
@@ -23,17 +25,23 @@ cargo build --release
 
 Benches single block encode/decode time and full piece encode/decode time for each prime size.
 
-### Run Plotter
+### Run Node
 
-`cargo run --[/optional/path/to/plot/file]`
+`RUST_LOG=info cargo run [node-type] [optional-path]`
 
-Times the creation of a 100 MB plot using all available cores.
+`RUST_LOG=info cargo run gateway`
+
+`RUST_LOG=info cargo run peer`
 
 ### Status
 
 1. ~~Sloth based proof-of-replication~~
 2. ~~Disk plotter~~
-3. Evaluation Loop
-4. Ledger
-5. TCP Gossip Network
+3. ~~Evaluation Loop~~
+4. ~~Ledger~~
+5. ~~TCP Gossip Network~~
+6. Terminal Console
+7. Manages Forks
+8. Basic tx scheme
+9. Erasrue code state
 

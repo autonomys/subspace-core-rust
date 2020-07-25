@@ -1,10 +1,12 @@
 #![allow(dead_code)]
 
+use super::*;
 use crate::{Piece, PIECE_SIZE};
 use async_std::fs::File;
 use async_std::fs::OpenOptions;
 use async_std::io::prelude::*;
 use async_std::path::Path;
+use solver::Solution;
 use std::collections::HashMap;
 use std::io;
 use std::io::SeekFrom;
@@ -16,11 +18,14 @@ pub enum PlotCreationError {
     PlotMapOpen(io::Error),
 }
 
-/*
- *   Add tests
- *   Init plot as singe file of plot size
- *   Retain plot between runs
- *   Store plot index to disk
+/* ToDo
+ *
+ * Return result for solve()
+ * Detect if plot exists on startup and load
+ * Delete entire plot (perhaps with script) for testing
+ * Extend tests
+ * Resize plot by removing the last x indices and adjusting struct params
+ *
  *
 */
 
@@ -30,9 +35,11 @@ pub struct Plot {
     plot_file: File,
     size: usize,
     updates: usize,
+    update_interval: usize,
 }
 
 impl Plot {
+    /// Creates a new plot for persisting encoded pieces to disk
     pub async fn new(path: &Path, size: usize) -> Result<Plot, PlotCreationError> {
         if !path.exists().await {
             async_std::fs::create_dir_all(path)
@@ -58,6 +65,7 @@ impl Plot {
 
         let map = HashMap::new();
         let updates = 0;
+        let update_interval = crate::PLOT_UPDATE_INTERVAL;
 
         Ok(Plot {
             map,
@@ -65,9 +73,11 @@ impl Plot {
             plot_file,
             size,
             updates,
+            update_interval,
         })
     }
 
+    /// Reads a piece from plot by index
     pub async fn read(&mut self, index: usize) -> io::Result<Piece> {
         let position = self.map.get(&index).unwrap();
         self.plot_file.seek(SeekFrom::Start(*position)).await?;
@@ -76,6 +86,7 @@ impl Plot {
         Ok(buffer)
     }
 
+    /// Writes a piece to the plot by index, will overwrite if piece exists (updates)
     pub async fn write(&mut self, encoding: &Piece, index: usize) -> io::Result<()> {
         let position = self.plot_file.seek(SeekFrom::Current(0)).await?;
         self.plot_file.write_all(&encoding[0..PIECE_SIZE]).await?;
@@ -83,11 +94,29 @@ impl Plot {
         self.handle_update().await
     }
 
+    /// Removes a piece from the plot by index, by deleting its index from the map
     pub async fn remove(&mut self, index: usize) -> io::Result<()> {
         self.map.remove(&index);
         self.handle_update().await
     }
 
+    /// fetches the encoding for an audit and returns the solution
+    pub async fn solve(&mut self, challenge: [u8; 32], piece_count: usize) -> Solution {
+        let index = utils::modulo(&challenge, piece_count);
+        let encoding = self.read(index).await.unwrap();
+        let tag = crypto::create_hmac(&encoding[0..4096], &challenge);
+        let quality = utils::measure_quality(&tag);
+
+        Solution {
+            challenge,
+            index: index as u64,
+            tag,
+            quality,
+            encoding,
+        }
+    }
+
+    /// Writes the map to disk to persist between sessions (does not load on startup yet)
     pub async fn force_write_map(&mut self) -> io::Result<()> {
         // TODO: Writing everything every time is probably not the smartest idea
         self.map_file.seek(SeekFrom::Start(0)).await?;
@@ -99,10 +128,11 @@ impl Plot {
         Ok(())
     }
 
+    /// Increment a counter to persist the map based on some interval
     async fn handle_update(&mut self) -> io::Result<()> {
         self.updates = self.updates.wrapping_add(1);
 
-        if self.updates % 10000 == 0 {
+        if self.updates % self.update_interval == 0 {
             self.force_write_map().await?;
         }
 

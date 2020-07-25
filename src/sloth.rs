@@ -1,11 +1,10 @@
 #![allow(dead_code)]
 
 /*
-A pure rust implementation of pysloth C internals
-https://github.com/randomchain/pysloth/blob/master/sloth.c
-by Mathias Michno
-
-With extensions for a proof-of-replication
+    A pure rust implementation of Sloth with extensions for a proof-of-replication
+    https://eprint.iacr.org/2015/366
+    based on pysloth C implmentation by Mathias Michno
+    https://github.com/randomchain/pysloth/blob/master/sloth.c
 */
 
 use super::*;
@@ -17,18 +16,12 @@ use std::iter;
 use std::ops::{AddAssign, Deref};
 
 /*  ToDo
- * only store expanded IV in integer form for encoding
- * revise sloth to mutate in place (Nazar)
- * remove unnessecary cloning (Nazar)
- * handle errors correctly if the data is larger than prime in sqrt_permutation (Nazar)
- * Ensure compiles for ARM -- gmp will be tricky (Nazar)
  * Ensure complies for Windows (Nazar)
  * use a different prime for each block for additional ASIC resistance
- * setup plotting tester script (with // plotting)
- * add in sloth art, progress bar, cli
- * implement for GPU in CUDA and OpenCL
- * implement parallel decoding to allow for smaller prime sizes and less encoding in //
+ * implement for GPU in CUDA with CGBN
+ * implement for GPU in OpenCL with ff-cl-gen
  * ensure correct number of levels are applied for security guarantee
+ * should this also take an IV?
  *
  * test: data larger than prime should fail
  * test: hardcode in correct prime and ensure those are generated correctly (once prime is chosen)
@@ -59,6 +52,23 @@ fn piece_to_first_block_and_feedback(piece: &mut [Integer]) -> (&mut Integer, &I
     // At this point last block is already decoded, so we can use it as an IV to previous iteration
     let iv = &remainder[remainder.len() - 1];
     (&mut first_block[0], &iv)
+}
+
+/// Converts a 4096 byte piece from an array of GMP big integers back to raw bytes
+fn write_integers_to_array(integer_piece: &[Integer], piece: &mut [u8], block_size_bytes: usize) {
+    integer_piece
+        .iter()
+        .flat_map(|integer| {
+            let integer_bytes = integer.to_digits::<u8>(Order::Lsf);
+            let integer_bytes_len = integer_bytes.len();
+            integer_bytes
+                .into_iter()
+                .chain(iter::repeat(0).take(block_size_bytes - integer_bytes_len))
+        })
+        .zip(piece.iter_mut())
+        .for_each(|(from_byte, to_byte)| {
+            *to_byte = from_byte;
+        });
 }
 
 #[derive(Debug)]
@@ -184,7 +194,7 @@ impl Sloth {
     }
 
     /// Sequentially decodes a 4096 byte encoding in time << encode time
-    pub fn decode(&self, piece: &mut Piece, expanded_iv: ExpandedIV, layers: usize) {
+    pub fn decode(&self, piece: &mut [u8], expanded_iv: ExpandedIV, layers: usize) {
         // convert encoding to integer representation
         let mut integer_piece: Vec<Integer> = piece
             .chunks_exact(self.block_size_bytes)
@@ -245,22 +255,6 @@ impl Sloth {
         // transform integers back to bytes
         write_integers_to_array(&integer_piece, piece, self.block_size_bytes);
     }
-}
-
-fn write_integers_to_array(integer_piece: &[Integer], piece: &mut Piece, block_size_bytes: usize) {
-    integer_piece
-        .iter()
-        .flat_map(|integer| {
-            let integer_bytes = integer.to_digits::<u8>(Order::Lsf);
-            let integer_bytes_len = integer_bytes.len();
-            integer_bytes
-                .into_iter()
-                .chain(iter::repeat(0).take(block_size_bytes - integer_bytes_len))
-        })
-        .zip(piece.iter_mut())
-        .for_each(|(from_byte, to_byte)| {
-            *to_byte = from_byte;
-        });
 }
 
 #[cfg(test)]
