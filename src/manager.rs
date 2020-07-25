@@ -219,10 +219,6 @@ pub async fn run(
     let protocol_startup = async {
         info!("Calling protocol startup");
 
-        // main_to_sol_tx
-        //     .send(ProtocolMessage::BlockChallenge(genesis_piece_hash))
-        //     .await;
-
         match mode {
             NodeType::Gateway => {
                 // send genesis challenge to solver

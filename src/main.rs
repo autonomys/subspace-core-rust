@@ -44,7 +44,6 @@ use subspace_core_rust::*;
  *
 */
 
-// #[async_std::main]
 fn main() {
     /*
      * Startup: cargo run <node_type> <custom_path>

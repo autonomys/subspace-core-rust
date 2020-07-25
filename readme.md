@@ -27,7 +27,7 @@ Benches single block encode/decode time and full piece encode/decode time for ea
 
 ### Run Node
 
-`RUST_LOG=info cargo run [node-type] [optional-path]`
+`RUST_LOG=[level] cargo run [node-type] [optional-path]`
 
 `RUST_LOG=info cargo run gateway`
 

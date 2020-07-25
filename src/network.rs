@@ -17,13 +17,18 @@ use log::*;
 
 /* Todo
  *
+ * Fix all unwrap calls
+ * Ensure message size does not exceed 16k
  * Refactor both connection loops into a single function
  * Exchange peers on sync (and ensure peers request works)
  * Handle dropped connections with an event
+ * Add another peer to replace the dropped one
  * Handle queued messages to dropped connections (in case connection can not be found)
  * Handle empty block responses, currently that peer will randomly come again soon
  * Hanle errors as results
  * Write tests
+ * Filter duplicate message with cache at manager using get_id
+ * Handle get peers response with outbound message correctly
  *
 */
 
@@ -398,27 +403,39 @@ pub async fn run(
                         "Received a {:?} network message from {:?}",
                         message.name, peer_addr
                     );
+
+                    // ToDo: (later) implement a cache of last x messages (only if block or tx)
+
                     match message.name {
                         NetworkMessageName::Ping => {
                             // send a pong response
+
+                            // ToDo: fix message type as pong
                             router.reply(&peer_addr, message, Vec::new()).await;
                         }
                         NetworkMessageName::Pong => {
                             // do nothing for now
+
+                            // ToDo: latency timing
                         }
                         NetworkMessageName::PeersRequest => {
                             // retrieve peers and send over the wire
 
+                            // ToDo: fully implement and test
+
                             let contacts = router.get_contacts(&peer_addr);
 
                             let response = NetworkMessage {
-                                name: NetworkMessageName::PeersRequest,
+                                name: NetworkMessageName::PeersResponse,
                                 data: contacts.to_bytes(),
                             };
 
                             router.send(&peer_addr, response).await;
                         }
                         NetworkMessageName::PeersResponse => {
+
+                            // ToDo: match responses to request id, else ignore
+
                             // convert binary to peers, for each peer, attempt to connect
                             // need to write another method to add peer on connection
                             let potential_peers = AddrList::from_bytes(&message.data);
