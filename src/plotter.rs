@@ -29,12 +29,13 @@ use std::{env, thread};
 pub async fn plot(node_id: NodeID, genesis_piece: Piece) -> Plot {
     let args: Vec<String> = env::args().collect();
     // set storage path
-    let path = match args.get(1) {
+    let path = match args.get(2) {
         Some(path) => Path::new(path).to_path_buf(),
         None => dirs::data_local_dir()
             .expect("Can't find local data directory, needs to be specified explicitly")
             .join("subspace")
-            .join("results"),
+            .join("results")
+            .join(hex::encode(&node_id)),
     };
 
     println!("New plot initialized at {:?}", path.to_str());

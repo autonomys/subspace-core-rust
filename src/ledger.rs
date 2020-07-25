@@ -272,7 +272,6 @@ impl Ledger {
     pub fn new(
         merkle_root: Vec<u8>,
         genesis_piece_hash: [u8; 32],
-        quality_threshold: u8,
     ) -> Ledger {
         // init sloth
         let prime_size = PRIME_SIZE_BITS;
@@ -288,7 +287,7 @@ impl Ledger {
             quality: 0,
             merkle_root,
             genesis_piece_hash,
-            quality_threshold,
+            quality_threshold: INITIAL_QUALITY_THRESHOLD,
             sloth,
         }
     }

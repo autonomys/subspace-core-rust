@@ -24,7 +24,6 @@ pub enum ProtocolMessage {
 pub async fn run(
     mode: NodeType,
     genesis_piece_hash: [u8; 32],
-    quality_threshold: u8,
     binary_public_key: [u8; 32],
     keys: ed25519_dalek::Keypair,
     merkle_proofs: Vec<Vec<u8>>,
@@ -164,7 +163,7 @@ pub async fn run(
                             hex::encode(&solution.challenge)
                         );
                         // check solution quality is high enough
-                        if solution.quality < quality_threshold {
+                        if solution.quality < ledger.quality_threshold {
                             println!("Solution to block challenge does not meet quality threshold, ignoring");
                             continue;
                         }

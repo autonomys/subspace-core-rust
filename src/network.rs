@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 pub type NodeID = [u8; 32];
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum NodeType {
     Gateway,
     Peer,
@@ -289,15 +289,24 @@ async fn connect(peer_addr: SocketAddr, broker_sender: Sender<NetworkEvent>) {
 pub async fn run(
     mode: NodeType,
     node_id: NodeID,
-    node_addr: SocketAddr,
-    gateway_addr: SocketAddr,
+    local_addr: SocketAddr,
     any_to_main_tx: Sender<ProtocolMessage>,
     main_to_net_rx: Receiver<ProtocolMessage>,
 ) {
+    let gateway_addr: std::net::SocketAddr = DEV_GATEWAY_ADDR.parse().unwrap();
     let (broker_sender, mut broker_receiver) = channel::<NetworkEvent>(32);
 
     // create the tcp listener
-    let socket = TcpListener::bind(node_addr).await.unwrap();
+    let socket: TcpListener;
+    match mode {
+        NodeType::Gateway => {
+            socket = TcpListener::bind(gateway_addr).await.unwrap();
+        },
+        _ => {
+            socket = TcpListener::bind(local_addr).await.unwrap();
+        }
+    }
+    
     let mut connections = socket.incoming();
     println!("Network is listening on TCP socket for inbound connections");
 

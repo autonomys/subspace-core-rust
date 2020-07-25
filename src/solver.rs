@@ -23,7 +23,6 @@ pub struct Solution {
 }
 
 pub async fn run(
-    wait_time: u64,
     main_to_sol_rx: Receiver<ProtocolMessage>,
     sol_to_main_tx: Sender<ProtocolMessage>,
     plot: &mut plot::Plot,
@@ -32,7 +31,7 @@ pub async fn run(
     loop {
         match main_to_sol_rx.recv().await.unwrap() {
             ProtocolMessage::BlockChallenge(challenge) => {
-                task::sleep(Duration::from_millis(wait_time)).await;
+                task::sleep(Duration::from_millis(SOLVE_WAIT_TIME_MS)).await;
                 let solution = plot.solve(challenge, PLOT_SIZE).await;
                 sol_to_main_tx
                     .send(ProtocolMessage::BlockSolution(solution))
