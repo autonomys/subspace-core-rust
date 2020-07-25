@@ -269,10 +269,7 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    pub fn new(
-        merkle_root: Vec<u8>,
-        genesis_piece_hash: [u8; 32],
-    ) -> Ledger {
+    pub fn new(merkle_root: Vec<u8>, genesis_piece_hash: [u8; 32]) -> Ledger {
         // init sloth
         let prime_size = PRIME_SIZE_BITS;
         let sloth = sloth::Sloth::init(prime_size);

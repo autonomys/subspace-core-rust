@@ -18,7 +18,7 @@ use subspace_core_rust::*;
  *
  * Implement a basic logger
  * Implement a basic tui console
-* 
+*
  * Base piece audits on block height and piece index correctly
  * Refactor audits / reads to use piece indcies instead of hashes throughout (map arch)
  * Determine what needs to be done to support forks in the ledger
@@ -46,16 +46,15 @@ use subspace_core_rust::*;
 
 // #[async_std::main]
 fn main() {
-    
     /*
      * Startup: cargo run <node_type> <custom_path>
-     * 
+     *
      * arg1 type -> gateway, farmer, peer (gateway default)
-     * arg2 path -> unique path for plot (data_local_dir default) 
-     * 
+     * arg2 path -> unique path for plot (data_local_dir default)
+     *
      * Later: plot size, env
-     * 
-    */
+     *
+     */
 
     let node_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let mode: NodeType;
@@ -68,7 +67,7 @@ fn main() {
                 "gateway" => mode = NodeType::Gateway,
                 _ => mode = NodeType::Gateway,
             };
-        },
+        }
         None => mode = NodeType::Gateway,
     };
 
@@ -96,8 +95,7 @@ fn main() {
 
     // only plot/solve if gateway or farmer
     if mode == NodeType::Farmer || mode == NodeType::Gateway {
-        task::block_on( async move {
-
+        task::block_on(async move {
             // plot space (slow...)
             let mut plot = plotter::plot(node_id, genesis_piece).await;
 
@@ -127,18 +125,11 @@ fn main() {
 
     // network loop
     let net = task::spawn(async move {
-        network::run(
-            mode,
-            node_id,
-            node_addr,
-            any_to_main_tx,
-            main_to_net_rx,
-        )
-        .await;
+        network::run(mode, node_id, node_addr, any_to_main_tx, main_to_net_rx).await;
     });
 
     // join threads
-    task::block_on( async move {
+    task::block_on(async move {
         join!(main, net);
     });
 }

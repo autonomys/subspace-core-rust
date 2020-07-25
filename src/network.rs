@@ -301,12 +301,12 @@ pub async fn run(
     match mode {
         NodeType::Gateway => {
             socket = TcpListener::bind(gateway_addr).await.unwrap();
-        },
+        }
         _ => {
             socket = TcpListener::bind(local_addr).await.unwrap();
         }
     }
-    
+
     let mut connections = socket.incoming();
     println!("Network is listening on TCP socket for inbound connections");
 
@@ -524,9 +524,11 @@ pub async fn run(
 
                             router.gossip(message).await;
                         }
-                        _ => (panic!(
+                        _ => {
+                            (panic!(
                             "Network protocol listener has received an unknown protocol message!"
-                        )),
+                        ))
+                        }
                     }
                 }
                 NetworkEvent::NewPeer { peer_addr, stream } => {
