@@ -259,9 +259,6 @@ async fn connect(peer_addr: SocketAddr, broker_sender: Sender<NetworkEvent>) {
     while let Ok(read_size) = stream.read(&mut current_buffer).await {
         if read_size == 0 {
             // peer disconnected, exit the loop
-            broker_sender
-                .send(NetworkEvent::DroppedPeer { peer_addr })
-                .await;
             break;
         }
 
@@ -287,6 +284,9 @@ async fn connect(peer_addr: SocketAddr, broker_sender: Sender<NetworkEvent>) {
             }
         }
     }
+    broker_sender
+        .send(NetworkEvent::DroppedPeer { peer_addr })
+        .await;
 }
 
 pub async fn run(
@@ -353,9 +353,6 @@ pub async fn run(
                 while let Ok(read_size) = stream.read(&mut current_buffer).await {
                     if read_size == 0 {
                         // peer disconnected, exit the loop
-                        broker_sender_clone
-                            .send(NetworkEvent::DroppedPeer { peer_addr })
-                            .await;
                         break;
                     }
 
@@ -381,6 +378,9 @@ pub async fn run(
                         }
                     }
                 }
+                broker_sender_clone
+                    .send(NetworkEvent::DroppedPeer { peer_addr })
+                    .await;
             });
         }
     };
