@@ -199,14 +199,14 @@ impl Router {
 
     // retrieve the socket addr for each peer, except the one asking
     pub fn get_contacts(&self, exception: &SocketAddr) -> AddrList {
-        let mut contacts: Vec<SocketAddr> = Vec::new();
-        for peer_addr in self.peers.iter() {
-            if peer_addr != exception {
-                contacts.push(*peer_addr);
-            }
-        }
+        let addrs = self
+            .peers
+            .iter()
+            .filter(|&peer| !peer.eq(&exception))
+            .copied()
+            .collect();
 
-        AddrList { addrs: contacts }
+        AddrList { addrs }
     }
 
     /// send an rpc response back to the node that sent you an rpc request
