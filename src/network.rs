@@ -455,6 +455,8 @@ pub async fn run(
                                 if let Some(new_peer) = router.get_random_peer_excluding(peer_addr)
                                 {
                                     router.send(&new_peer, request).await;
+                                } else {
+                                    info!("Failed to request block: no other peers found");
                                 }
                                 continue;
                             }
@@ -491,6 +493,8 @@ pub async fn run(
                                 };
 
                                 router.send(&peer, request).await;
+                            } else {
+                                info!("Failed to request block at index {}: no peers", index);
                             }
                         }
                         ProtocolMessage::BlockResponseTo(node_addr, block_option, block_index) => {
