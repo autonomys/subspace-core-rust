@@ -572,9 +572,7 @@ pub async fn run(
             info!("Connecting to gateway node");
 
             let broker_sender = broker_sender.clone();
-            async_std::task::spawn(async move {
-                connect(gateway_addr, broker_sender).await;
-            });
+            connect(gateway_addr, broker_sender).await;
         }
     };
 

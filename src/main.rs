@@ -44,7 +44,8 @@ use subspace_core_rust::*;
  *
 */
 
-fn main() {
+#[async_std::main]
+async fn main() {
     /*
      * Startup: cargo run <node_type> <custom_path>
      *
@@ -96,48 +97,38 @@ fn main() {
 
     // only plot/solve if gateway or farmer
     if node_type == NodeType::Farmer || node_type == NodeType::Gateway {
-        task::block_on(async move {
-            // plot space (slow...)
-            let mut plot = plotter::plot(node_id, genesis_piece).await;
+        // plot space (slow...)
+        let mut plot = plotter::plot(node_id, genesis_piece).await;
 
-            // init solve loop
-            task::spawn(async move {
-                solver::run(main_to_sol_rx, sol_to_main_tx, &mut plot).await;
-            });
+        // init solve loop
+        task::spawn(async move {
+            solver::run(main_to_sol_rx, sol_to_main_tx, &mut plot).await;
         });
     }
 
     // manager loop
-    let main = task::spawn(async move {
-        manager::run(
-            node_type,
-            genesis_piece_hash,
-            binary_public_key,
-            keys,
-            merkle_proofs,
-            tx_payload,
-            &mut ledger,
-            any_to_main_rx,
-            main_to_net_tx,
-            main_to_sol_tx,
-        )
-        .await;
-    });
+    let main = manager::run(
+        node_type,
+        genesis_piece_hash,
+        binary_public_key,
+        keys,
+        merkle_proofs,
+        tx_payload,
+        &mut ledger,
+        any_to_main_rx,
+        main_to_net_tx,
+        main_to_sol_tx,
+    );
 
     // network loop
-    let net = task::spawn(async move {
-        network::run(
-            node_type,
-            node_id,
-            node_addr,
-            any_to_main_tx,
-            main_to_net_rx,
-        )
-        .await;
-    });
+    let net = network::run(
+        node_type,
+        node_id,
+        node_addr,
+        any_to_main_tx,
+        main_to_net_rx,
+    );
 
     // join threads
-    task::block_on(async move {
-        join!(main, net);
-    });
+    join!(main, net);
 }
