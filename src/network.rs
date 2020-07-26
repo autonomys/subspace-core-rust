@@ -10,7 +10,7 @@ use ledger::{Block, FullBlock};
 use log::*;
 use manager::ProtocolMessage;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::io::Write;
 use std::mem;
@@ -117,7 +117,7 @@ impl AddrList {
 pub struct Router {
     node_id: NodeID,
     connections: HashMap<SocketAddr, Sender<NetworkMessage>>,
-    peers: Vec<SocketAddr>,
+    peers: HashSet<SocketAddr>,
 }
 
 impl Router {
@@ -126,7 +126,7 @@ impl Router {
         Router {
             node_id,
             connections: HashMap::new(),
-            peers: Vec::new(),
+            peers: HashSet::new(),
         }
     }
 
@@ -137,7 +137,7 @@ impl Router {
         // if peers is low, add to peers
         // later explicitly ask to reduce churn
         if self.peers.len() < MAX_PEERS {
-            self.peers.push(node_addr);
+            self.peers.insert(node_addr);
         }
     }
 
@@ -152,10 +152,7 @@ impl Router {
 
         if self.connections.contains_key(&peer_addr) {
             self.connections.remove(&peer_addr);
-            if self.peers.contains(&peer_addr) {
-                let index = self.peers.iter().position(|x| *x == peer_addr).unwrap();
-                self.peers.remove(index);
-            }
+            self.peers.remove(&peer_addr);
         }
     }
 
@@ -186,7 +183,7 @@ impl Router {
     pub fn get_random_peer(&self) -> SocketAddr {
         let peer_count = self.peers.len();
         let peer_index = rand::random::<usize>() % peer_count;
-        self.peers[peer_index]
+        *self.peers.iter().skip(peer_index).next().unwrap()
     }
 
     /// get a peer at random exluding a specific peer
