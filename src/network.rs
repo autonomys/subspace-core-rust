@@ -87,7 +87,7 @@ enum NetworkEvent {
         peer_addr: SocketAddr,
         stream: TcpStream,
     },
-    DroppedPeer {
+    RemovedPeer {
         peer_addr: SocketAddr,
     },
     InboundMessage {
@@ -146,9 +146,9 @@ impl Router {
         self.connections.get(node_addr).unwrap()
     }
 
-    /// remove a connection and peer if connection is dropped
-    pub fn drop(&mut self, peer_addr: SocketAddr) {
-        // ToDo: Add another peer to replace the dropped one
+    /// remove a connection and peer if connection is removed
+    pub fn remove(&mut self, peer_addr: SocketAddr) {
+        // ToDo: Add another peer to replace the removed one
 
         if self.connections.contains_key(&peer_addr) {
             self.connections.remove(&peer_addr);
@@ -324,7 +324,7 @@ async fn on_connected(
     }
 
     broker_sender
-        .send(NetworkEvent::DroppedPeer { peer_addr })
+        .send(NetworkEvent::RemovedPeer { peer_addr })
         .await;
 }
 
@@ -556,8 +556,8 @@ pub async fn run(
                         }
                     });
                 }
-                NetworkEvent::DroppedPeer { peer_addr } => {
-                    router.drop(peer_addr);
+                NetworkEvent::RemovedPeer { peer_addr } => {
+                    router.remove(peer_addr);
                     info!("Broker has dropped a peer who disconnected");
                 }
             }
