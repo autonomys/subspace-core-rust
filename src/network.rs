@@ -232,9 +232,8 @@ fn extract_message(mut input: BytesMut) -> (Option<Bytes>, BytesMut) {
         if input[2..].len() < message_length {
             (None, input)
         } else {
-            let mut input = input.split_off(2);
-            let message_bytes = input.split_to(message_length).to_bytes();
-            let remaining_buffer = input;
+            let mut remaining_buffer = input.split_off(2);
+            let message_bytes = remaining_buffer.split_to(message_length).freeze();
 
             (Some(message_bytes), remaining_buffer)
         }
