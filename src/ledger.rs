@@ -175,17 +175,6 @@ pub struct FullBlock {
 }
 
 impl FullBlock {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap()
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
-        bincode::deserialize(bytes).map_err(|error| {
-            debug!("Failed to deserialize full block: {}", error);
-            ()
-        })
-    }
-
     pub fn is_valid(
         &self,
         piece_count: usize,

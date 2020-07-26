@@ -13,9 +13,11 @@ use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
+use std::fmt::Display;
 use std::io::Write;
-use std::mem;
 use std::net::SocketAddr;
+use std::ops::Deref;
+use std::{fmt, mem};
 
 /* Todo
  *
@@ -50,23 +52,35 @@ pub struct Node {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
-pub enum NetworkMessageName {
+pub enum Message {
     Ping,
     Pong,
     PeersRequest,
-    PeersResponse,
-    BlockRequest,
-    BlockResponse,
-    BlockProposal,
+    PeersResponse { contacts: AddrList },
+    BlockRequest { index: u32 },
+    BlockResponse { index: u32, block: Option<Block> },
+    BlockProposal { full_block: FullBlock },
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
-pub struct NetworkMessage {
-    name: NetworkMessageName,
-    data: Vec<u8>,
+impl Display for Message {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Ping => "Ping",
+                Self::Pong => "Pong",
+                Self::PeersRequest => "PeersRequest",
+                Self::PeersResponse { .. } => "PeersResponse",
+                Self::BlockRequest { .. } => "BlockRequest",
+                Self::BlockResponse { .. } => "BlockResponse",
+                Self::BlockProposal { .. } => "BlockProposal",
+            }
+        )
+    }
 }
 
-impl NetworkMessage {
+impl Message {
     pub fn to_bytes(&self) -> Vec<u8> {
         bincode::serialize(self).unwrap()
     }
@@ -93,7 +107,7 @@ enum NetworkEvent {
     },
     InboundMessage {
         peer_addr: SocketAddr,
-        message: NetworkMessage,
+        message: Message,
     },
     OutboundMessage {
         message: ProtocolMessage,
@@ -101,26 +115,19 @@ enum NetworkEvent {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
-pub struct AddrList {
-    addrs: Vec<SocketAddr>,
-}
+pub struct AddrList(Vec<SocketAddr>);
 
-impl AddrList {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap()
-    }
+impl Deref for AddrList {
+    type Target = Vec<SocketAddr>;
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
-        bincode::deserialize(bytes).map_err(|error| {
-            debug!("Failed to deserialize address list: {}", error);
-            ()
-        })
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
 pub struct Router {
     node_id: NodeID,
-    connections: HashMap<SocketAddr, Sender<NetworkMessage>>,
+    connections: HashMap<SocketAddr, Sender<Message>>,
     peers: HashSet<SocketAddr>,
 }
 
@@ -135,7 +142,7 @@ impl Router {
     }
 
     /// add a new connection, possibly add a new peer
-    pub fn add(&mut self, node_addr: SocketAddr, sender: Sender<NetworkMessage>) {
+    pub fn add(&mut self, node_addr: SocketAddr, sender: Sender<Message>) {
         self.connections.insert(node_addr, sender);
 
         // if peers is low, add to peers
@@ -146,7 +153,7 @@ impl Router {
     }
 
     /// get a connection by node id
-    pub fn get_connection(&self, node_addr: &SocketAddr) -> &Sender<NetworkMessage> {
+    pub fn get_connection(&self, node_addr: &SocketAddr) -> &Sender<Message> {
         self.connections.get(node_addr).unwrap()
     }
 
@@ -161,14 +168,14 @@ impl Router {
     }
 
     /// send a message to all peers
-    pub async fn gossip(&self, message: NetworkMessage) {
+    pub async fn gossip(&self, message: Message) {
         for node_addr in self.peers.iter() {
             self.send(node_addr, message.clone()).await;
         }
     }
 
     /// send a message to all but one peer (who sent you the message)
-    pub async fn regossip(&self, sender: &SocketAddr, message: NetworkMessage) {
+    pub async fn regossip(&self, sender: &SocketAddr, message: Message) {
         for node_addr in self.peers.iter() {
             if node_addr != sender {
                 self.send(node_addr, message.clone()).await;
@@ -177,9 +184,9 @@ impl Router {
     }
 
     /// send a message to specific node by node_id
-    pub async fn send(&self, receiver: &SocketAddr, message: NetworkMessage) {
+    pub async fn send(&self, receiver: &SocketAddr, message: Message) {
         let client_sender = self.get_connection(receiver);
-        info!("Sending a {:?} message to {:?}", message.name, receiver);
+        info!("Sending a {} message to {}", message, receiver);
         client_sender.send(message).await
     }
 
@@ -199,33 +206,19 @@ impl Router {
 
     // retrieve the socket addr for each peer, except the one asking
     pub fn get_contacts(&self, exception: &SocketAddr) -> AddrList {
-        let addrs = self
+        let contacts = self
             .peers
             .iter()
             .filter(|&peer| !peer.eq(&exception))
             .copied()
             .collect();
 
-        AddrList { addrs }
-    }
-
-    /// send an rpc response back to the node that sent you an rpc request
-    pub async fn reply(&self, recipient: &SocketAddr, message: NetworkMessage, data: Vec<u8>) {
-        let name: NetworkMessageName = match message.name {
-            NetworkMessageName::Ping => NetworkMessageName::Pong,
-            NetworkMessageName::PeersRequest => NetworkMessageName::PeersResponse,
-            NetworkMessageName::BlockRequest => NetworkMessageName::BlockResponse,
-            _ => panic!("Network is trying to reply to a non-rpc message type"),
-        };
-
-        let response = NetworkMessage { name, data };
-
-        self.send(recipient, response).await;
+        AddrList(contacts)
     }
 }
 
 /// Returns Option<(message_bytes, consumed_bytes)>
-fn extract_message(input: &[u8]) -> Option<(Result<NetworkMessage, ()>, usize)> {
+fn extract_message(input: &[u8]) -> Option<(Result<Message, ()>, usize)> {
     if input.len() <= 2 {
         None
     } else {
@@ -235,14 +228,14 @@ fn extract_message(input: &[u8]) -> Option<(Result<NetworkMessage, ()>, usize)> 
         if remainder.len() < message_length {
             None
         } else {
-            let message = NetworkMessage::from_bytes(&remainder[..message_length]);
+            let message = Message::from_bytes(&remainder[..message_length]);
 
             Some((message, 2 + message_length))
         }
     }
 }
 
-fn read_messages(mut stream: TcpStream) -> Receiver<Result<NetworkMessage, ()>> {
+fn read_messages(mut stream: TcpStream) -> Receiver<Result<Message, ()>> {
     let (messages_sender, messages_receiver) = channel(10);
 
     async_std::task::spawn(async move {
@@ -383,99 +376,84 @@ pub async fn run(
             match event {
                 NetworkEvent::InboundMessage { peer_addr, message } => {
                     // messages received over the network from another peer, send to manager or handle internally
-                    info!(
-                        "Received a {:?} network message from {:?}",
-                        message.name, peer_addr
-                    );
+                    info!("Received a {} network message from {}", message, peer_addr);
 
                     // ToDo: (later) implement a cache of last x messages (only if block or tx)
 
-                    match message.name {
-                        NetworkMessageName::Ping => {
+                    match message {
+                        Message::Ping => {
                             // send a pong response
 
-                            // ToDo: fix message type as pong
-                            router.reply(&peer_addr, message, Vec::new()).await;
+                            router.send(&peer_addr, Message::Pong).await;
                         }
-                        NetworkMessageName::Pong => {
+                        Message::Pong => {
                             // do nothing for now
 
                             // ToDo: latency timing
                         }
-                        NetworkMessageName::PeersRequest => {
+                        Message::PeersRequest => {
                             // retrieve peers and send over the wire
 
                             // ToDo: fully implement and test
 
                             let contacts = router.get_contacts(&peer_addr);
 
-                            let response = NetworkMessage {
-                                name: NetworkMessageName::PeersResponse,
-                                data: contacts.to_bytes(),
-                            };
-
-                            router.send(&peer_addr, response).await;
+                            router
+                                .send(&peer_addr, Message::PeersResponse { contacts })
+                                .await;
                         }
-                        NetworkMessageName::PeersResponse => {
+                        Message::PeersResponse { contacts } => {
                             // ToDo: match responses to request id, else ignore
 
                             // convert binary to peers, for each peer, attempt to connect
                             // need to write another method to add peer on connection
-                            if let Ok(potential_peers) = AddrList::from_bytes(&message.data) {
-                                for potential_peer_addr in potential_peers.addrs.iter() {
-                                    let potential_peer = potential_peer_addr.clone();
-                                    while router.peers.len() < MAX_PEERS {
-                                        let broker_sender = broker_sender.clone();
-                                        async_std::task::spawn(async move {
-                                            connect(potential_peer, broker_sender).await;
-                                        });
-                                    }
+                            for potential_peer_addr in contacts.iter() {
+                                let potential_peer = potential_peer_addr.clone();
+                                while router.peers.len() < MAX_PEERS {
+                                    let broker_sender = broker_sender.clone();
+                                    async_std::task::spawn(async move {
+                                        connect(potential_peer, broker_sender).await;
+                                    });
                                 }
                             }
 
                             // if we still have too few peers, should we try another peer
                         }
-                        NetworkMessageName::BlockRequest => {
-                            // parse and send to main
-                            let index = utils::bytes_le_to_u32(&message.data[0..4]);
+                        Message::BlockRequest { index } => {
                             any_to_main_tx
                                 .send(ProtocolMessage::BlockRequestFrom(peer_addr, index))
                                 .await;
                         }
-                        NetworkMessageName::BlockResponse => {
-                            // if empty block response, request from a different peer
-                            if message.data.len() == 4 {
-                                info!("Peer did not have block at desired index, requesting from a different peer");
-
-                                let request = NetworkMessage {
-                                    name: NetworkMessageName::BlockRequest,
-                                    data: message.data[0..4].to_vec(),
-                                };
-
-                                if let Some(new_peer) = router.get_random_peer_excluding(peer_addr)
-                                {
-                                    router.send(&new_peer, request).await;
-                                } else {
-                                    info!("Failed to request block: no other peers found");
+                        Message::BlockResponse { index, block } => {
+                            // if no block in response, request from a different peer
+                            match block {
+                                Some(block) => {
+                                    any_to_main_tx
+                                        .send(ProtocolMessage::BlockResponse(block))
+                                        .await;
                                 }
-                                continue;
-                            }
+                                None => {
+                                    info!("Peer did not have block at desired index, requesting from a different peer");
 
-                            // else forward response as protocol message to main
-                            if let Ok(block) = Block::from_bytes(&message.data) {
-                                any_to_main_tx
-                                    .send(ProtocolMessage::BlockResponse(block))
-                                    .await;
+                                    let request = Message::BlockRequest { index };
+
+                                    if let Some(new_peer) =
+                                        router.get_random_peer_excluding(peer_addr)
+                                    {
+                                        router.send(&new_peer, request).await;
+                                    } else {
+                                        info!("Failed to request block: no other peers found");
+                                    }
+                                    continue;
+                                }
                             }
                         }
-                        NetworkMessageName::BlockProposal => {
-                            // parse and send to main
+                        Message::BlockProposal { full_block } => {
+                            // send to main
 
-                            if let Ok(full_block) = FullBlock::from_bytes(&message.data) {
-                                let message =
-                                    ProtocolMessage::BlockProposalRemote(full_block, peer_addr);
-                                any_to_main_tx.send(message).await;
-                            }
+                            any_to_main_tx
+                                .send(ProtocolMessage::BlockProposalRemote(full_block, peer_addr))
+                                .await;
                         }
                     }
                 }
@@ -487,51 +465,30 @@ pub async fn run(
                             // send a block_request to one peer chosen at random from gossip group
 
                             if let Some(peer) = router.get_random_peer() {
-                                let request = NetworkMessage {
-                                    name: NetworkMessageName::BlockRequest,
-                                    data: index.to_le_bytes().to_vec(),
-                                };
-
-                                router.send(&peer, request).await;
+                                router.send(&peer, Message::BlockRequest { index }).await;
                             } else {
                                 info!("Failed to request block at index {}: no peers", index);
                             }
                         }
-                        ProtocolMessage::BlockResponseTo(node_addr, block_option, block_index) => {
+                        ProtocolMessage::BlockResponseTo(node_addr, block, index) => {
                             // send a block back to a peer that has requested it from you
 
-                            let data = match block_option {
-                                Some(block) => block.to_bytes(),
-                                None => block_index.to_le_bytes().to_vec(),
-                            };
-
-                            let response = NetworkMessage {
-                                name: NetworkMessageName::BlockResponse,
-                                data,
-                            };
-
-                            router.send(&node_addr, response).await;
+                            router
+                                .send(&node_addr, Message::BlockResponse { index, block })
+                                .await;
                         }
                         ProtocolMessage::BlockProposalRemote(full_block, sender_addr) => {
                             // propagating a block received over the network that was valid
                             // do not send back to the node who sent to you
 
-                            let message = NetworkMessage {
-                                name: NetworkMessageName::BlockProposal,
-                                data: full_block.to_bytes(),
-                            };
-
-                            router.regossip(&sender_addr, message).await;
+                            router
+                                .regossip(&sender_addr, Message::BlockProposal { full_block })
+                                .await;
                         }
                         ProtocolMessage::BlockProposalLocal(full_block) => {
                             // propagating a block generated locally, send to all
 
-                            let message = NetworkMessage {
-                                name: NetworkMessageName::BlockProposal,
-                                data: full_block.to_bytes(),
-                            };
-
-                            router.gossip(message).await;
+                            router.gossip(Message::BlockProposal { full_block }).await;
                         }
                         _ => panic!(
                             "Network protocol listener has received an unknown protocol message!"
@@ -543,7 +500,7 @@ pub async fn run(
                     mut stream,
                 } => {
                     info!("Broker is adding a new peer");
-                    let (client_sender, mut client_receiver) = channel::<NetworkMessage>(32);
+                    let (client_sender, mut client_receiver) = channel::<Message>(32);
                     router.add(peer_addr, client_sender);
 
                     // listen for new messages from the broker and send back to peer over stream
