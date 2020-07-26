@@ -59,19 +59,13 @@ async fn main() {
     env_logger::init();
 
     let node_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let node_type: NodeType;
-    let args: Vec<String> = env::args().collect();
-    let _node_type = match args.get(1) {
-        Some(_node_type) => {
-            match &_node_type[..] {
-                "peer" => node_type = NodeType::Peer,
-                "farmer" => node_type = NodeType::Farmer,
-                "gateway" => node_type = NodeType::Gateway,
-                _ => node_type = NodeType::Gateway,
-            };
-        }
-        None => node_type = NodeType::Gateway,
-    };
+    let node_type = env::args()
+        .skip(1)
+        .take(1)
+        .next()
+        .map(|s| s.parse().ok())
+        .flatten()
+        .unwrap_or(NodeType::Gateway);
 
     info!("Starting new Subspace {:?}", node_type);
 

@@ -17,6 +17,7 @@ use std::convert::TryInto;
 use std::fmt::Display;
 use std::io::Write;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::{fmt, mem};
 
 /* Todo
@@ -43,6 +44,19 @@ pub enum NodeType {
     Gateway,
     Peer,
     Farmer,
+}
+
+impl FromStr for NodeType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "peer" => Ok(Self::Peer),
+            "farmer" => Ok(Self::Farmer),
+            "gateway" => Ok(Self::Gateway),
+            _ => Err(()),
+        }
+    }
 }
 
 pub struct Node {
