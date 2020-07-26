@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 /* Todo
  *
@@ -81,7 +80,7 @@ impl NetworkMessage {
 enum NetworkEvent {
     NewPeer {
         peer_addr: SocketAddr,
-        stream: Arc<TcpStream>,
+        stream: TcpStream,
     },
     DroppedPeer {
         peer_addr: SocketAddr,
@@ -243,20 +242,17 @@ fn extract_message(mut input: BytesMut) -> (Option<Bytes>, BytesMut) {
 }
 
 async fn connect(peer_addr: SocketAddr, broker_sender: Sender<NetworkEvent>) {
-    let stream = TcpStream::connect(peer_addr).await.unwrap();
+    let mut stream = TcpStream::connect(peer_addr).await.unwrap();
 
     let mut last_buffer = BytesMut::new();
     let mut current_buffer = BytesMut::with_capacity(16 * 1024 + 2);
     current_buffer.resize(current_buffer.capacity(), 0);
 
-    let stream = Arc::new(stream);
-    let cloned_stream = Arc::clone(&stream);
-    let mut stream = &*stream;
-
     broker_sender
-        .send(NetworkEvent::NewPeer {
-            peer_addr,
-            stream: cloned_stream,
+        .send({
+            let stream = stream.clone();
+
+            NetworkEvent::NewPeer { peer_addr, stream }
         })
         .await;
 
@@ -342,18 +338,15 @@ pub async fn run(
                 let mut current_buffer = BytesMut::with_capacity(16 * 1024 + 2);
                 current_buffer.resize(current_buffer.capacity(), 0);
 
-                let stream = stream.unwrap();
+                let mut stream = stream.unwrap();
                 let peer_addr = stream.peer_addr().unwrap();
-
-                let stream = Arc::new(stream);
-                let cloned_stream = Arc::clone(&stream);
-                let mut stream = &*stream;
 
                 // notify the broker loop of the peer, passing them the send half
                 broker_sender_clone
-                    .send(NetworkEvent::NewPeer {
-                        peer_addr,
-                        stream: cloned_stream,
+                    .send({
+                        let stream = stream.clone();
+
+                        NetworkEvent::NewPeer { peer_addr, stream }
                     })
                     .await;
 
@@ -548,14 +541,16 @@ pub async fn run(
                         ),
                     }
                 }
-                NetworkEvent::NewPeer { peer_addr, stream } => {
+                NetworkEvent::NewPeer {
+                    peer_addr,
+                    mut stream,
+                } => {
                     info!("Broker is adding a new peer");
                     let (client_sender, mut client_receiver) = channel::<NetworkMessage>(32);
                     router.add(peer_addr, client_sender);
 
                     // listen for new messages from the broker and send back to peer over stream
                     async_std::task::spawn(async move {
-                        let mut stream = &*stream;
                         while let Some(message) = client_receiver.next().await {
                             let mut data = message.to_bytes();
                             let len = data.len() as u16;
