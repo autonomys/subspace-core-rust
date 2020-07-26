@@ -12,14 +12,29 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 pub enum ProtocolMessage {
-    BlockRequest(u32), // On sync, main forwards block request to Net for tx by P1
-    BlockRequestFrom(SocketAddr, u32), // P2 receives at Net and forwards request to main for fetch
-    BlockResponseTo(SocketAddr, Option<Block>, u32), // P2 Main forwards response back to Net for tx
-    BlockResponse(Block), // P1 receives at Net and forwards response back to Main
-    BlockProposalRemote(FullBlock, SocketAddr), // Net receives new full block, validates/applies, sends back to net for re-gossip
-    BlockProposalLocal(FullBlock), // A valid full block has been produced locally and needs to be gossiped
-    BlockChallenge([u8; 32]),      // Main sends challenge to solver for evaluation
-    BlockSolution(Solution),       // Solver sends solution back to main for application
+    /// On sync, main forwards block request to Net for tx by P1
+    BlockRequest { index: u32 },
+    /// P2 receives at Net and forwards request to main for fetch
+    BlockRequestFrom { node_addr: SocketAddr, index: u32 },
+    /// P2 Main forwards response back to Net for tx
+    BlockResponseTo {
+        node_addr: SocketAddr,
+        block: Option<Block>,
+        index: u32,
+    },
+    /// P1 receives at Net and forwards response back to Main
+    BlockResponse { block: Block },
+    /// Net receives new full block, validates/applies, sends back to net for re-gossip
+    BlockProposalRemote {
+        full_block: FullBlock,
+        peer_addr: SocketAddr,
+    },
+    /// A valid full block has been produced locally and needs to be gossiped
+    BlockProposalLocal { full_block: FullBlock },
+    /// Main sends challenge to solver for evaluation
+    BlockChallenge { challenge: [u8; 32] },
+    /// Solver sends solution back to main for application
+    BlockSolution { solution: Solution },
 }
 
 pub async fn run(
@@ -39,12 +54,16 @@ pub async fn run(
         loop {
             if let Some(message) = any_to_main_rx.recv().await.ok() {
                 match message {
-                    ProtocolMessage::BlockRequestFrom(addr, index) => {
+                    ProtocolMessage::BlockRequestFrom { node_addr, index } => {
                         let block = ledger.get_block_by_index(index);
-                        let message = ProtocolMessage::BlockResponseTo(addr, block, index);
+                        let message = ProtocolMessage::BlockResponseTo {
+                            node_addr,
+                            block,
+                            index,
+                        };
                         main_to_net_tx.send(message).await;
                     }
-                    ProtocolMessage::BlockResponse(block) => {
+                    ProtocolMessage::BlockResponse { block } => {
                         // validate block
                         if !block.is_valid() {
                             panic!("Received invalid block response while syncing the chain");
@@ -68,7 +87,7 @@ pub async fn run(
 
                                     if mode == NodeType::Farmer || mode == NodeType::Gateway {
                                         main_to_sol_tx
-                                            .send(ProtocolMessage::BlockChallenge(challenge))
+                                            .send(ProtocolMessage::BlockChallenge { challenge })
                                             .await;
                                     }
 
@@ -77,7 +96,9 @@ pub async fn run(
 
                                 // if not then request block at the next index
                                 main_to_net_tx
-                                    .send(ProtocolMessage::BlockRequest(ledger.height))
+                                    .send(ProtocolMessage::BlockRequest {
+                                        index: ledger.height,
+                                    })
                                     .await;
                             }
                             BlockStatus::Pending => {
@@ -89,7 +110,10 @@ pub async fn run(
                             }
                         }
                     }
-                    ProtocolMessage::BlockProposalRemote(full_block, sender_id) => {
+                    ProtocolMessage::BlockProposalRemote {
+                        full_block,
+                        peer_addr,
+                    } => {
                         let block_id = full_block.block.get_id();
 
                         // do you already have this block?
@@ -131,32 +155,32 @@ pub async fn run(
 
                                 // is this the parent of a pending block?
                                 if ledger.is_pending_parent(&block_id) {
-                                let challenge = ledger.apply_pending_block(block_id);
+                                    let challenge = ledger.apply_pending_block(block_id);
 
-                                if mode == NodeType::Farmer || mode == NodeType::Gateway {
-                                    main_to_sol_tx.send(ProtocolMessage::BlockChallenge(challenge)).await;
-                                }
+                                    if mode == NodeType::Farmer || mode == NodeType::Gateway {
+                                        main_to_sol_tx.send(ProtocolMessage::BlockChallenge { challenge }).await;
+                                    }
 
-                                continue;
+                                    continue;
                                 }
 
                                 // else gossip
-                                main_to_net_tx.send(ProtocolMessage::BlockProposalRemote(full_block.clone(), sender_id)).await;
+                                main_to_net_tx.send(ProtocolMessage::BlockProposalRemote { full_block: full_block.clone(), peer_addr }).await;
 
                                 // solve if farming
                                 if mode == NodeType::Farmer || mode == NodeType::Gateway {
-                                main_to_sol_tx.send(ProtocolMessage::BlockChallenge(full_block.block.get_id())).await;
+                                    main_to_sol_tx.send(ProtocolMessage::BlockChallenge { challenge: full_block.block.get_id() }).await;
                                 }
-                            },
+                            }
                             BlockStatus::Pending => {
                                 panic!("Logic error, add_block_by_id should not have been called if the parent is unknown...")
-                            },
+                            }
                             BlockStatus::Invalid => {
                                 info!("Could not apply block to ledger, illegal extension...");
-                            },
+                            }
                         }
                     }
-                    ProtocolMessage::BlockSolution(solution) => {
+                    ProtocolMessage::BlockSolution { solution } => {
                         info!(
                             "Received a solution for challenge: {}",
                             hex::encode(&solution.challenge[0..8])
@@ -189,11 +213,13 @@ pub async fn run(
                                     solution.index,
                                 );
 
-                                let solve = main_to_sol_tx
-                                    .send(ProtocolMessage::BlockChallenge(block.get_id()));
-                                let gossip = main_to_net_tx.send(
-                                    ProtocolMessage::BlockProposalLocal(FullBlock { block, proof }),
-                                );
+                                let solve = main_to_sol_tx.send(ProtocolMessage::BlockChallenge {
+                                    challenge: block.get_id(),
+                                });
+                                let gossip =
+                                    main_to_net_tx.send(ProtocolMessage::BlockProposalLocal {
+                                        full_block: FullBlock { block, proof },
+                                    });
 
                                 join!(solve, gossip);
                             }
@@ -226,7 +252,9 @@ pub async fn run(
                     hex::encode(&genesis_piece_hash[0..8])
                 );
                 main_to_sol_tx
-                    .send(ProtocolMessage::BlockChallenge(genesis_piece_hash))
+                    .send(ProtocolMessage::BlockChallenge {
+                        challenge: genesis_piece_hash,
+                    })
                     .await;
             }
             NodeType::Peer | NodeType::Farmer => {
@@ -235,7 +263,9 @@ pub async fn run(
                 // at that point node will simply listen and solve
                 task::sleep(Duration::from_secs(1)).await;
                 info!("New peer starting ledger sync with gateway");
-                main_to_net_tx.send(ProtocolMessage::BlockRequest(0)).await;
+                main_to_net_tx
+                    .send(ProtocolMessage::BlockRequest { index: 0 })
+                    .await;
             }
         }
     };

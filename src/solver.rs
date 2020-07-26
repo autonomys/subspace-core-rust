@@ -31,11 +31,11 @@ pub async fn run(
     info!("Solve loop is running...");
     loop {
         match main_to_sol_rx.recv().await.unwrap() {
-            ProtocolMessage::BlockChallenge(challenge) => {
+            ProtocolMessage::BlockChallenge { challenge } => {
                 task::sleep(Duration::from_millis(SOLVE_WAIT_TIME_MS)).await;
                 let solution = plot.solve(challenge, PLOT_SIZE).await;
                 sol_to_main_tx
-                    .send(ProtocolMessage::BlockSolution(solution))
+                    .send(ProtocolMessage::BlockSolution { solution })
                     .await;
             }
             _ => {
