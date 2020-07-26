@@ -70,7 +70,7 @@ impl NetworkMessage {
         bincode::serialize(self).unwrap()
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<NetworkMessage, ()> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
         bincode::deserialize(bytes).map_err(|error| {
             debug!("Failed to deserialize network message: {}", error);
             ()
@@ -109,8 +109,11 @@ impl AddrList {
         bincode::serialize(self).unwrap()
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> AddrList {
-        bincode::deserialize(bytes).unwrap()
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
+        bincode::deserialize(bytes).map_err(|error| {
+            debug!("Failed to deserialize address list: {}", error);
+            ()
+        })
     }
 }
 
@@ -424,14 +427,15 @@ pub async fn run(
 
                             // convert binary to peers, for each peer, attempt to connect
                             // need to write another method to add peer on connection
-                            let potential_peers = AddrList::from_bytes(&message.data);
-                            for potential_peer_addr in potential_peers.addrs.iter() {
-                                let potential_peer = potential_peer_addr.clone();
-                                while router.peers.len() < MAX_PEERS {
-                                    let broker_sender = broker_sender.clone();
-                                    async_std::task::spawn(async move {
-                                        connect(potential_peer, broker_sender).await;
-                                    });
+                            if let Ok(potential_peers) = AddrList::from_bytes(&message.data) {
+                                for potential_peer_addr in potential_peers.addrs.iter() {
+                                    let potential_peer = potential_peer_addr.clone();
+                                    while router.peers.len() < MAX_PEERS {
+                                        let broker_sender = broker_sender.clone();
+                                        async_std::task::spawn(async move {
+                                            connect(potential_peer, broker_sender).await;
+                                        });
+                                    }
                                 }
                             }
 
@@ -461,18 +465,20 @@ pub async fn run(
                             }
 
                             // else forward response as protocol message to main
-                            let block = Block::from_bytes(&message.data);
-                            any_to_main_tx
-                                .send(ProtocolMessage::BlockResponse(block))
-                                .await;
+                            if let Ok(block) = Block::from_bytes(&message.data) {
+                                any_to_main_tx
+                                    .send(ProtocolMessage::BlockResponse(block))
+                                    .await;
+                            }
                         }
                         NetworkMessageName::BlockProposal => {
                             // parse and send to main
 
-                            let full_block = FullBlock::from_bytes(&message.data);
-                            let message =
-                                ProtocolMessage::BlockProposalRemote(full_block, peer_addr);
-                            any_to_main_tx.send(message).await;
+                            if let Ok(full_block) = FullBlock::from_bytes(&message.data) {
+                                let message =
+                                    ProtocolMessage::BlockProposalRemote(full_block, peer_addr);
+                                any_to_main_tx.send(message).await;
+                            }
                         }
                     }
                 }

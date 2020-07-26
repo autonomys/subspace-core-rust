@@ -58,8 +58,11 @@ impl Block {
         bincode::serialize(self).unwrap()
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Block {
-        bincode::deserialize(bytes).unwrap()
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
+        bincode::deserialize(bytes).map_err(|error| {
+            debug!("Failed to deserialize Block: {}", error);
+            ()
+        })
     }
 
     pub fn get_id(&self) -> [u8; 32] {
@@ -134,8 +137,11 @@ impl Proof {
         bincode::serialize(self).unwrap()
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Proof {
-        bincode::deserialize(bytes).unwrap()
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
+        bincode::deserialize(bytes).map_err(|error| {
+            debug!("Failed to deserialize proof: {}", error);
+            ()
+        })
     }
 
     pub fn get_id(&self) -> [u8; 32] {
@@ -173,8 +179,11 @@ impl FullBlock {
         bincode::serialize(self).unwrap()
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> FullBlock {
-        bincode::deserialize(bytes).unwrap()
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
+        bincode::deserialize(bytes).map_err(|error| {
+            debug!("Failed to deserialize full block: {}", error);
+            ()
+        })
     }
 
     pub fn is_valid(
@@ -495,7 +504,7 @@ mod tests {
         );
         let block_id = block.get_id();
         let block_vec = block.to_bytes();
-        let block_copy = Block::from_bytes(&block_vec);
+        let block_copy = Block::from_bytes(&block_vec).unwrap();
         let block_copy_id = block_copy.get_id();
         block.print();
         assert_eq!(block_id, block_copy_id);
@@ -508,7 +517,7 @@ mod tests {
         let proof = Proof::new(encoding, merkle_proofs[17].clone(), 17u64);
         let proof_id = proof.get_id();
         let proof_vec = proof.to_bytes();
-        let proof_copy = Proof::from_bytes(&proof_vec);
+        let proof_copy = Proof::from_bytes(&proof_vec).unwrap();
         let proof_copy_id = proof_copy.get_id();
         proof.print();
         assert_eq!(proof_id, proof_copy_id);
