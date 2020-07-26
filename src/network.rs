@@ -241,12 +241,46 @@ fn extract_message(mut input: BytesMut) -> (Option<Bytes>, BytesMut) {
     }
 }
 
-async fn connect(peer_addr: SocketAddr, broker_sender: Sender<NetworkEvent>) {
-    let mut stream = TcpStream::connect(peer_addr).await.unwrap();
+fn read_messages(mut stream: TcpStream) -> Receiver<Bytes> {
+    let (messages_sender, messages_receiver) = channel::<Bytes>(10);
 
-    let mut last_buffer = BytesMut::new();
-    let mut current_buffer = BytesMut::with_capacity(16 * 1024 + 2);
-    current_buffer.resize(current_buffer.capacity(), 0);
+    async_std::task::spawn(async move {
+        let mut last_buffer = BytesMut::new();
+        let mut current_buffer = BytesMut::with_capacity(16 * 1024 + 2);
+        current_buffer.resize(current_buffer.capacity(), 0);
+
+        // TODO: Handle error?
+        while let Ok(read_size) = stream.read(&mut current_buffer).await {
+            if read_size == 0 {
+                // peer disconnected, exit the loop
+                break;
+            }
+
+            let mut buffer = BytesMut::with_capacity(last_buffer.len() + read_size);
+            if !last_buffer.is_empty() {
+                buffer.extend_from_slice(&last_buffer);
+            }
+            buffer.extend_from_slice(&current_buffer[..read_size]);
+
+            last_buffer = loop {
+                match extract_message(buffer) {
+                    (Some(message), remaining_buffer) => {
+                        buffer = remaining_buffer;
+                        messages_sender.send(message).await;
+                    }
+                    (None, remaining_buffer) => {
+                        break remaining_buffer;
+                    }
+                }
+            }
+        }
+    });
+
+    messages_receiver
+}
+
+async fn connect(peer_addr: SocketAddr, broker_sender: Sender<NetworkEvent>) {
+    let stream = TcpStream::connect(peer_addr).await.unwrap();
 
     broker_sender
         .send({
@@ -256,34 +290,16 @@ async fn connect(peer_addr: SocketAddr, broker_sender: Sender<NetworkEvent>) {
         })
         .await;
 
-    while let Ok(read_size) = stream.read(&mut current_buffer).await {
-        if read_size == 0 {
-            // peer disconnected, exit the loop
-            break;
-        }
+    let mut messages_receiver = read_messages(stream);
 
-        let mut buffer = BytesMut::with_capacity(last_buffer.len() + read_size);
-        if !last_buffer.is_empty() {
-            buffer.extend_from_slice(&last_buffer);
-        }
-        buffer.extend_from_slice(&current_buffer[..read_size]);
-
-        last_buffer = loop {
-            match extract_message(buffer) {
-                (Some(message), remaining_buffer) => {
-                    buffer = remaining_buffer;
-                    let message = NetworkMessage::from_bytes(&message);
-                    // info!("{:?}", message);
-                    broker_sender
-                        .send(NetworkEvent::InboundMessage { peer_addr, message })
-                        .await;
-                }
-                (None, remaining_buffer) => {
-                    break remaining_buffer;
-                }
-            }
-        }
+    while let Some(message) = messages_receiver.next().await {
+        let message = NetworkMessage::from_bytes(&message);
+        // info!("{:?}", message);
+        broker_sender
+            .send(NetworkEvent::InboundMessage { peer_addr, message })
+            .await;
     }
+
     broker_sender
         .send(NetworkEvent::DroppedPeer { peer_addr })
         .await;
@@ -334,11 +350,7 @@ pub async fn run(
             async_std::task::spawn(async move {
                 info!("New inbound TCP connection initiated");
 
-                let mut last_buffer = BytesMut::new();
-                let mut current_buffer = BytesMut::with_capacity(16 * 1024 + 2);
-                current_buffer.resize(current_buffer.capacity(), 0);
-
-                let mut stream = stream.unwrap();
+                let stream = stream.unwrap();
                 let peer_addr = stream.peer_addr().unwrap();
 
                 // notify the broker loop of the peer, passing them the send half
@@ -350,34 +362,16 @@ pub async fn run(
                     })
                     .await;
 
-                while let Ok(read_size) = stream.read(&mut current_buffer).await {
-                    if read_size == 0 {
-                        // peer disconnected, exit the loop
-                        break;
-                    }
+                let mut messages_receiver = read_messages(stream);
 
-                    let mut buffer = BytesMut::with_capacity(last_buffer.len() + read_size);
-                    if !last_buffer.is_empty() {
-                        buffer.extend_from_slice(&last_buffer);
-                    }
-                    buffer.extend_from_slice(&current_buffer[..read_size]);
-
-                    last_buffer = loop {
-                        match extract_message(buffer) {
-                            (Some(message), remaining_buffer) => {
-                                buffer = remaining_buffer;
-                                let message = NetworkMessage::from_bytes(&message);
-                                // info!("{:?}", message);
-                                broker_sender_clone
-                                    .send(NetworkEvent::InboundMessage { peer_addr, message })
-                                    .await;
-                            }
-                            (None, remaining_buffer) => {
-                                break remaining_buffer;
-                            }
-                        }
-                    }
+                while let Some(message) = messages_receiver.next().await {
+                    let message = NetworkMessage::from_bytes(&message);
+                    // info!("{:?}", message);
+                    broker_sender_clone
+                        .send(NetworkEvent::InboundMessage { peer_addr, message })
+                        .await;
                 }
+
                 broker_sender_clone
                     .send(NetworkEvent::DroppedPeer { peer_addr })
                     .await;
