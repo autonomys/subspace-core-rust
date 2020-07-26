@@ -326,7 +326,7 @@ async fn on_connected(
 }
 
 pub async fn run(
-    mode: NodeType,
+    node_type: NodeType,
     node_id: NodeID,
     local_addr: SocketAddr,
     any_to_main_tx: Sender<ProtocolMessage>,
@@ -336,15 +336,12 @@ pub async fn run(
     let (broker_sender, mut broker_receiver) = channel::<NetworkEvent>(32);
 
     // create the tcp listener
-    let socket: TcpListener;
-    match mode {
-        NodeType::Gateway => {
-            socket = TcpListener::bind(gateway_addr).await.unwrap();
-        }
-        _ => {
-            socket = TcpListener::bind(local_addr).await.unwrap();
-        }
-    }
+    let addr = if matches!(node_type, NodeType::Gateway) {
+        gateway_addr
+    } else {
+        local_addr
+    };
+    let socket = TcpListener::bind(addr).await.unwrap();
 
     let mut connections = socket.incoming();
     info!("Network is listening on TCP socket for inbound connections");
@@ -567,7 +564,7 @@ pub async fn run(
 
     let network_startup = async {
         // if not gateway, connect to the gateway
-        if mode != NodeType::Gateway {
+        if node_type != NodeType::Gateway {
             info!("Connecting to gateway node");
 
             let broker_sender = broker_sender.clone();
