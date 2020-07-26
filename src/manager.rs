@@ -11,6 +11,7 @@ use solver::Solution;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+// TODO: Split this into multiple enums
 pub enum ProtocolMessage {
     /// On sync, main forwards block request to Net for tx by P1
     BlockRequest { index: u32 },
