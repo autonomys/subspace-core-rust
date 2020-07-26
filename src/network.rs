@@ -4,7 +4,8 @@ use super::*;
 use async_std::net::{TcpListener, TcpStream};
 use async_std::prelude::*;
 use async_std::sync::{channel, Receiver, Sender};
-use bytes::BytesMut;
+use bytes::buf::BufMutExt;
+use bytes::{Bytes, BytesMut};
 use futures::join;
 use ledger::{Block, FullBlock};
 use log::*;
@@ -80,8 +81,10 @@ impl Display for Message {
 }
 
 impl Message {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap()
+    pub fn to_bytes(&self) -> Bytes {
+        let mut writer = BytesMut::new().writer();
+        bincode::serialize_into(&mut writer, self).unwrap();
+        writer.into_inner().freeze()
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
@@ -115,7 +118,7 @@ enum NetworkEvent {
 
 pub struct Router {
     node_id: NodeID,
-    connections: HashMap<SocketAddr, Sender<Message>>,
+    connections: HashMap<SocketAddr, Sender<Bytes>>,
     peers: HashSet<SocketAddr>,
 }
 
@@ -130,7 +133,7 @@ impl Router {
     }
 
     /// add a new connection, possibly add a new peer
-    pub fn add(&mut self, node_addr: SocketAddr, sender: Sender<Message>) {
+    pub fn add(&mut self, node_addr: SocketAddr, sender: Sender<Bytes>) {
         self.connections.insert(node_addr, sender);
 
         // if peers is low, add to peers
@@ -141,7 +144,7 @@ impl Router {
     }
 
     /// get a connection by node id
-    pub fn get_connection(&self, node_addr: &SocketAddr) -> &Sender<Message> {
+    pub fn get_connection(&self, node_addr: &SocketAddr) -> &Sender<Bytes> {
         self.connections.get(node_addr).unwrap()
     }
 
@@ -157,25 +160,34 @@ impl Router {
 
     /// send a message to all peers
     pub async fn gossip(&self, message: Message) {
+        let bytes = message.to_bytes();
         for node_addr in self.peers.iter() {
-            self.send(node_addr, message.clone()).await;
+            info!("Sending a {} message to {}", message, node_addr);
+            self.send_bytes(node_addr, bytes.clone()).await;
         }
     }
 
     /// send a message to all but one peer (who sent you the message)
     pub async fn regossip(&self, sender: &SocketAddr, message: Message) {
+        let bytes = message.to_bytes();
         for node_addr in self.peers.iter() {
             if node_addr != sender {
-                self.send(node_addr, message.clone()).await;
+                info!("Sending a {} message to {}", message, node_addr);
+                self.send_bytes(node_addr, bytes.clone()).await;
             }
         }
     }
 
     /// send a message to specific node by node_id
     pub async fn send(&self, receiver: &SocketAddr, message: Message) {
-        let client_sender = self.get_connection(receiver);
         info!("Sending a {} message to {}", message, receiver);
-        client_sender.send(message).await
+        self.send_bytes(receiver, message.to_bytes()).await
+    }
+
+    /// send a message to specific node by node_id
+    async fn send_bytes(&self, receiver: &SocketAddr, bytes: Bytes) {
+        let client_sender = self.get_connection(receiver);
+        client_sender.send(bytes).await
     }
 
     /// get a peer at random
@@ -485,18 +497,15 @@ pub async fn run(
                     mut stream,
                 } => {
                     info!("Broker is adding a new peer");
-                    let (client_sender, mut client_receiver) = channel::<Message>(32);
+                    let (client_sender, mut client_receiver) = channel::<Bytes>(32);
                     router.add(peer_addr, client_sender);
 
                     // listen for new messages from the broker and send back to peer over stream
                     async_std::task::spawn(async move {
-                        while let Some(message) = client_receiver.next().await {
-                            let mut data = message.to_bytes();
-                            let len = data.len() as u16;
-                            let header = utils::u16_to_bytes_le(len).to_vec();
-                            data.insert(0, header[0]);
-                            data.insert(1, header[1]);
-                            stream.write_all(&data).await.unwrap();
+                        while let Some(bytes) = client_receiver.next().await {
+                            let length = bytes.len() as u16;
+                            stream.write_all(&length.to_le_bytes()).await.unwrap();
+                            stream.write_all(&bytes).await.unwrap();
                         }
                     });
                 }
