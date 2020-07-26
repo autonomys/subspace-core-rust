@@ -4,7 +4,7 @@ use super::*;
 use async_std::net::{TcpListener, TcpStream};
 use async_std::prelude::*;
 use async_std::sync::{channel, Receiver, Sender};
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use futures::join;
 use ledger::{Block, FullBlock};
 use log::*;
@@ -12,6 +12,8 @@ use manager::ProtocolMessage;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::io::Write;
+use std::mem;
 use std::net::SocketAddr;
 
 /* Todo
@@ -222,20 +224,20 @@ impl Router {
     }
 }
 
-/// Returns (Option(message_bytes), remaining_buffer)
-fn extract_message(mut input: BytesMut) -> (Option<Bytes>, BytesMut) {
+/// Returns Option<(message_bytes, consumed_bytes)>
+fn extract_message(input: &[u8]) -> Option<(Bytes, usize)> {
     if input.len() <= 2 {
-        (None, input)
+        None
     } else {
-        let message_length = u16::from_le_bytes(input[..2].try_into().unwrap()) as usize;
+        let (message_length_bytes, remainder) = input.split_at(2);
+        let message_length = u16::from_le_bytes(message_length_bytes.try_into().unwrap()) as usize;
 
-        if input[2..].len() < message_length {
-            (None, input)
+        if remainder.len() < message_length {
+            None
         } else {
-            let mut remaining_buffer = input.split_off(2);
-            let message_bytes = remaining_buffer.split_to(message_length).freeze();
+            let message_bytes = Bytes::copy_from_slice(&remainder[..message_length]);
 
-            (Some(message_bytes), remaining_buffer)
+            Some((message_bytes, 2 + message_length))
         }
     }
 }
@@ -244,34 +246,45 @@ fn read_messages(mut stream: TcpStream) -> Receiver<Bytes> {
     let (messages_sender, messages_receiver) = channel::<Bytes>(10);
 
     async_std::task::spawn(async move {
-        let mut last_buffer = BytesMut::new();
-        let mut current_buffer = BytesMut::with_capacity(16 * 1024 + 2);
-        current_buffer.resize(current_buffer.capacity(), 0);
+        let header_length = 2;
+        let max_message_length = 16 * 1024;
+        // We support up to 16 kiB message + 2 byte header, so since we may have message across 2
+        // read buffers, allocate enough space to contain up to 2 such messages
+        let mut buffer = BytesMut::with_capacity((header_length + max_message_length) * 2);
+        let mut buffer_contents_bytes = 0;
+        buffer.resize(buffer.capacity(), 0);
+        // Auxiliary buffer that we will swap with primary on each iteration
+        let mut aux_buffer = BytesMut::with_capacity((header_length + max_message_length) * 2);
+        aux_buffer.resize(aux_buffer.capacity(), 0);
 
         // TODO: Handle error?
-        while let Ok(read_size) = stream.read(&mut current_buffer).await {
+        while let Ok(read_size) = stream.read(&mut buffer[buffer_contents_bytes..]).await {
             if read_size == 0 {
                 // peer disconnected, exit the loop
                 break;
             }
 
-            let mut buffer = BytesMut::with_capacity(last_buffer.len() + read_size);
-            if !last_buffer.is_empty() {
-                buffer.extend_from_slice(&last_buffer);
-            }
-            buffer.extend_from_slice(&current_buffer[..read_size]);
+            buffer_contents_bytes += read_size;
 
-            last_buffer = loop {
-                match extract_message(buffer) {
-                    (Some(message), remaining_buffer) => {
-                        buffer = remaining_buffer;
-                        messages_sender.send(message).await;
-                    }
-                    (None, remaining_buffer) => {
-                        break remaining_buffer;
-                    }
-                }
+            // Read as many messages as possible starting from the beginning
+            let mut offset = 0;
+            while let Some((message, consumed_bytes)) =
+                extract_message(&buffer[offset..buffer_contents_bytes])
+            {
+                messages_sender.send(message).await;
+                // Move cursor forward
+                offset += consumed_bytes;
             }
+
+            // Copy unprocessed remainder from `buffer` to `tmp_buffer`
+            aux_buffer
+                .as_mut()
+                .write_all(&buffer[offset..buffer_contents_bytes])
+                .unwrap();
+            // Decrease useful contents length by processed amount
+            buffer_contents_bytes -= offset;
+            // Swap buffers to avoid additional copying
+            mem::swap(&mut aux_buffer, &mut buffer);
         }
     });
 
