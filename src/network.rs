@@ -9,6 +9,7 @@ use futures::join;
 use ledger::{Block, FullBlock};
 use log::*;
 use manager::ProtocolMessage;
+use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
@@ -162,7 +163,7 @@ impl Router {
     /// send a message to all peers
     pub async fn gossip(&self, message: NetworkMessage) {
         for node_addr in self.peers.iter() {
-            self.send(&node_addr, message.clone()).await;
+            self.send(node_addr, message.clone()).await;
         }
     }
 
@@ -170,7 +171,7 @@ impl Router {
     pub async fn regossip(&self, sender: &SocketAddr, message: NetworkMessage) {
         for node_addr in self.peers.iter() {
             if node_addr != sender {
-                self.send(&node_addr, message.clone()).await;
+                self.send(node_addr, message.clone()).await;
             }
         }
     }
@@ -183,21 +184,17 @@ impl Router {
     }
 
     /// get a peer at random
-    pub fn get_random_peer(&self) -> SocketAddr {
-        let peer_count = self.peers.len();
-        let peer_index = rand::random::<usize>() % peer_count;
-        *self.peers.iter().skip(peer_index).next().unwrap()
+    pub fn get_random_peer(&self) -> Option<SocketAddr> {
+        self.peers.iter().choose(&mut rand::thread_rng()).copied()
     }
 
-    /// get a peer at random exluding a specific peer
-    pub fn get_random_peer_excluding(&self, node_addr: SocketAddr) -> SocketAddr {
-        let mut peer_addr = self.get_random_peer();
-
-        while peer_addr == node_addr {
-            peer_addr = self.get_random_peer();
-        }
-
-        peer_addr
+    /// get a peer at random excluding a specific peer
+    pub fn get_random_peer_excluding(&self, node_addr: SocketAddr) -> Option<SocketAddr> {
+        self.peers
+            .iter()
+            .filter(|&peer_addr| !peer_addr.eq(&node_addr))
+            .choose(&mut rand::thread_rng())
+            .copied()
     }
 
     // retrieve the socket addr for each peer, except the one asking
@@ -458,9 +455,10 @@ pub async fn run(
                                     data: message.data[0..4].to_vec(),
                                 };
 
-                                let new_peer = router.get_random_peer_excluding(peer_addr);
-
-                                router.send(&new_peer, request).await;
+                                if let Some(new_peer) = router.get_random_peer_excluding(peer_addr)
+                                {
+                                    router.send(&new_peer, request).await;
+                                }
                                 continue;
                             }
 
@@ -489,14 +487,14 @@ pub async fn run(
                             // ledger requested a block at a given index
                             // send a block_request to one peer chosen at random from gossip group
 
-                            let peer = router.get_random_peer();
+                            if let Some(peer) = router.get_random_peer() {
+                                let request = NetworkMessage {
+                                    name: NetworkMessageName::BlockRequest,
+                                    data: index.to_le_bytes().to_vec(),
+                                };
 
-                            let request = NetworkMessage {
-                                name: NetworkMessageName::BlockRequest,
-                                data: index.to_le_bytes().to_vec(),
-                            };
-
-                            router.send(&peer, request).await;
+                                router.send(&peer, request).await;
+                            }
                         }
                         ProtocolMessage::BlockResponseTo(node_addr, block_option, block_index) => {
                             // send a block back to a peer that has requested it from you
