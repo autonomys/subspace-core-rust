@@ -7,13 +7,13 @@ use async_std::sync::{channel, Receiver, Sender};
 use bytes::{Buf, Bytes, BytesMut};
 use futures::join;
 use ledger::{Block, FullBlock};
+use log::*;
 use manager::ProtocolMessage;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use log::*;
 
 /* Todo
  *
@@ -433,7 +433,6 @@ pub async fn run(
                             router.send(&peer_addr, response).await;
                         }
                         NetworkMessageName::PeersResponse => {
-
                             // ToDo: match responses to request id, else ignore
 
                             // convert binary to peers, for each peer, attempt to connect
@@ -542,11 +541,9 @@ pub async fn run(
 
                             router.gossip(message).await;
                         }
-                        _ => {
-                            panic!(
+                        _ => panic!(
                             "Network protocol listener has received an unknown protocol message!"
-                        )
-                        }
+                        ),
                     }
                 }
                 NetworkEvent::NewPeer { peer_addr, stream } => {

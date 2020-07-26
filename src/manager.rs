@@ -5,11 +5,11 @@ use async_std::sync::{Receiver, Sender};
 use async_std::task;
 use futures::join;
 use ledger::{Block, BlockStatus, FullBlock, Proof};
+use log::*;
 use network::NodeType;
 use solver::Solution;
 use std::net::SocketAddr;
 use std::time::Duration;
-use log::*;
 
 pub enum ProtocolMessage {
     BlockRequest(u32), // On sync, main forwards block request to Net for tx by P1
@@ -94,9 +94,7 @@ pub async fn run(
 
                         // do you already have this block?
                         if ledger.is_block_applied(&block_id) {
-                            info!(
-                                "Received a block proposal via gossip for known block, ignoring"
-                            );
+                            info!("Received a block proposal via gossip for known block, ignoring");
                             continue;
                         }
 

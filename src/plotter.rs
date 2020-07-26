@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
-use log::*;
 use super::*;
 use crate::plot::Plot;
 use async_std::task;
 use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, StreamExt};
 use indicatif::ProgressBar;
+use log::*;
 use rayon::prelude::*;
 use rug::integer::Order;
 use rug::Integer;
@@ -122,10 +122,7 @@ pub async fn plot(node_id: NodeID, genesis_piece: Piece) -> Plot {
     let average_plot_time =
         (total_plot_time.as_nanos() / PLOT_SIZE as u128) as f32 / (1000f32 * 1000f32);
 
-    info!(
-        "Average plot time is {:.3} ms per piece",
-        average_plot_time
-    );
+    info!("Average plot time is {:.3} ms per piece", average_plot_time);
 
     info!(
         "Total plot time is {:.3} minutes",

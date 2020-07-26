@@ -3,11 +3,11 @@
 use super::*;
 use ed25519_dalek::PublicKey;
 use ed25519_dalek::Signature;
+use log::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
-use log::*;
 
 /* ToDo
  *

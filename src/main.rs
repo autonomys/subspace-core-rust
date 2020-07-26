@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
-use log::*;
 use async_std::sync::channel;
 use async_std::task;
 use futures::join;
+use log::*;
 use manager::ProtocolMessage;
 use network::NodeType;
 use std::env;

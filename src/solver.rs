@@ -3,9 +3,9 @@
 use super::*;
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
+use log::*;
 use manager::ProtocolMessage;
 use std::time::Duration;
-use log::*;
 
 /* ToDo
  *
