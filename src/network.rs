@@ -345,7 +345,7 @@ pub async fn run(
     // receives new connection requests over the TCP socket
     let new_connection_loop = async {
         while let Some(stream) = connections.next().await {
-            let broker_sender_clone = broker_sender.clone();
+            let broker_sender = broker_sender.clone();
 
             async_std::task::spawn(async move {
                 info!("New inbound TCP connection initiated");
@@ -354,7 +354,7 @@ pub async fn run(
                 let peer_addr = stream.peer_addr().unwrap();
 
                 // notify the broker loop of the peer, passing them the send half
-                broker_sender_clone
+                broker_sender
                     .send({
                         let stream = stream.clone();
 
@@ -367,12 +367,12 @@ pub async fn run(
                 while let Some(message) = messages_receiver.next().await {
                     let message = NetworkMessage::from_bytes(&message);
                     // info!("{:?}", message);
-                    broker_sender_clone
+                    broker_sender
                         .send(NetworkEvent::InboundMessage { peer_addr, message })
                         .await;
                 }
 
-                broker_sender_clone
+                broker_sender
                     .send(NetworkEvent::DroppedPeer { peer_addr })
                     .await;
             });
@@ -430,9 +430,9 @@ pub async fn run(
                             for potential_peer_addr in potential_peers.addrs.iter() {
                                 let potential_peer = potential_peer_addr.clone();
                                 while router.peers.len() < MAX_PEERS {
-                                    let broker_sender_clone = broker_sender.clone();
+                                    let broker_sender = broker_sender.clone();
                                     async_std::task::spawn(async move {
-                                        connect(potential_peer, broker_sender_clone).await;
+                                        connect(potential_peer, broker_sender).await;
                                     });
                                 }
                             }
@@ -568,9 +568,9 @@ pub async fn run(
         if mode != NodeType::Gateway {
             info!("Connecting to gateway node");
 
-            let broker_sender_clone = broker_sender.clone();
+            let broker_sender = broker_sender.clone();
             async_std::task::spawn(async move {
-                connect(gateway_addr, broker_sender_clone).await;
+                connect(gateway_addr, broker_sender).await;
             });
         }
     };
