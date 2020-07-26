@@ -16,7 +16,6 @@ use std::convert::TryInto;
 use std::fmt::Display;
 use std::io::Write;
 use std::net::SocketAddr;
-use std::ops::Deref;
 use std::{fmt, mem};
 
 /* Todo
@@ -56,7 +55,7 @@ pub enum Message {
     Ping,
     Pong,
     PeersRequest,
-    PeersResponse { contacts: AddrList },
+    PeersResponse { contacts: Vec<SocketAddr> },
     BlockRequest { index: u32 },
     BlockResponse { index: u32, block: Option<Block> },
     BlockProposal { full_block: FullBlock },
@@ -112,17 +111,6 @@ enum NetworkEvent {
     OutboundMessage {
         message: ProtocolMessage,
     },
-}
-
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
-pub struct AddrList(Vec<SocketAddr>);
-
-impl Deref for AddrList {
-    type Target = Vec<SocketAddr>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
 }
 
 pub struct Router {
@@ -205,15 +193,12 @@ impl Router {
     }
 
     // retrieve the socket addr for each peer, except the one asking
-    pub fn get_contacts(&self, exception: &SocketAddr) -> AddrList {
-        let contacts = self
-            .peers
+    pub fn get_contacts(&self, exception: &SocketAddr) -> Vec<SocketAddr> {
+        self.peers
             .iter()
             .filter(|&peer| !peer.eq(&exception))
             .copied()
-            .collect();
-
-        AddrList(contacts)
+            .collect()
     }
 }
 
