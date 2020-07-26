@@ -269,10 +269,11 @@ async fn connect(peer_addr: SocketAddr, broker_sender: Sender<NetworkEvent>) {
             break;
         }
 
-        let mut buffer = BytesMut::from(&current_buffer[..read_size]);
+        let mut buffer = BytesMut::with_capacity(last_buffer.len() + read_size);
         if !last_buffer.is_empty() {
             buffer.extend_from_slice(&last_buffer);
         }
+        buffer.extend_from_slice(&current_buffer[..read_size]);
 
         last_buffer = loop {
             match extract_message(buffer) {
@@ -365,10 +366,11 @@ pub async fn run(
                         break;
                     }
 
-                    let mut buffer = BytesMut::from(&current_buffer[..read_size]);
+                    let mut buffer = BytesMut::with_capacity(last_buffer.len() + read_size);
                     if !last_buffer.is_empty() {
                         buffer.extend_from_slice(&last_buffer);
                     }
+                    buffer.extend_from_slice(&current_buffer[..read_size]);
 
                     last_buffer = loop {
                         match extract_message(buffer) {
