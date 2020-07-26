@@ -293,7 +293,14 @@ fn read_messages(mut stream: TcpStream) -> Receiver<Bytes> {
 
 async fn connect(peer_addr: SocketAddr, broker_sender: Sender<NetworkEvent>) {
     let stream = TcpStream::connect(peer_addr).await.unwrap();
+    on_connected(peer_addr, stream, broker_sender).await;
+}
 
+async fn on_connected(
+    peer_addr: SocketAddr,
+    stream: TcpStream,
+    broker_sender: Sender<NetworkEvent>,
+) {
     broker_sender
         .send({
             let stream = stream.clone();
@@ -364,29 +371,7 @@ pub async fn run(
 
                 let stream = stream.unwrap();
                 let peer_addr = stream.peer_addr().unwrap();
-
-                // notify the broker loop of the peer, passing them the send half
-                broker_sender
-                    .send({
-                        let stream = stream.clone();
-
-                        NetworkEvent::NewPeer { peer_addr, stream }
-                    })
-                    .await;
-
-                let mut messages_receiver = read_messages(stream);
-
-                while let Some(message) = messages_receiver.next().await {
-                    let message = NetworkMessage::from_bytes(&message);
-                    // info!("{:?}", message);
-                    broker_sender
-                        .send(NetworkEvent::InboundMessage { peer_addr, message })
-                        .await;
-                }
-
-                broker_sender
-                    .send(NetworkEvent::DroppedPeer { peer_addr })
-                    .await;
+                on_connected(peer_addr, stream, broker_sender).await;
             });
         }
     };
