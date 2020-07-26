@@ -4,7 +4,7 @@ use super::*;
 use async_std::net::{TcpListener, TcpStream};
 use async_std::prelude::*;
 use async_std::sync::{channel, Receiver, Sender};
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use futures::join;
 use ledger::{Block, FullBlock};
 use log::*;
@@ -70,8 +70,11 @@ impl NetworkMessage {
         bincode::serialize(self).unwrap()
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> NetworkMessage {
-        bincode::deserialize(bytes).unwrap()
+    pub fn from_bytes(bytes: &[u8]) -> Result<NetworkMessage, ()> {
+        bincode::deserialize(bytes).map_err(|error| {
+            debug!("Failed to deserialize network message: {}", error);
+            ()
+        })
     }
 
     pub fn get_id(&self) -> [u8; 32] {
@@ -225,7 +228,7 @@ impl Router {
 }
 
 /// Returns Option<(message_bytes, consumed_bytes)>
-fn extract_message(input: &[u8]) -> Option<(Bytes, usize)> {
+fn extract_message(input: &[u8]) -> Option<(Result<NetworkMessage, ()>, usize)> {
     if input.len() <= 2 {
         None
     } else {
@@ -235,15 +238,15 @@ fn extract_message(input: &[u8]) -> Option<(Bytes, usize)> {
         if remainder.len() < message_length {
             None
         } else {
-            let message_bytes = Bytes::copy_from_slice(&remainder[..message_length]);
+            let message = NetworkMessage::from_bytes(&remainder[..message_length]);
 
-            Some((message_bytes, 2 + message_length))
+            Some((message, 2 + message_length))
         }
     }
 }
 
-fn read_messages(mut stream: TcpStream) -> Receiver<Bytes> {
-    let (messages_sender, messages_receiver) = channel::<Bytes>(10);
+fn read_messages(mut stream: TcpStream) -> Receiver<Result<NetworkMessage, ()>> {
+    let (messages_sender, messages_receiver) = channel(10);
 
     async_std::task::spawn(async move {
         let header_length = 2;
@@ -312,11 +315,12 @@ async fn on_connected(
     let mut messages_receiver = read_messages(stream);
 
     while let Some(message) = messages_receiver.next().await {
-        let message = NetworkMessage::from_bytes(&message);
-        // info!("{:?}", message);
-        broker_sender
-            .send(NetworkEvent::InboundMessage { peer_addr, message })
-            .await;
+        if let Ok(message) = message {
+            // info!("{:?}", message);
+            broker_sender
+                .send(NetworkEvent::InboundMessage { peer_addr, message })
+                .await;
+        }
     }
 
     broker_sender
