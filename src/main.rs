@@ -44,7 +44,8 @@ use subspace_core_rust::*;
  *
 */
 
-fn main() {
+#[async_std::main]
+async fn main() {
     /*
      * Startup: cargo run <node_type> <custom_path>
      *
@@ -58,21 +59,15 @@ fn main() {
     env_logger::init();
 
     let node_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let mode: NodeType;
-    let args: Vec<String> = env::args().collect();
-    let _node_type = match args.get(1) {
-        Some(_node_type) => {
-            match &_node_type[..] {
-                "peer" => mode = NodeType::Peer,
-                "farmer" => mode = NodeType::Farmer,
-                "gateway" => mode = NodeType::Gateway,
-                _ => mode = NodeType::Gateway,
-            };
-        }
-        None => mode = NodeType::Gateway,
-    };
+    let node_type = env::args()
+        .skip(1)
+        .take(1)
+        .next()
+        .map(|s| s.parse().ok())
+        .flatten()
+        .unwrap_or(NodeType::Gateway);
 
-    info!("Starting new Subspace {:?}", mode);
+    info!("Starting new Subspace {:?}", node_type);
 
     // derive node identity
     let keys = crypto::gen_keys_random();
@@ -95,42 +90,39 @@ fn main() {
     let sol_to_main_tx = any_to_main_tx.clone();
 
     // only plot/solve if gateway or farmer
-    if mode == NodeType::Farmer || mode == NodeType::Gateway {
-        task::block_on(async move {
-            // plot space (slow...)
-            let mut plot = plotter::plot(node_id, genesis_piece).await;
+    if node_type == NodeType::Farmer || node_type == NodeType::Gateway {
+        // plot space (slow...)
+        let mut plot = plotter::plot(node_id, genesis_piece).await;
 
-            // init solve loop
-            task::spawn(async move {
-                solver::run(main_to_sol_rx, sol_to_main_tx, &mut plot).await;
-            });
+        // init solve loop
+        task::spawn(async move {
+            solver::run(main_to_sol_rx, sol_to_main_tx, &mut plot).await;
         });
     }
 
     // manager loop
-    let main = task::spawn(async move {
-        manager::run(
-            mode,
-            genesis_piece_hash,
-            binary_public_key,
-            keys,
-            merkle_proofs,
-            tx_payload,
-            &mut ledger,
-            any_to_main_rx,
-            main_to_net_tx,
-            main_to_sol_tx,
-        )
-        .await;
-    });
+    let main = manager::run(
+        node_type,
+        genesis_piece_hash,
+        binary_public_key,
+        keys,
+        merkle_proofs,
+        tx_payload,
+        &mut ledger,
+        any_to_main_rx,
+        main_to_net_tx,
+        main_to_sol_tx,
+    );
 
     // network loop
-    let net = task::spawn(async move {
-        network::run(mode, node_id, node_addr, any_to_main_tx, main_to_net_rx).await;
-    });
+    let net = network::run(
+        node_type,
+        node_id,
+        node_addr,
+        any_to_main_tx,
+        main_to_net_rx,
+    );
 
     // join threads
-    task::block_on(async move {
-        join!(main, net);
-    });
+    join!(main, net);
 }
