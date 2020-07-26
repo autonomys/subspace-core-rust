@@ -266,7 +266,7 @@ fn read_messages(mut stream: TcpStream) -> Receiver<Result<Message, ()>> {
                 offset += consumed_bytes;
             }
 
-            // Copy unprocessed remainder from `buffer` to `tmp_buffer`
+            // Copy unprocessed remainder from `buffer` to `aux_buffer`
             aux_buffer
                 .as_mut()
                 .write_all(&buffer[offset..buffer_contents_bytes])
