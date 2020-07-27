@@ -1,3 +1,4 @@
+pub mod console;
 pub mod crypto;
 pub mod ledger;
 pub mod manager;

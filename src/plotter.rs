@@ -76,25 +76,26 @@ pub async fn plot(node_id: NodeID, genesis_piece: Piece) -> Plot {
     let layers = ENCODING_LAYERS_TEST;
     let sloth = sloth::Sloth::init(prime_size);
 
-    let bar = ProgressBar::new(PLOT_SIZE as u64);
+    // let bar = ProgressBar::new(PLOT_SIZE as u64);
     let plot_time = Instant::now();
 
     info!("Sloth is slowly plotting {} pieces...", PLOT_SIZE);
-    println!(
-        r#"
-          `""==,,__
-            `"==..__"=..__ _    _..-==""_
-                 .-,`"=/ /\ \""/_)==""``
-                ( (    | | | \/ |
-                 \ '.  |  \;  \ /
-                  |  \ |   |   ||
-             ,-._.'  |_|   |   ||
-            .\_/\     -'   ;   Y
-           |  `  |        /    |-.
-           '. __/_    _.-'     /'
-                  `'-.._____.-'
-        "#
-    );
+    // println!("Sloth is slowly plotting {} pieces...", PLOT_SIZE);
+    // println!(
+    //     r#"
+    //       `""==,,__
+    //         `"==..__"=..__ _    _..-==""_
+    //              .-,`"=/ /\ \""/_)==""``
+    //             ( (    | | | \/ |
+    //              \ '.  |  \;  \ /
+    //               |  \ |   |   ||
+    //          ,-._.'  |_|   |   ||
+    //         .\_/\     -'   ;   Y
+    //        |  `  |        /    |-.
+    //        '. __/_    _.-'     /'
+    //               `'-.._____.-'
+    //     "#
+    // );
 
     // plot pieces in parallel on all cores, using IV as a source of randomness
     // this is just for effecient testing atm
@@ -111,12 +112,12 @@ pub async fn plot(node_id: NodeID, genesis_piece: Piece) -> Plot {
             .encode(&mut piece, &integer_expanded_iv, layers)
             .unwrap();
         task::block_on(plot_piece_sender.clone().send((piece, index))).unwrap();
-        bar.inc(1);
+        // bar.inc(1);
     });
 
     drop(plot_piece_sender);
 
-    bar.finish();
+    // bar.finish();
 
     let total_plot_time = plot_time.elapsed();
     let average_plot_time =

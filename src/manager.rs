@@ -3,6 +3,7 @@
 use super::*;
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
+use console::AppState;
 use futures::join;
 use ledger::{Block, BlockStatus, FullBlock, Proof};
 use log::*;
@@ -13,33 +14,50 @@ use std::time::Duration;
 
 // TODO: Split this into multiple enums
 pub enum ProtocolMessage {
-    /// On sync, main forwards block request to Net for tx by P1
-    BlockRequest { index: u32 },
-    /// P2 receives at Net and forwards request to main for fetch
-    BlockRequestFrom { node_addr: SocketAddr, index: u32 },
-    /// P2 Main forwards response back to Net for tx
+    /// On sync, main forwards block request to Net for tx from self to peer
+    BlockRequest {
+        index: u32,
+    },
+    /// peer receives at Net and forwards request to main for fetch
+    BlockRequestFrom {
+        node_addr: SocketAddr,
+        index: u32,
+    },
+    /// peer main forwards response back to Net for tx
     BlockResponseTo {
         node_addr: SocketAddr,
         block: Option<Block>,
         index: u32,
     },
-    /// P1 receives at Net and forwards response back to Main
-    BlockResponse { block: Block },
+    /// self receives at Net and forwards response back to Main
+    BlockResponse {
+        block: Block,
+    },
     /// Net receives new full block, validates/applies, sends back to net for re-gossip
     BlockProposalRemote {
         full_block: FullBlock,
         peer_addr: SocketAddr,
     },
     /// A valid full block has been produced locally and needs to be gossiped
-    BlockProposalLocal { full_block: FullBlock },
+    BlockProposalLocal {
+        full_block: FullBlock,
+    },
     /// Main sends challenge to solver for evaluation
-    BlockChallenge { challenge: [u8; 32] },
+    BlockChallenge {
+        challenge: [u8; 32],
+    },
     /// Solver sends solution back to main for application
-    BlockSolution { solution: Solution },
+    BlockSolution {
+        solution: Solution,
+    },
+    StateUpdateRequest,
+    StateUpdateResponse {
+        state: AppState,
+    },
 }
 
 pub async fn run(
-    mode: NodeType,
+    node_type: NodeType,
     genesis_piece_hash: [u8; 32],
     binary_public_key: [u8; 32],
     keys: ed25519_dalek::Keypair,
@@ -49,7 +67,14 @@ pub async fn run(
     any_to_main_rx: Receiver<ProtocolMessage>,
     main_to_net_tx: Sender<ProtocolMessage>,
     main_to_sol_tx: Sender<ProtocolMessage>,
+    state_sender: crossbeam_channel::Sender<AppState>,
 ) {
+    // let node_type_string = node_type as String;
+
+    // convert node_type to string
+    // convert node_id to string
+    //
+
     let protocol_listener = async {
         info!("Main protocol loop is running...");
         loop {
@@ -86,7 +111,9 @@ pub async fn run(
                                     let challenge = ledger.apply_pending_block(block_id);
                                     info!("Synced the ledger!");
 
-                                    if mode == NodeType::Farmer || mode == NodeType::Gateway {
+                                    if node_type == NodeType::Farmer
+                                        || node_type == NodeType::Gateway
+                                    {
                                         main_to_sol_tx
                                             .send(ProtocolMessage::BlockChallenge { challenge })
                                             .await;
@@ -158,7 +185,7 @@ pub async fn run(
                                 if ledger.is_pending_parent(&block_id) {
                                     let challenge = ledger.apply_pending_block(block_id);
 
-                                    if mode == NodeType::Farmer || mode == NodeType::Gateway {
+                                    if node_type == NodeType::Farmer || node_type == NodeType::Gateway {
                                         main_to_sol_tx.send(ProtocolMessage::BlockChallenge { challenge }).await;
                                     }
 
@@ -169,7 +196,7 @@ pub async fn run(
                                 main_to_net_tx.send(ProtocolMessage::BlockProposalRemote { full_block: full_block.clone(), peer_addr }).await;
 
                                 // solve if farming
-                                if mode == NodeType::Farmer || mode == NodeType::Gateway {
+                                if node_type == NodeType::Farmer || node_type == NodeType::Gateway {
                                     main_to_sol_tx.send(ProtocolMessage::BlockChallenge { challenge: full_block.block.get_id() }).await;
                                 }
                             }
@@ -235,6 +262,17 @@ pub async fn run(
                             }
                         }
                     }
+                    ProtocolMessage::StateUpdateResponse { mut state } => {
+                        state.node_type = node_type.to_string();
+                        state.peers = state.peers + "/" + &MAX_PEERS.to_string()[..];
+                        state.blocks = ledger.get_block_height().to_string();
+                        state.pieces = match node_type {
+                            NodeType::Gateway => PLOT_SIZE.to_string(),
+                            NodeType::Farmer => PLOT_SIZE.to_string(),
+                            NodeType::Peer => 0.to_string(),
+                        };
+                        state_sender.send(state).unwrap();
+                    }
                     _ => panic!("Main protocol listener has received an unknown protocol message!"),
                 }
             }
@@ -244,7 +282,7 @@ pub async fn run(
     let protocol_startup = async {
         info!("Calling protocol startup");
 
-        match mode {
+        match node_type {
             NodeType::Gateway => {
                 // send genesis challenge to solver
                 // this will start an eval loop = solve -> create block -> gossip -> solve ...
@@ -268,6 +306,14 @@ pub async fn run(
                     .send(ProtocolMessage::BlockRequest { index: 0 })
                     .await;
             }
+        }
+
+        // send state update requests in a loop to network
+        loop {
+            main_to_net_tx
+                .send(ProtocolMessage::StateUpdateRequest)
+                .await;
+            task::sleep(Duration::from_millis(1000)).await;
         }
     };
 

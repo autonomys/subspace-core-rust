@@ -6,6 +6,7 @@ use async_std::prelude::*;
 use async_std::sync::{channel, Receiver, Sender};
 use bytes::buf::BufMutExt;
 use bytes::{Bytes, BytesMut};
+use console;
 use futures::join;
 use ledger::{Block, FullBlock};
 use log::*;
@@ -46,6 +47,16 @@ pub enum NodeType {
     Farmer,
 }
 
+impl Display for NodeType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            NodeType::Gateway => write!(f, "Gateway"),
+            NodeType::Farmer => write!(f, "Farmer"),
+            NodeType::Peer => write!(f, "Peer"),
+        }
+    }
+}
+
 impl FromStr for NodeType {
     type Err = ();
 
@@ -57,12 +68,6 @@ impl FromStr for NodeType {
             _ => Err(()),
         }
     }
-}
-
-pub struct Node {
-    id: NodeID,
-    mode: NodeType,
-    addr: SocketAddr,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
@@ -132,15 +137,19 @@ enum NetworkEvent {
 
 pub struct Router {
     node_id: NodeID,
+    node_type: NodeType,
+    node_addr: SocketAddr,
     connections: HashMap<SocketAddr, Sender<Bytes>>,
     peers: HashSet<SocketAddr>,
 }
 
 impl Router {
     /// create a new empty router
-    pub fn new(node_id: NodeID) -> Router {
+    pub fn new(node_id: NodeID, node_type: NodeType, node_addr: SocketAddr) -> Router {
         Router {
             node_id,
+            node_type,
+            node_addr,
             connections: HashMap::new(),
             peers: HashSet::new(),
         }
@@ -227,6 +236,18 @@ impl Router {
             .filter(|&peer| !peer.eq(&exception))
             .copied()
             .collect()
+    }
+
+    pub fn get_state(&self) -> console::AppState {
+        console::AppState {
+            node_type: String::from(""),
+            node_id: hex::encode(&self.node_id[0..8]),
+            node_addr: self.node_addr.to_string(),
+            connections: self.connections.len().to_string(),
+            peers: self.peers.len().to_string(),
+            pieces: String::from(""),
+            blocks: String::from(""),
+        }
     }
 }
 
@@ -383,7 +404,7 @@ pub async fn run(
     // receives network messages from peers and protocol messages from manager
     // maintains an async channel between each open socket and sender half
     let broker_loop = async {
-        let mut router = Router::new(node_id);
+        let mut router = Router::new(node_id, node_type, socket.local_addr().unwrap());
 
         while let Some(event) = broker_receiver.next().await {
             match event {
@@ -518,6 +539,12 @@ pub async fn run(
                             // propagating a block generated locally, send to all
 
                             router.gossip(Message::BlockProposal { full_block });
+                        }
+                        ProtocolMessage::StateUpdateRequest => {
+                            let state = router.get_state();
+                            net_to_main_tx
+                                .send(ProtocolMessage::StateUpdateResponse { state })
+                                .await;
                         }
                         _ => panic!(
                             "Network protocol listener has received an unknown protocol message!"
