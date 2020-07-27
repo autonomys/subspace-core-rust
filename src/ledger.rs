@@ -474,6 +474,10 @@ impl Ledger {
             info!("Account: {} \t {} \t credits", hex::encode(id), balance);
         }
     }
+
+    pub fn get_block_height(&self) -> usize {
+        self.applied_blocks_by_id.len()
+    }
 }
 
 #[cfg(test)]
