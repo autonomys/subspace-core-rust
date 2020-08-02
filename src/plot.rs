@@ -35,7 +35,8 @@ pub enum PlotCreationError {
 pub struct Plot {
     map: HashMap<usize, u64>,
     map_file: File,
-    plot_file: File,
+    plot_file_read: File,
+    plot_file_write: File,
     updates: usize,
     update_interval: usize,
 }
@@ -43,10 +44,15 @@ pub struct Plot {
 impl Plot {
     /// Creates a new plot for persisting encoded pieces to disk
     pub async fn open_or_create(path: &PathBuf) -> Result<Plot, PlotCreationError> {
-        let plot_file = OpenOptions::new()
-            .read(true)
+        let plot_file_write = OpenOptions::new()
             .write(true)
             .create(true)
+            .open(path.join("plot.bin"))
+            .await
+            .map_err(PlotCreationError::PlotOpen)?;
+
+        let plot_file_read = OpenOptions::new()
+            .read(true)
             .open(path.join("plot.bin"))
             .await
             .map_err(PlotCreationError::PlotOpen)?;
@@ -94,7 +100,8 @@ impl Plot {
         Ok(Plot {
             map,
             map_file,
-            plot_file,
+            plot_file_read,
+            plot_file_write,
             updates,
             update_interval,
         })
@@ -112,16 +119,18 @@ impl Plot {
                 return Err(io::Error::from(io::ErrorKind::NotFound));
             }
         };
-        self.plot_file.seek(SeekFrom::Start(position)).await?;
+        self.plot_file_read.seek(SeekFrom::Start(position)).await?;
         let mut buffer = [0u8; PIECE_SIZE];
-        self.plot_file.read_exact(&mut buffer).await?;
+        self.plot_file_read.read_exact(&mut buffer).await?;
         Ok(buffer)
     }
 
     /// Writes a piece to the plot by index, will overwrite if piece exists (updates)
     pub async fn write(&mut self, encoding: &Piece, index: usize) -> io::Result<()> {
-        let position = self.plot_file.seek(SeekFrom::Current(0)).await?;
-        self.plot_file.write_all(&encoding[0..PIECE_SIZE]).await?;
+        let position = self.plot_file_write.seek(SeekFrom::Current(0)).await?;
+        self.plot_file_write
+            .write_all(&encoding[0..PIECE_SIZE])
+            .await?;
         self.map.insert(index, position);
         self.handle_update().await
     }
