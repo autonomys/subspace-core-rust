@@ -5,7 +5,7 @@ use crate::{Piece, PIECE_SIZE};
 use async_std::fs::File;
 use async_std::fs::OpenOptions;
 use async_std::io::prelude::*;
-use async_std::path::Path;
+use async_std::path::PathBuf;
 use solver::Solution;
 use std::collections::HashMap;
 use std::io;
@@ -38,13 +38,7 @@ pub struct Plot {
 
 impl Plot {
     /// Creates a new plot for persisting encoded pieces to disk
-    pub async fn new(path: &Path, size: usize) -> Result<Plot, PlotCreationError> {
-        if !path.exists().await {
-            async_std::fs::create_dir_all(path)
-                .await
-                .map_err(|error| PlotCreationError::DirectoryCreation(error))?;
-        }
-
+    pub async fn new(path: &PathBuf, size: usize) -> Result<Plot, PlotCreationError> {
         let plot_file = OpenOptions::new()
             .read(true)
             .write(true)

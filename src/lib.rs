@@ -5,6 +5,7 @@ pub mod manager;
 pub mod network;
 pub mod plot;
 pub mod plotter;
+pub mod pseudo_wallet;
 pub mod sloth;
 pub mod solver;
 pub mod utils;

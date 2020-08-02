@@ -12,9 +12,11 @@ use futures::join;
 use log::*;
 use manager::ProtocolMessage;
 use network::NodeType;
-use std::env;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::thread;
+use std::{env, fs};
+use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::*;
 use tui_logger::{init_logger, set_default_level};
 
@@ -65,10 +67,29 @@ async fn main() {
 
             info!("Starting new Subspace {:?}", node_type);
 
+            // set storage path
+            let path = env::args()
+                .skip(2)
+                .next()
+                .or_else(|| std::env::var("SUBSPACE_DIR").ok())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    dirs::data_local_dir()
+                        .expect("Can't find local data directory, needs to be specified explicitly")
+                        .join("subspace")
+                        .join("results")
+                });
+
+            if !path.exists() {
+                fs::create_dir_all(&path)
+                    .expect(&format!("Failed to create data directory {:?}", path));
+            }
+
+            let wallet = Wallet::open_or_create(&path).expect("Failed to init wallet");
             // derive node identity
-            let keys = crypto::gen_keys_random();
+            let keys = wallet.keypair;
             let binary_public_key: [u8; 32] = keys.public.to_bytes();
-            let node_id = crypto::digest_sha_256(&binary_public_key);
+            let node_id = wallet.node_id;
 
             // derive genesis piece
             let genesis_piece = crypto::genesis_piece_from_seed("SUBSPACE");
@@ -89,7 +110,7 @@ async fn main() {
             // only plot/solve if gateway or farmer
             if node_type == NodeType::Farmer || node_type == NodeType::Gateway {
                 // plot space (slow...)
-                let mut plot = plotter::plot(node_id, genesis_piece).await;
+                let mut plot = plotter::plot(path.into(), node_id, genesis_piece).await;
 
                 // init solve loop
                 task::spawn(async move {

@@ -6,14 +6,13 @@ use async_std::task;
 use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, StreamExt};
 // use indicatif::ProgressBar;
+use async_std::path::PathBuf;
 use log::*;
 use rayon::prelude::*;
 use rug::integer::Order;
 use rug::Integer;
-use std::ops::Deref;
-use std::path::PathBuf;
+use std::thread;
 use std::time::Instant;
-use std::{env, thread};
 
 /* ToDo
  *
@@ -27,21 +26,7 @@ use std::{env, thread};
  *
 */
 
-pub async fn plot(node_id: NodeID, genesis_piece: Piece) -> Plot {
-    // set storage path
-    let path = env::args()
-        .skip(2)
-        .next()
-        .or_else(|| std::env::var("SUBSPACE_DIR").ok())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::data_local_dir()
-                .expect("Can't find local data directory, needs to be specified explicitly")
-                .join("subspace")
-                .join("results")
-                .join(hex::encode(&node_id))
-        });
-
+pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot {
     info!("New plot initialized at {:?}", path.to_str());
 
     // channel to send plot writes to an async background task so disk is not blocking
@@ -55,7 +40,7 @@ pub async fn plot(node_id: NodeID, genesis_piece: Piece) -> Plot {
         let mut plot_piece_receiver = plot_piece_receiver;
         task::block_on(async move {
             // init plot
-            let mut plot = Plot::new(path.deref().into(), PLOT_SIZE).await.unwrap();
+            let mut plot = Plot::new(&path, PLOT_SIZE).await.unwrap();
 
             // receive encodings as they are made
             while let Some((piece, index)) = plot_piece_receiver.next().await {
