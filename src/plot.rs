@@ -36,14 +36,13 @@ pub struct Plot {
     map: HashMap<usize, u64>,
     map_file: File,
     plot_file: File,
-    size: usize,
     updates: usize,
     update_interval: usize,
 }
 
 impl Plot {
     /// Creates a new plot for persisting encoded pieces to disk
-    pub async fn open_or_create(path: &PathBuf, size: usize) -> Result<Plot, PlotCreationError> {
+    pub async fn open_or_create(path: &PathBuf) -> Result<Plot, PlotCreationError> {
         let plot_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -96,7 +95,6 @@ impl Plot {
             map,
             map_file,
             plot_file,
-            size,
             updates,
             update_interval,
         })

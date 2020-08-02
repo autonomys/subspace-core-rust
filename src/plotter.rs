@@ -36,7 +36,7 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
     let (plot_sender, plot_receiver) = oneshot::channel::<Plot>();
 
     // init plot
-    let mut plot = Plot::open_or_create(&path, PLOT_SIZE).await.unwrap();
+    let mut plot = Plot::open_or_create(&path).await.unwrap();
     let empty_plot = plot.is_empty();
 
     // background taks for adding pieces to plot
