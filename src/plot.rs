@@ -3,7 +3,6 @@
 use super::*;
 use crate::Piece;
 use crate::PIECE_SIZE;
-use async_std::fs::File;
 use async_std::fs::OpenOptions;
 use async_std::io::prelude::*;
 use async_std::path::PathBuf;
@@ -11,8 +10,8 @@ use async_std::task;
 use futures::channel::mpsc;
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
-use futures::lock::Mutex;
-use futures::{SinkExt, StreamExt};
+use futures::SinkExt;
+use futures::StreamExt;
 use log::error;
 use solver::Solution;
 use std::collections::HashMap;
@@ -33,6 +32,7 @@ pub enum PlotCreationError {
     MapRead(io::Error),
 }
 
+#[derive(Debug)]
 enum ReadRequests {
     IsEmpty {
         result_sender: oneshot::Sender<bool>,
@@ -43,6 +43,7 @@ enum ReadRequests {
     },
 }
 
+#[derive(Debug)]
 enum WriteRequests {
     WriteEncoding {
         encoding: Piece,
@@ -51,6 +52,9 @@ enum WriteRequests {
     },
     RemoveEncoding {
         index: usize,
+        result_sender: oneshot::Sender<io::Result<()>>,
+    },
+    ForceWriteMap {
         result_sender: oneshot::Sender<io::Result<()>>,
     },
 }
@@ -68,7 +72,6 @@ enum WriteRequests {
 // TODO: There is no synchronization between `map` and `plot_file` for reads, so it is possible to
 //  read incorrect data
 pub struct Plot {
-    map_file: Mutex<File>,
     read_requests_sender: UnboundedSender<ReadRequests>,
     write_requests_sender: UnboundedSender<WriteRequests>,
     updates: AtomicUsize,
@@ -130,15 +133,15 @@ impl Plot {
         task::spawn(async move {
             loop {
                 // Process as many read requests as there is
-                while let Some(read_request) = read_requests_receiver.next().await {
+                while let Ok(read_request) = read_requests_receiver.try_next() {
                     match read_request {
-                        ReadRequests::IsEmpty { result_sender } => {
+                        Some(ReadRequests::IsEmpty { result_sender }) => {
                             let _ = result_sender.send(map.is_empty());
                         }
-                        ReadRequests::ReadEncoding {
+                        Some(ReadRequests::ReadEncoding {
                             index,
                             result_sender,
-                        } => {
+                        }) => {
                             let _ = result_sender.send(match map.get(&index) {
                                 Some(&position) => {
                                     try {
@@ -151,16 +154,19 @@ impl Plot {
                                 None => Err(io::Error::from(io::ErrorKind::NotFound)),
                             });
                         }
+                        None => {
+                            return;
+                        }
                     }
                 }
 
                 // Process at most write request since reading is higher priority
-                match write_requests_receiver.next().await {
-                    Some(WriteRequests::WriteEncoding {
+                match write_requests_receiver.try_next() {
+                    Ok(Some(WriteRequests::WriteEncoding {
                         index,
                         encoding,
                         result_sender,
-                    }) => {
+                    })) => {
                         map.remove(&index);
 
                         let _ = result_sender.send(
@@ -169,36 +175,45 @@ impl Plot {
                                 plot_file.write_all(&encoding).await?;
 
                                 map.insert(index, position);
-                                // TODO: self.handle_update().await
                             },
                         );
                     }
-                    Some(WriteRequests::RemoveEncoding {
+                    Ok(Some(WriteRequests::RemoveEncoding {
                         index,
                         result_sender,
-                    }) => {
+                    })) => {
                         map.remove(&index);
 
+                        let _ = result_sender.send(Ok(()));
+                    }
+                    Ok(Some(WriteRequests::ForceWriteMap { result_sender })) => {
                         let _ = result_sender.send(
                             try {
-                                map.remove(&index);
-                                // TODO: self.handle_update().await
+                                map_file.seek(SeekFrom::Start(0)).await?;
+                                map_file
+                                    .set_len(((INDEX_LENGTH + OFFSET_LENGTH) * map.len()) as u64)
+                                    .await?;
+                                for (index, offset) in map.iter() {
+                                    map_file.write_all(&index.to_le_bytes()).await?;
+                                    map_file.write_all(&offset.to_le_bytes()).await?;
+                                }
                             },
                         );
                     }
-                    None => {
+                    Ok(None) => {
+                        return;
+                    }
+                    Err(_) => {
                         // Ignore
                     }
                 }
             }
         });
 
-        let map_file = Mutex::new(map_file);
         let updates = AtomicUsize::new(0);
         let update_interval = crate::PLOT_UPDATE_INTERVAL;
 
         Ok(Plot {
-            map_file,
             read_requests_sender,
             write_requests_sender,
             updates,
@@ -254,7 +269,9 @@ impl Plot {
 
         result_receiver
             .await
-            .expect("Write encoding result sender was dropped")
+            .expect("Write encoding result sender was dropped")?;
+
+        self.handle_update().await
     }
 
     /// Removes a piece from the plot by index, by deleting its index from the map
@@ -272,7 +289,9 @@ impl Plot {
 
         result_receiver
             .await
-            .expect("Remove encoding result sender was dropped")
+            .expect("Remove encoding result sender was dropped")?;
+
+        self.handle_update().await
     }
 
     /// Fetches the encoding for an audit and returns the solution with random delay
@@ -326,19 +345,21 @@ impl Plot {
 
     /// Writes the map to disk to persist between sessions (does not load on startup yet)
     pub async fn force_write_map(&self) -> io::Result<()> {
-        // TODO: Writing everything every time is probably not the smartest idea
-        // let mut map_file = self.map_file.lock().await;
-        // map_file.seek(SeekFrom::Start(0)).await?;
-        // map_file
-        //     .set_len(((INDEX_LENGTH + OFFSET_LENGTH) * self.map.lock().await.len()) as u64)
-        //     .await?;
-        // for (index, offset) in self.map.lock().await.iter() {
-        //     map_file.write_all(&index.to_le_bytes()).await?;
-        //     map_file.write_all(&offset.to_le_bytes()).await?;
-        // }
-        //
-        // Ok(())
-        unimplemented!();
+        let (result_sender, result_receiver) = oneshot::channel();
+
+        self.write_requests_sender
+            .clone()
+            .send(WriteRequests::ForceWriteMap { result_sender })
+            .await
+            .expect("Failed sending force write map request");
+
+        result_receiver
+            .await
+            .expect("Force write map result sender was dropped")?;
+
+        self.updates.store(0, Ordering::Relaxed);
+
+        Ok(())
     }
 
     /// Increment a counter to persist the map based on some interval
