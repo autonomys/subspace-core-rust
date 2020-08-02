@@ -33,6 +33,12 @@ Benches single block encode/decode time and full piece encode/decode time for ea
 
 `RUST_LOG=info cargo run peer`
 
+### Environment variables
+* `SUBSPACE_DIR` can be used to specify alternative default location for plot to be created in
+
+### Cleanup
+Remove `config.json`, `plot.bin` and `plot-map.bin` at the location where client stores filed (printed during startup).
+
 ### Status
 
 1. ~~Sloth based proof-of-replication~~

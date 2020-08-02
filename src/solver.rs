@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use super::*;
+use crate::plot::Plot;
 use async_std::sync::{Receiver, Sender};
 use log::*;
 use manager::ProtocolMessage;
@@ -28,7 +29,7 @@ pub struct Solution {
 pub async fn run(
     main_to_sol_rx: Receiver<ProtocolMessage>,
     sol_to_main_tx: Sender<ProtocolMessage>,
-    plot: &mut plot::Plot,
+    plot: &Plot,
 ) {
     let bits: u32 = 32;
     let replication_factor = (PLOT_SIZE / PIECE_COUNT) as u32;
