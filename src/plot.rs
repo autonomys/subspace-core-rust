@@ -8,6 +8,7 @@ use async_std::io::prelude::*;
 use async_std::path::PathBuf;
 use async_std::task;
 use futures::channel::mpsc;
+use futures::channel::mpsc::Sender;
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
 use futures::SinkExt;
@@ -72,6 +73,7 @@ enum WriteRequests {
 // TODO: There is no synchronization between `map` and `plot_file` for reads, so it is possible to
 //  read incorrect data
 pub struct Plot {
+    any_requests_sender: Sender<()>,
     read_requests_sender: UnboundedSender<ReadRequests>,
     write_requests_sender: UnboundedSender<WriteRequests>,
     updates: AtomicUsize,
@@ -126,12 +128,19 @@ impl Plot {
             }
         }
 
+        // Channel with at most single element to throttle loop below if there are no updates
+        let (any_requests_sender, mut any_requests_receiver) = mpsc::channel::<()>(1);
         let (read_requests_sender, mut read_requests_receiver) = mpsc::unbounded::<ReadRequests>();
         let (write_requests_sender, mut write_requests_receiver) =
             mpsc::unbounded::<WriteRequests>();
 
         task::spawn(async move {
             loop {
+                // Wait for stuff to come in
+                if any_requests_receiver.next().await.is_none() {
+                    return;
+                }
+
                 // Process as many read requests as there is
                 while let Ok(read_request) = read_requests_receiver.try_next() {
                     match read_request {
@@ -214,6 +223,7 @@ impl Plot {
         let update_interval = crate::PLOT_UPDATE_INTERVAL;
 
         Ok(Plot {
+            any_requests_sender,
             read_requests_sender,
             write_requests_sender,
             updates,
@@ -229,6 +239,9 @@ impl Plot {
             .send(ReadRequests::IsEmpty { result_sender })
             .await
             .expect("Failed sending read request");
+
+        // If fails - it is either full or disconnected, we don't care either way, so ignore result
+        let _ = self.any_requests_sender.clone().try_send(());
 
         result_receiver
             .await
@@ -247,6 +260,9 @@ impl Plot {
             })
             .await
             .expect("Failed sending read encoding request");
+
+        // If fails - it is either full or disconnected, we don't care either way, so ignore result
+        let _ = self.any_requests_sender.clone().try_send(());
 
         result_receiver
             .await
@@ -267,6 +283,9 @@ impl Plot {
             .await
             .expect("Failed sending write encoding request");
 
+        // If fails - it is either full or disconnected, we don't care either way, so ignore result
+        let _ = self.any_requests_sender.clone().try_send(());
+
         result_receiver
             .await
             .expect("Write encoding result sender was dropped")?;
@@ -286,6 +305,9 @@ impl Plot {
             })
             .await
             .expect("Failed sending remove encoding request");
+
+        // If fails - it is either full or disconnected, we don't care either way, so ignore result
+        let _ = self.any_requests_sender.clone().try_send(());
 
         result_receiver
             .await
@@ -352,6 +374,9 @@ impl Plot {
             .send(WriteRequests::ForceWriteMap { result_sender })
             .await
             .expect("Failed sending force write map request");
+
+        // If fails - it is either full or disconnected, we don't care either way, so ignore result
+        let _ = self.any_requests_sender.clone().try_send(());
 
         result_receiver
             .await
