@@ -12,7 +12,7 @@ use futures::channel::mpsc;
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
 use futures::lock::Mutex;
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use log::error;
 use solver::Solution;
 use std::collections::HashMap;
@@ -33,15 +33,26 @@ pub enum PlotCreationError {
     MapRead(io::Error),
 }
 
-struct ReadRequest {
-    index: usize,
-    result_sender: oneshot::Sender<io::Result<Piece>>,
+enum ReadRequests {
+    IsEmpty {
+        result_sender: oneshot::Sender<bool>,
+    },
+    ReadEncoding {
+        index: usize,
+        result_sender: oneshot::Sender<io::Result<Piece>>,
+    },
 }
 
-struct WriteRequest {
-    index: usize,
-    piece: oneshot::Sender<Piece>,
-    result_sender: oneshot::Sender<io::Result<()>>,
+enum WriteRequests {
+    WriteEncoding {
+        encoding: Piece,
+        index: usize,
+        result_sender: oneshot::Sender<io::Result<()>>,
+    },
+    RemoveEncoding {
+        index: usize,
+        result_sender: oneshot::Sender<io::Result<()>>,
+    },
 }
 
 /* ToDo
@@ -57,11 +68,9 @@ struct WriteRequest {
 // TODO: There is no synchronization between `map` and `plot_file` for reads, so it is possible to
 //  read incorrect data
 pub struct Plot {
-    map: Mutex<HashMap<usize, u64>>,
     map_file: Mutex<File>,
-    plot_file: Mutex<File>,
-    read_requests_sender: UnboundedSender<ReadRequest>,
-    write_requests_sender: UnboundedSender<WriteRequest>,
+    read_requests_sender: UnboundedSender<ReadRequests>,
+    write_requests_sender: UnboundedSender<WriteRequests>,
     updates: AtomicUsize,
     update_interval: usize,
 }
@@ -69,7 +78,7 @@ pub struct Plot {
 impl Plot {
     /// Creates a new plot for persisting encoded pieces to disk
     pub async fn open_or_create(path: &PathBuf) -> Result<Plot, PlotCreationError> {
-        let plot_file = OpenOptions::new()
+        let mut plot_file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -114,32 +123,82 @@ impl Plot {
             }
         }
 
-        let (read_requests_sender, mut read_requests_receiver) = mpsc::unbounded();
-        let (write_requests_sender, mut write_requests_receiver) = mpsc::unbounded();
+        let (read_requests_sender, mut read_requests_receiver) = mpsc::unbounded::<ReadRequests>();
+        let (write_requests_sender, mut write_requests_receiver) =
+            mpsc::unbounded::<WriteRequests>();
 
         task::spawn(async move {
             loop {
                 // Process as many read requests as there is
                 while let Some(read_request) = read_requests_receiver.next().await {
-                    todo!("Handle read requests");
+                    match read_request {
+                        ReadRequests::IsEmpty { result_sender } => {
+                            let _ = result_sender.send(map.is_empty());
+                        }
+                        ReadRequests::ReadEncoding {
+                            index,
+                            result_sender,
+                        } => {
+                            let _ = result_sender.send(match map.get(&index) {
+                                Some(&position) => {
+                                    try {
+                                        plot_file.seek(SeekFrom::Start(position)).await?;
+                                        let mut buffer = [0u8; PIECE_SIZE];
+                                        plot_file.read_exact(&mut buffer).await?;
+                                        buffer
+                                    }
+                                }
+                                None => Err(io::Error::from(io::ErrorKind::NotFound)),
+                            });
+                        }
+                    }
                 }
+
                 // Process at most write request since reading is higher priority
-                if let Some(write_request) = write_requests_receiver.next().await {
-                    todo!("Handle write requests");
+                match write_requests_receiver.next().await {
+                    Some(WriteRequests::WriteEncoding {
+                        index,
+                        encoding,
+                        result_sender,
+                    }) => {
+                        map.remove(&index);
+
+                        let _ = result_sender.send(
+                            try {
+                                let position = plot_file.seek(SeekFrom::Current(0)).await?;
+                                plot_file.write_all(&encoding).await?;
+
+                                map.insert(index, position);
+                                // TODO: self.handle_update().await
+                            },
+                        );
+                    }
+                    Some(WriteRequests::RemoveEncoding {
+                        index,
+                        result_sender,
+                    }) => {
+                        map.remove(&index);
+
+                        let _ = result_sender.send(
+                            try {
+                                map.remove(&index);
+                                // TODO: self.handle_update().await
+                            },
+                        );
+                    }
+                    None => {
+                        // Ignore
+                    }
                 }
             }
         });
 
-        let map = Mutex::new(map);
         let map_file = Mutex::new(map_file);
-        let plot_file = Mutex::new(plot_file);
         let updates = AtomicUsize::new(0);
         let update_interval = crate::PLOT_UPDATE_INTERVAL;
 
         Ok(Plot {
-            map,
             map_file,
-            plot_file,
             read_requests_sender,
             write_requests_sender,
             updates,
@@ -148,46 +207,72 @@ impl Plot {
     }
 
     pub async fn is_empty(&self) -> bool {
-        self.map.lock().await.is_empty()
+        let (result_sender, result_receiver) = oneshot::channel();
+
+        self.read_requests_sender
+            .clone()
+            .send(ReadRequests::IsEmpty { result_sender })
+            .await
+            .expect("Failed sending read request");
+
+        result_receiver
+            .await
+            .expect("Read result sender was dropped")
     }
 
     /// Reads a piece from plot by index
     pub async fn read(&self, index: usize) -> io::Result<Piece> {
-        let position = match self.map.lock().await.get(&index) {
-            Some(position) => *position,
-            None => {
-                return Err(io::Error::from(io::ErrorKind::NotFound));
-            }
-        };
-        self.plot_file
-            .lock()
+        let (result_sender, result_receiver) = oneshot::channel();
+
+        self.read_requests_sender
+            .clone()
+            .send(ReadRequests::ReadEncoding {
+                index,
+                result_sender,
+            })
             .await
-            .seek(SeekFrom::Start(position))
-            .await?;
-        let mut buffer = [0u8; PIECE_SIZE];
-        self.plot_file.lock().await.read_exact(&mut buffer).await?;
-        Ok(buffer)
+            .expect("Failed sending read encoding request");
+
+        result_receiver
+            .await
+            .expect("Read encoding result sender was dropped")
     }
 
     /// Writes a piece to the plot by index, will overwrite if piece exists (updates)
-    pub async fn write(&self, encoding: &Piece, index: usize) -> io::Result<()> {
-        {
-            let mut plot_file = self.plot_file.lock().await;
+    pub async fn write(&self, encoding: Piece, index: usize) -> io::Result<()> {
+        let (result_sender, result_receiver) = oneshot::channel();
 
-            self.map.lock().await.remove(&index);
+        self.write_requests_sender
+            .clone()
+            .send(WriteRequests::WriteEncoding {
+                encoding,
+                index,
+                result_sender,
+            })
+            .await
+            .expect("Failed sending write encoding request");
 
-            let position = plot_file.seek(SeekFrom::Current(0)).await?;
-            plot_file.write_all(&encoding[0..PIECE_SIZE]).await?;
-
-            self.map.lock().await.insert(index, position);
-        }
-        self.handle_update().await
+        result_receiver
+            .await
+            .expect("Write encoding result sender was dropped")
     }
 
     /// Removes a piece from the plot by index, by deleting its index from the map
     pub async fn remove(&self, index: usize) -> io::Result<()> {
-        self.map.lock().await.remove(&index);
-        self.handle_update().await
+        let (result_sender, result_receiver) = oneshot::channel();
+
+        self.write_requests_sender
+            .clone()
+            .send(WriteRequests::RemoveEncoding {
+                index,
+                result_sender,
+            })
+            .await
+            .expect("Failed sending remove encoding request");
+
+        result_receiver
+            .await
+            .expect("Remove encoding result sender was dropped")
     }
 
     /// Fetches the encoding for an audit and returns the solution with random delay
@@ -242,17 +327,18 @@ impl Plot {
     /// Writes the map to disk to persist between sessions (does not load on startup yet)
     pub async fn force_write_map(&self) -> io::Result<()> {
         // TODO: Writing everything every time is probably not the smartest idea
-        let mut map_file = self.map_file.lock().await;
-        map_file.seek(SeekFrom::Start(0)).await?;
-        map_file
-            .set_len(((INDEX_LENGTH + OFFSET_LENGTH) * self.map.lock().await.len()) as u64)
-            .await?;
-        for (index, offset) in self.map.lock().await.iter() {
-            map_file.write_all(&index.to_le_bytes()).await?;
-            map_file.write_all(&offset.to_le_bytes()).await?;
-        }
-
-        Ok(())
+        // let mut map_file = self.map_file.lock().await;
+        // map_file.seek(SeekFrom::Start(0)).await?;
+        // map_file
+        //     .set_len(((INDEX_LENGTH + OFFSET_LENGTH) * self.map.lock().await.len()) as u64)
+        //     .await?;
+        // for (index, offset) in self.map.lock().await.iter() {
+        //     map_file.write_all(&index.to_le_bytes()).await?;
+        //     map_file.write_all(&offset.to_le_bytes()).await?;
+        // }
+        //
+        // Ok(())
+        unimplemented!();
     }
 
     /// Increment a counter to persist the map based on some interval
@@ -280,7 +366,7 @@ mod tests {
         let piece = crypto::generate_random_piece();
 
         let mut plot = Plot::open_or_create(&path).await.unwrap();
-        plot.write(&piece, 0).await.unwrap();
+        plot.write(piece, 0).await.unwrap();
         let extracted_piece = plot.read(0).await.unwrap();
 
         assert_eq!(extracted_piece[..], piece[..]);

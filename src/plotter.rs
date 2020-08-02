@@ -54,7 +54,7 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Arc<P
                     sloth
                         .encode(&mut piece, &integer_expanded_iv, ENCODING_LAYERS_TEST)
                         .unwrap();
-                    task::block_on(plot.write(&piece, index)).unwrap();
+                    task::block_on(plot.write(piece, index)).unwrap();
                     // bar.inc(1);
                 });
             }
