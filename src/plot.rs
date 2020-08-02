@@ -6,11 +6,13 @@ use async_std::fs::File;
 use async_std::fs::OpenOptions;
 use async_std::io::prelude::*;
 use async_std::path::PathBuf;
+use futures::lock::Mutex;
 use log::error;
 use solver::Solution;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::io::SeekFrom;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{io, mem};
 
 const INDEX_LENGTH: usize = mem::size_of::<usize>();
@@ -32,27 +34,24 @@ pub enum PlotCreationError {
  * Resize plot by removing the last x indices and adjusting struct params
 */
 
+// TODO: Replace some of the mutexes with more efficient construction
+// TODO: There is no synchronization between `map` and `plot_file` for reads, so it is possible to
+//  read incorrect data
 pub struct Plot {
-    map: HashMap<usize, u64>,
-    map_file: File,
-    plot_file_read: File,
-    plot_file_write: File,
-    updates: usize,
+    map: Mutex<HashMap<usize, u64>>,
+    map_file: Mutex<File>,
+    plot_file: Mutex<File>,
+    updates: AtomicUsize,
     update_interval: usize,
 }
 
 impl Plot {
     /// Creates a new plot for persisting encoded pieces to disk
     pub async fn open_or_create(path: &PathBuf) -> Result<Plot, PlotCreationError> {
-        let plot_file_write = OpenOptions::new()
+        let plot_file = OpenOptions::new()
+            .read(true)
             .write(true)
             .create(true)
-            .open(path.join("plot.bin"))
-            .await
-            .map_err(PlotCreationError::PlotOpen)?;
-
-        let plot_file_read = OpenOptions::new()
-            .read(true)
             .open(path.join("plot.bin"))
             .await
             .map_err(PlotCreationError::PlotOpen)?;
@@ -94,50 +93,61 @@ impl Plot {
             }
         }
 
-        let updates = 0;
+        let map = Mutex::new(map);
+        let map_file = Mutex::new(map_file);
+        let plot_file = Mutex::new(plot_file);
+        let updates = AtomicUsize::new(0);
         let update_interval = crate::PLOT_UPDATE_INTERVAL;
 
         Ok(Plot {
             map,
             map_file,
-            plot_file_read,
-            plot_file_write,
+            plot_file,
             updates,
             update_interval,
         })
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+    pub async fn is_empty(&self) -> bool {
+        self.map.lock().await.is_empty()
     }
 
     /// Reads a piece from plot by index
-    pub async fn read(&mut self, index: usize) -> io::Result<Piece> {
-        let position = match self.map.get(&index) {
+    pub async fn read(&self, index: usize) -> io::Result<Piece> {
+        let position = match self.map.lock().await.get(&index) {
             Some(position) => *position,
             None => {
                 return Err(io::Error::from(io::ErrorKind::NotFound));
             }
         };
-        self.plot_file_read.seek(SeekFrom::Start(position)).await?;
+        self.plot_file
+            .lock()
+            .await
+            .seek(SeekFrom::Start(position))
+            .await?;
         let mut buffer = [0u8; PIECE_SIZE];
-        self.plot_file_read.read_exact(&mut buffer).await?;
+        self.plot_file.lock().await.read_exact(&mut buffer).await?;
         Ok(buffer)
     }
 
     /// Writes a piece to the plot by index, will overwrite if piece exists (updates)
-    pub async fn write(&mut self, encoding: &Piece, index: usize) -> io::Result<()> {
-        let position = self.plot_file_write.seek(SeekFrom::Current(0)).await?;
-        self.plot_file_write
-            .write_all(&encoding[0..PIECE_SIZE])
-            .await?;
-        self.map.insert(index, position);
+    pub async fn write(&self, encoding: &Piece, index: usize) -> io::Result<()> {
+        {
+            let mut plot_file = self.plot_file.lock().await;
+
+            self.map.lock().await.remove(&index);
+
+            let position = plot_file.seek(SeekFrom::Current(0)).await?;
+            plot_file.write_all(&encoding[0..PIECE_SIZE]).await?;
+
+            self.map.lock().await.insert(index, position);
+        }
         self.handle_update().await
     }
 
     /// Removes a piece from the plot by index, by deleting its index from the map
-    pub async fn remove(&mut self, index: usize) -> io::Result<()> {
-        self.map.remove(&index);
+    pub async fn remove(&self, index: usize) -> io::Result<()> {
+        self.map.lock().await.remove(&index);
         self.handle_update().await
     }
 
@@ -156,7 +166,7 @@ impl Plot {
     /// Compute delay as base_delay * 2^exponent
     ///
     pub async fn solve(
-        &mut self,
+        &self,
         challenge: [u8; 32],
         timestamp: u128,
         piece_count: usize,
@@ -191,25 +201,26 @@ impl Plot {
     }
 
     /// Writes the map to disk to persist between sessions (does not load on startup yet)
-    pub async fn force_write_map(&mut self) -> io::Result<()> {
+    pub async fn force_write_map(&self) -> io::Result<()> {
         // TODO: Writing everything every time is probably not the smartest idea
-        self.map_file.seek(SeekFrom::Start(0)).await?;
-        self.map_file
-            .set_len(((INDEX_LENGTH + OFFSET_LENGTH) * self.map.len()) as u64)
+        let mut map_file = self.map_file.lock().await;
+        map_file.seek(SeekFrom::Start(0)).await?;
+        map_file
+            .set_len(((INDEX_LENGTH + OFFSET_LENGTH) * self.map.lock().await.len()) as u64)
             .await?;
-        for (index, offset) in self.map.iter() {
-            self.map_file.write_all(&index.to_le_bytes()).await?;
-            self.map_file.write_all(&offset.to_le_bytes()).await?;
+        for (index, offset) in self.map.lock().await.iter() {
+            map_file.write_all(&index.to_le_bytes()).await?;
+            map_file.write_all(&offset.to_le_bytes()).await?;
         }
 
         Ok(())
     }
 
     /// Increment a counter to persist the map based on some interval
-    async fn handle_update(&mut self) -> io::Result<()> {
-        self.updates = self.updates.wrapping_add(1);
+    async fn handle_update(&self) -> io::Result<()> {
+        let updates = self.updates.fetch_add(1, Ordering::Relaxed);
 
-        if self.updates % self.update_interval == 0 {
+        if updates % self.update_interval == 0 {
             self.force_write_map().await?;
         }
 
@@ -229,7 +240,7 @@ mod tests {
 
         let piece = crypto::generate_random_piece();
 
-        let mut plot = Plot::new(&path, 10).await.unwrap();
+        let mut plot = Plot::open_or_create(&path).await.unwrap();
         plot.write(&piece, 0).await.unwrap();
         let extracted_piece = plot.read(0).await.unwrap();
 

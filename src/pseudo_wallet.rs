@@ -1,4 +1,5 @@
 use crate::crypto;
+use crate::network::NodeID;
 use ed25519_dalek::Keypair;
 use futures::io::SeekFrom;
 use serde::Deserialize;
@@ -16,7 +17,7 @@ struct FileContents {
 
 pub struct Wallet {
     pub keypair: Keypair,
-    pub node_id: [u8; 32],
+    pub node_id: NodeID,
 }
 
 impl Wallet {

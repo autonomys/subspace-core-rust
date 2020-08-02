@@ -113,11 +113,11 @@ async fn main() {
             // only plot/solve if gateway or farmer
             if node_type == NodeType::Farmer || node_type == NodeType::Gateway {
                 // plot space (slow...)
-                let mut plot = plotter::plot(path.into(), node_id, genesis_piece).await;
+                let plot = plotter::plot(path.into(), node_id, genesis_piece).await;
 
                 // init solve loop
                 task::spawn(async move {
-                    solver::run(main_to_sol_rx, sol_to_main_tx, &mut plot).await;
+                    solver::run(main_to_sol_rx, sol_to_main_tx, &plot).await;
                 });
             }
 
