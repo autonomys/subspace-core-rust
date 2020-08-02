@@ -9,7 +9,6 @@ use log::*;
 use rayon::prelude::*;
 use rug::integer::Order;
 use rug::Integer;
-use std::sync::Arc;
 use std::time::Instant;
 
 /* ToDo
@@ -24,13 +23,13 @@ use std::time::Instant;
  *
 */
 
-pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Arc<Plot> {
+pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot {
     // init plot
-    let plot = Arc::new(Plot::open_or_create(&path).await.unwrap());
+    let plot = Plot::open_or_create(&path).await.unwrap();
 
     if plot.is_empty().await {
         let plotting_fut = task::spawn_blocking({
-            let plot = Arc::clone(&plot);
+            let plot = plot.clone();
 
             move || {
                 let expanded_iv = crypto::expand_iv(node_id);
@@ -54,9 +53,18 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Arc<P
                     sloth
                         .encode(&mut piece, &integer_expanded_iv, ENCODING_LAYERS_TEST)
                         .unwrap();
-                    task::block_on(plot.write(piece, index)).unwrap();
+
+                    task::spawn({
+                        let plot = plot.clone();
+
+                        async move {
+                            let _ = plot.write(piece, index).await;
+                        }
+                    });
                     // bar.inc(1);
                 });
+
+                task::block_on(plot.force_write_map())
             }
         });
 
@@ -65,7 +73,7 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Arc<P
 
         info!("Sloth is slowly plotting {} pieces...", PLOT_SIZE);
 
-        plotting_fut.await;
+        plotting_fut.await.expect("Failed to plot");
 
         // bar.finish();
 

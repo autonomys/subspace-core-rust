@@ -20,8 +20,10 @@ use std::convert::TryInto;
 use std::io;
 use std::io::SeekFrom;
 use std::mem;
+use std::ops::Deref;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 const INDEX_LENGTH: usize = mem::size_of::<usize>();
 const OFFSET_LENGTH: usize = mem::size_of::<u64>();
@@ -60,6 +62,14 @@ enum WriteRequests {
     },
 }
 
+pub struct Inner {
+    any_requests_sender: Sender<()>,
+    read_requests_sender: UnboundedSender<ReadRequests>,
+    write_requests_sender: UnboundedSender<WriteRequests>,
+    updates: Arc<AtomicUsize>,
+    update_interval: usize,
+}
+
 /* ToDo
  *
  * Return result for solve()
@@ -69,15 +79,9 @@ enum WriteRequests {
  * Resize plot by removing the last x indices and adjusting struct params
 */
 
-// TODO: Replace some of the mutexes with more efficient construction
-// TODO: There is no synchronization between `map` and `plot_file` for reads, so it is possible to
-//  read incorrect data
+#[derive(Clone)]
 pub struct Plot {
-    any_requests_sender: Sender<()>,
-    read_requests_sender: UnboundedSender<ReadRequests>,
-    write_requests_sender: UnboundedSender<WriteRequests>,
-    updates: AtomicUsize,
-    update_interval: usize,
+    inner: Arc<Inner>,
 }
 
 impl Plot {
@@ -219,15 +223,19 @@ impl Plot {
             }
         });
 
-        let updates = AtomicUsize::new(0);
+        let updates = Arc::new(AtomicUsize::new(0));
         let update_interval = crate::PLOT_UPDATE_INTERVAL;
 
-        Ok(Plot {
+        let inner = Inner {
             any_requests_sender,
             read_requests_sender,
             write_requests_sender,
             updates,
             update_interval,
+        };
+
+        Ok(Plot {
+            inner: Arc::new(inner),
         })
     }
 
@@ -396,6 +404,14 @@ impl Plot {
         }
 
         Ok(())
+    }
+}
+
+impl Deref for Plot {
+    type Target = Inner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
