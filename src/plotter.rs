@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use rug::integer::Order;
 use rug::Integer;
 use std::ops::Deref;
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::Instant;
 use std::{env, thread};
 
@@ -28,16 +28,19 @@ use std::{env, thread};
 */
 
 pub async fn plot(node_id: NodeID, genesis_piece: Piece) -> Plot {
-    let args: Vec<String> = env::args().collect();
     // set storage path
-    let path = match args.get(2) {
-        Some(path) => Path::new(path).to_path_buf(),
-        None => dirs::data_local_dir()
-            .expect("Can't find local data directory, needs to be specified explicitly")
-            .join("subspace")
-            .join("results")
-            .join(hex::encode(&node_id)),
-    };
+    let path = env::args()
+        .skip(2)
+        .next()
+        .or_else(|| std::env::var("SUBSPACE_DIR").ok())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::data_local_dir()
+                .expect("Can't find local data directory, needs to be specified explicitly")
+                .join("subspace")
+                .join("results")
+                .join(hex::encode(&node_id))
+        });
 
     info!("New plot initialized at {:?}", path.to_str());
 
