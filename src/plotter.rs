@@ -35,13 +35,14 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
     // channel to send plot back once plotting is complete
     let (plot_sender, plot_receiver) = oneshot::channel::<Plot>();
 
+    // init plot
+    let mut plot = Plot::open_or_create(&path, PLOT_SIZE).await.unwrap();
+    let empty_plot = plot.is_empty();
+
     // background taks for adding pieces to plot
     thread::spawn(move || {
         let mut plot_piece_receiver = plot_piece_receiver;
         task::block_on(async move {
-            // init plot
-            let mut plot = Plot::new(&path, PLOT_SIZE).await.unwrap();
-
             // receive encodings as they are made
             while let Some((piece, index)) = plot_piece_receiver.next().await {
                 plot.write(&piece, index).await.unwrap();
@@ -67,41 +68,29 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
     // let bar = ProgressBar::new(PLOT_SIZE as u64);
     let plot_time = Instant::now();
 
-    info!("Sloth is slowly plotting {} pieces...", PLOT_SIZE);
-    // println!("Sloth is slowly plotting {} pieces...", PLOT_SIZE);
-    // println!(
-    //     r#"
-    //       `""==,,__
-    //         `"==..__"=..__ _    _..-==""_
-    //              .-,`"=/ /\ \""/_)==""``
-    //             ( (    | | | \/ |
-    //              \ '.  |  \;  \ /
-    //               |  \ |   |   ||
-    //          ,-._.'  |_|   |   ||
-    //         .\_/\     -'   ;   Y
-    //        |  `  |        /    |-.
-    //        '. __/_    _.-'     /'
-    //               `'-.._____.-'
-    //     "#
-    // );
+    if empty_plot {
+        info!("Sloth is slowly plotting {} pieces...", PLOT_SIZE);
 
-    // plot pieces in parallel on all cores, using IV as a source of randomness
-    // this is just for effecient testing atm
-    (0..PLOT_SIZE).into_par_iter().for_each(|index| {
-        let mut piece = piece;
+        // plot pieces in parallel on all cores, using IV as a source of randomness
+        // this is just for efficient testing atm
+        (0..PLOT_SIZE).into_par_iter().for_each(|index| {
+            let mut piece = piece;
 
-        // xor first 16 bytes of piece with the index to get a unqiue piece for each iteration
-        let index_bytes = utils::usize_to_bytes(index);
-        for i in 0..16 {
-            piece[i] = piece[i] ^ index_bytes[i];
-        }
+            // xor first 16 bytes of piece with the index to get a unique piece for each iteration
+            let index_bytes = utils::usize_to_bytes(index);
+            for i in 0..16 {
+                piece[i] = piece[i] ^ index_bytes[i];
+            }
 
-        sloth
-            .encode(&mut piece, &integer_expanded_iv, layers)
-            .unwrap();
-        task::block_on(plot_piece_sender.clone().send((piece, index))).unwrap();
-        // bar.inc(1);
-    });
+            sloth
+                .encode(&mut piece, &integer_expanded_iv, layers)
+                .unwrap();
+            task::block_on(plot_piece_sender.clone().send((piece, index))).unwrap();
+            // bar.inc(1);
+        });
+    } else {
+        info!("Using existing plot...");
+    }
 
     drop(plot_piece_sender);
 

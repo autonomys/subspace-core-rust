@@ -6,16 +6,21 @@ use async_std::fs::File;
 use async_std::fs::OpenOptions;
 use async_std::io::prelude::*;
 use async_std::path::PathBuf;
+use log::error;
 use solver::Solution;
 use std::collections::HashMap;
-use std::io;
+use std::convert::TryInto;
 use std::io::SeekFrom;
+use std::{io, mem};
+
+const INDEX_LENGTH: usize = mem::size_of::<usize>();
+const OFFSET_LENGTH: usize = mem::size_of::<u64>();
 
 #[derive(Debug)]
 pub enum PlotCreationError {
-    DirectoryCreation(io::Error),
     PlotOpen(io::Error),
     PlotMapOpen(io::Error),
+    MapRead(io::Error),
 }
 
 /* ToDo
@@ -38,24 +43,52 @@ pub struct Plot {
 
 impl Plot {
     /// Creates a new plot for persisting encoded pieces to disk
-    pub async fn new(path: &PathBuf, size: usize) -> Result<Plot, PlotCreationError> {
+    pub async fn open_or_create(path: &PathBuf, size: usize) -> Result<Plot, PlotCreationError> {
         let plot_file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(path.join("plot.bin"))
             .await
-            .map_err(|error| PlotCreationError::PlotOpen(error))?;
+            .map_err(PlotCreationError::PlotOpen)?;
 
-        let map_file = OpenOptions::new()
+        let mut map_file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(path.join("plot-map.bin"))
             .await
-            .map_err(|error| PlotCreationError::PlotMapOpen(error))?;
+            .map_err(PlotCreationError::PlotMapOpen)?;
 
-        let map = HashMap::new();
+        let mut map = HashMap::new();
+
+        {
+            let map_bytes_len = map_file
+                .metadata()
+                .await
+                .map_err(PlotCreationError::MapRead)?
+                .len();
+            let mut buffer = [0u8; INDEX_LENGTH + OFFSET_LENGTH];
+            // let mut buffer = Vec::with_capacity(index_length + offset_length);
+            if map_bytes_len > 0 {
+                map_file
+                    .seek(SeekFrom::Start(0))
+                    .await
+                    .map_err(PlotCreationError::MapRead)?;
+                for _ in (0..map_bytes_len).step_by(INDEX_LENGTH + OFFSET_LENGTH) {
+                    if map_file.read_exact(&mut buffer).await.is_err() {
+                        error!("Bad map, ignoring remaining bytes");
+                        break;
+                    }
+                    let index =
+                        usize::from_le_bytes(buffer[..INDEX_LENGTH].as_ref().try_into().unwrap());
+                    let offset =
+                        u64::from_le_bytes(buffer[INDEX_LENGTH..].as_ref().try_into().unwrap());
+                    map.insert(index, offset);
+                }
+            }
+        }
+
         let updates = 0;
         let update_interval = crate::PLOT_UPDATE_INTERVAL;
 
@@ -69,10 +102,19 @@ impl Plot {
         })
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
     /// Reads a piece from plot by index
     pub async fn read(&mut self, index: usize) -> io::Result<Piece> {
-        let position = self.map.get(&index).unwrap();
-        self.plot_file.seek(SeekFrom::Start(*position)).await?;
+        let position = match self.map.get(&index) {
+            Some(position) => *position,
+            None => {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+        };
+        self.plot_file.seek(SeekFrom::Start(position)).await?;
         let mut buffer = [0u8; PIECE_SIZE];
         self.plot_file.read_exact(&mut buffer).await?;
         Ok(buffer)
@@ -145,6 +187,9 @@ impl Plot {
     pub async fn force_write_map(&mut self) -> io::Result<()> {
         // TODO: Writing everything every time is probably not the smartest idea
         self.map_file.seek(SeekFrom::Start(0)).await?;
+        self.map_file
+            .set_len(((INDEX_LENGTH + OFFSET_LENGTH) * self.map.len()) as u64)
+            .await?;
         for (index, offset) in self.map.iter() {
             self.map_file.write_all(&index.to_le_bytes()).await?;
             self.map_file.write_all(&offset.to_le_bytes()).await?;
