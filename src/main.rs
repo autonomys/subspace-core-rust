@@ -65,8 +65,6 @@ async fn main() {
                 .flatten()
                 .unwrap_or(NodeType::Gateway);
 
-            info!("Starting new Subspace {:?}", node_type);
-
             // set storage path
             let path = env::args()
                 .skip(2)
@@ -84,6 +82,11 @@ async fn main() {
                 fs::create_dir_all(&path)
                     .expect(&format!("Failed to create data directory {:?}", path));
             }
+
+            info!(
+                "Starting new Subspace {:?} using location {:?}",
+                node_type, path
+            );
 
             let wallet = Wallet::open_or_create(&path).expect("Failed to init wallet");
             // derive node identity
