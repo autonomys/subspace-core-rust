@@ -1,19 +1,27 @@
 #![allow(dead_code)]
 
 use super::*;
-use crate::{Piece, PIECE_SIZE};
+use crate::Piece;
+use crate::PIECE_SIZE;
 use async_std::fs::File;
 use async_std::fs::OpenOptions;
 use async_std::io::prelude::*;
 use async_std::path::PathBuf;
+use async_std::task;
+use futures::channel::mpsc;
+use futures::channel::mpsc::UnboundedSender;
+use futures::channel::oneshot;
 use futures::lock::Mutex;
+use futures::StreamExt;
 use log::error;
 use solver::Solution;
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::io;
 use std::io::SeekFrom;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{io, mem};
+use std::mem;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 const INDEX_LENGTH: usize = mem::size_of::<usize>();
 const OFFSET_LENGTH: usize = mem::size_of::<u64>();
@@ -23,6 +31,17 @@ pub enum PlotCreationError {
     PlotOpen(io::Error),
     PlotMapOpen(io::Error),
     MapRead(io::Error),
+}
+
+struct ReadRequest {
+    index: usize,
+    result_sender: oneshot::Sender<io::Result<Piece>>,
+}
+
+struct WriteRequest {
+    index: usize,
+    piece: oneshot::Sender<Piece>,
+    result_sender: oneshot::Sender<io::Result<()>>,
 }
 
 /* ToDo
@@ -41,6 +60,8 @@ pub struct Plot {
     map: Mutex<HashMap<usize, u64>>,
     map_file: Mutex<File>,
     plot_file: Mutex<File>,
+    read_requests_sender: UnboundedSender<ReadRequest>,
+    write_requests_sender: UnboundedSender<WriteRequest>,
     updates: AtomicUsize,
     update_interval: usize,
 }
@@ -93,6 +114,22 @@ impl Plot {
             }
         }
 
+        let (read_requests_sender, mut read_requests_receiver) = mpsc::unbounded();
+        let (write_requests_sender, mut write_requests_receiver) = mpsc::unbounded();
+
+        task::spawn(async move {
+            loop {
+                // Process as many read requests as there is
+                while let Some(read_request) = read_requests_receiver.next().await {
+                    todo!("Handle read requests");
+                }
+                // Process at most write request since reading is higher priority
+                if let Some(write_request) = write_requests_receiver.next().await {
+                    todo!("Handle write requests");
+                }
+            }
+        });
+
         let map = Mutex::new(map);
         let map_file = Mutex::new(map_file);
         let plot_file = Mutex::new(plot_file);
@@ -103,6 +140,8 @@ impl Plot {
             map,
             map_file,
             plot_file,
+            read_requests_sender,
+            write_requests_sender,
             updates,
             update_interval,
         })
