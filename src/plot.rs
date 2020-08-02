@@ -138,15 +138,23 @@ impl Plot {
         let (write_requests_sender, mut write_requests_receiver) =
             mpsc::unbounded::<WriteRequests>();
 
+        // TODO: Handle drop nicer: when read is dropped, make sure writes still all finish
         task::spawn(async move {
+            let mut did_nothing = true;
             loop {
-                // Wait for stuff to come in
-                if any_requests_receiver.next().await.is_none() {
-                    return;
+                if did_nothing {
+                    // Wait for stuff to come in
+                    if any_requests_receiver.next().await.is_none() {
+                        return;
+                    }
                 }
+
+                did_nothing = true;
 
                 // Process as many read requests as there is
                 while let Ok(read_request) = read_requests_receiver.try_next() {
+                    did_nothing = false;
+
                     match read_request {
                         Some(ReadRequests::IsEmpty { result_sender }) => {
                             let _ = result_sender.send(map.is_empty());
@@ -173,8 +181,12 @@ impl Plot {
                     }
                 }
 
+                let write_request = write_requests_receiver.try_next();
+                if write_request.is_ok() {
+                    did_nothing = false;
+                }
                 // Process at most write request since reading is higher priority
-                match write_requests_receiver.try_next() {
+                match write_request {
                     Ok(Some(WriteRequests::WriteEncoding {
                         index,
                         encoding,
