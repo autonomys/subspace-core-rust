@@ -40,7 +40,7 @@ Benches single block encode/decode time and full piece encode/decode time for ea
 3. ~~Evaluation Loop~~
 4. ~~Ledger~~
 5. ~~TCP Gossip Network~~
-6. Terminal Console
+6. ~~Terminal Console~~
 7. Manages Forks
 8. Basic tx scheme
 9. Erasrue code state

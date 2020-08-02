@@ -39,7 +39,7 @@ Given only the genesis block hash and the expected block time:
 ### Challenge / Response Phase
 
 * For each new valid block
-* Compute the challenge as hash(block.tag)
+* Compute the challenge as hash(block.tag) -> opportunity for simulation (for each encoding)
 * Compute the parent block for the piece audit as: challenge mod (block_height - encoding_delay_parameter)
 * Where encoding_delay_parameter will point to last block that has been erasure coded by all nodes w.h.p.
 * Determine the first state block that said block was erasure coded into
@@ -48,6 +48,10 @@ Given only the genesis block hash and the expected block time:
 * Compute the tag as hmac(encoding || challenge)
 * If tag <= quality target -> forge a new block and gossip
 * If tag > quality target, wait with exponential backoff based on distance, and gossip if no solution is yet seen
+
+### Managing Forks
+
+* 
 
 ### Encoding State
 

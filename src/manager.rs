@@ -9,8 +9,27 @@ use ledger::{Block, BlockStatus, FullBlock, Proof};
 use log::*;
 use network::NodeType;
 use solver::Solution;
+use std::fmt;
+use std::fmt::Display;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/*
+ * Consider if default should wait for block arrival before collecting tx and gossping or release immeaditely?
+ * Maybe rename timestamp to arrival_time
+ *
+ * Deadlines
+ * ---------
+ * 1) I have solved locally, forge and gossip immediately, wait for deadline before applying and solving on top of (farmer)
+ * 2) I have received a block, validate and gossip immediately, wait for deadline before applying to the ledger (peer)
+ * 3) I have received a block, validate and gossip immediately, wait for deadline before allying and building (farmer)
+ *
+ * Farmers will attempt to build on a valid block once it arrives
+ * They should then immeadiatley fill with tx and gossip the block (rational behavior)
+ *
+ *
+ *
+*/
 
 // TODO: Split this into multiple enums
 pub enum ProtocolMessage {
@@ -45,17 +64,66 @@ pub enum ProtocolMessage {
     /// Main sends challenge to solver for evaluation
     BlockChallenge {
         challenge: [u8; 32],
+        base_time: u128,
     },
-    /// Solver sends solution back to main for application
-    BlockSolution {
-        solution: Solution,
+    /// Solver sends a set of solutions back to main for application
+    BlockSolutions {
+        solutions: Vec<Solution>,
     },
+    BlockArrived {
+        block: Block,
+    },
+    /// Main sends a state update request to manager for console state
     StateUpdateRequest,
+    /// Manager sends a state update response to main for console state
     StateUpdateResponse {
         state: AppState,
     },
 }
 
+impl Display for ProtocolMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::BlockRequest { .. } => "BlockRequest",
+                Self::BlockResponse { .. } => "BlockResponse",
+                Self::BlockRequestFrom { .. } => "BlockRequestFrom",
+                Self::BlockResponseTo { .. } => "BlockResponseTo",
+                Self::BlockProposalRemote { .. } => "BlockProposalRemote",
+                Self::BlockProposalLocal { .. } => "BlockProposalLocal",
+                Self::BlockChallenge { .. } => "BlockChallenge",
+                Self::BlockSolutions { .. } => "BlockSolutions",
+                Self::BlockArrived { .. } => "BlockArrived",
+                Self::StateUpdateRequest { .. } => "StateUpdateRequest",
+                Self::StateUpdateResponse { .. } => "StateUpdateResponse",
+            }
+        )
+    }
+}
+
+/// Spawns a non-blocking task that will wait for the block arrival based on local time
+pub async fn wait_for_block_arrival(block: Block, sender: &Sender<ProtocolMessage>) {
+    let cloned_sender = sender.clone();
+    async_std::task::spawn(async move {
+        let time_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis();
+
+        if time_now < block.timestamp {
+            async_std::task::sleep(Duration::from_millis((block.timestamp - time_now) as u64))
+                .await;
+        };
+
+        cloned_sender
+            .send(ProtocolMessage::BlockArrived { block })
+            .await;
+    });
+}
+
+/// Starts the manager process, a broker loop that acts as the central async message hub for the node
 pub async fn run(
     node_type: NodeType,
     genesis_piece_hash: [u8; 32],
@@ -67,14 +135,9 @@ pub async fn run(
     any_to_main_rx: Receiver<ProtocolMessage>,
     main_to_net_tx: Sender<ProtocolMessage>,
     main_to_sol_tx: Sender<ProtocolMessage>,
+    main_to_main_tx: Sender<ProtocolMessage>,
     state_sender: crossbeam_channel::Sender<AppState>,
 ) {
-    // let node_type_string = node_type as String;
-
-    // convert node_type to string
-    // convert node_id to string
-    //
-
     let protocol_listener = async {
         info!("Main protocol loop is running...");
         loop {
@@ -90,10 +153,10 @@ pub async fn run(
                         main_to_net_tx.send(message).await;
                     }
                     ProtocolMessage::BlockResponse { block } => {
-                        // validate block
+                        // TODO: this is only a partial block, we have to validate some full blocks too
                         if !block.is_valid() {
+                            // TODO: Request from another peer and blacklist this peer
                             panic!("Received invalid block response while syncing the chain");
-                            // later, should request from another peer and black list this peer
                         }
 
                         match ledger.apply_block_by_id(&block) {
@@ -107,18 +170,24 @@ pub async fn run(
                                 // check to see if this block is the parent referenced by any cached blocks
                                 if ledger.is_pending_parent(&block_id) {
                                     // fetch the pending full block that references this parent, will call recursive
-                                    // let child_id = ledger.get_child_of_pending_parent(&block_id);
-                                    let challenge = ledger.apply_pending_block(block_id);
+
+                                    // TODO: should be an async background task, but can't because it will move the ledger
+                                    // Change pattern to communicate with ledger async over channel or through mutex
+                                    // then change apply_pending_children back to async fn that calls wait_for_block_arrival()
+                                    let (challenge, timestamp) =
+                                        ledger.apply_pending_children(block_id);
                                     info!("Synced the ledger!");
 
                                     if node_type == NodeType::Farmer
                                         || node_type == NodeType::Gateway
                                     {
                                         main_to_sol_tx
-                                            .send(ProtocolMessage::BlockChallenge { challenge })
+                                            .send(ProtocolMessage::BlockChallenge {
+                                                challenge,
+                                                base_time: timestamp,
+                                            })
                                             .await;
                                     }
-
                                     continue;
                                 }
 
@@ -150,7 +219,6 @@ pub async fn run(
                             continue;
                         }
 
-                        // do you have the parent?
                         if !ledger.is_block_applied(&full_block.block.parent_id) {
                             // cache the block until fully synced
                             // either: still syncing the ledger from startup or received recent blocks out of order
@@ -159,15 +227,15 @@ pub async fn run(
                             continue;
                         }
 
+                        // TODO: revise for delay
                         // check quality first
-                        if full_block.block.get_quality() < ledger.quality_threshold {
-                            info!("Received block proposal with insufficient quality via gossip, ignoring");
-                            continue;
-                        }
+                        // if full_block.block.get_quality() < ledger.quality_threshold {
+                        //     info!("Received block proposal with insufficient quality via gossip, ignoring");
+                        //     continue;
+                        // }
 
                         // make sure the proof is correct
                         if !full_block.is_valid(
-                            PLOT_SIZE,
                             &ledger.merkle_root,
                             &genesis_piece_hash,
                             &ledger.sloth,
@@ -176,89 +244,108 @@ pub async fn run(
                             continue;
                         }
 
-                        // now we can finally apply the block
-                        match ledger.apply_block_by_id(&full_block.block) {
+                        // TODO: decide to gossip the block now or wait until it has arrived?
+                        // for now gossip optimisitically
+                        main_to_net_tx
+                            .send(ProtocolMessage::BlockProposalRemote {
+                                full_block: full_block.clone(),
+                                peer_addr,
+                            })
+                            .await;
+
+                        // wait for deadline arrival
+                        wait_for_block_arrival(full_block.block, &main_to_main_tx).await;
+                    }
+                    ProtocolMessage::BlockSolutions { solutions } => {
+                        // info!(
+                        //     "Received solutions for challenge: {}",
+                        //     hex::encode(&solutions[0].challenge[0..8])
+                        // );
+
+                        for solution in solutions.into_iter() {
+                            info!("Received a solution with delay: {}", solution.delay);
+
+                            // immediately gossip, on arrival apply, solve if valid extension
+
+                            // TODO: once we have enough farmers, ensure that delays > 1 second are ignored
+                            // if solution.delay < 1000u32 {
+                            //     info!("Solution to block challenge has a delay greater than one second, ignoring");
+                            //     continue;
+                            // }
+
+                            let timestamp = solution.base_time + solution.delay as u128;
+                            // sign tag and create block
+                            let block = Block::new(
+                                timestamp,
+                                solution.delay,
+                                solution.challenge,
+                                solution.tag,
+                                binary_public_key,
+                                keys.sign(&solution.tag).to_bytes().to_vec(),
+                                tx_payload.clone(),
+                            );
+
+                            // create the proof
+                            let proof = Proof::new(
+                                solution.encoding,
+                                crypto::get_merkle_proof(solution.index, &merkle_proofs),
+                                solution.index,
+                            );
+
+                            // gossip the block immediately
+                            main_to_net_tx
+                                .send(ProtocolMessage::BlockProposalLocal {
+                                    full_block: FullBlock {
+                                        block: block.clone(),
+                                        proof,
+                                    },
+                                })
+                                .await;
+
+                            // wait for deadline arrival
+                            wait_for_block_arrival(block, &main_to_main_tx).await;
+                        }
+                    }
+                    ProtocolMessage::BlockArrived { block } => {
+                        // attempt to apply the block to the ledger, optionally solve
+
+                        // TODO: ensure that we do not apply stale blocks to the ledger
+
+                        match ledger.apply_block_by_id(&block) {
                             BlockStatus::Applied => {
-                                info!("Applied new block received over the network via gossip to the ledger");
+                                info!("Applied new block to the ledger on deadline arrival!");
+                                // block.print();
 
-                                // is this the parent of a pending block?
+                                // check if pending parent
+                                // TODO: have to ensure that when applying pending blocks, their deadline is honored
+                                let block_id = block.get_id();
+                                let mut challenge = block_id;
+                                let mut base_time = block.timestamp;
                                 if ledger.is_pending_parent(&block_id) {
-                                    let challenge = ledger.apply_pending_block(block_id);
-
-                                    if node_type == NodeType::Farmer || node_type == NodeType::Gateway {
-                                        main_to_sol_tx.send(ProtocolMessage::BlockChallenge { challenge }).await;
-                                    }
-
-                                    continue;
+                                    let (last_challenge, last_base_time) =
+                                        ledger.apply_pending_children(block_id);
+                                    challenge = last_challenge;
+                                    base_time = last_base_time;
                                 }
 
-                                // else gossip
-                                main_to_net_tx.send(ProtocolMessage::BlockProposalRemote { full_block: full_block.clone(), peer_addr }).await;
-
-                                // solve if farming
                                 if node_type == NodeType::Farmer || node_type == NodeType::Gateway {
-                                    main_to_sol_tx.send(ProtocolMessage::BlockChallenge { challenge: full_block.block.get_id() }).await;
+                                    // now we solve
+                                    main_to_sol_tx
+                                        .send(ProtocolMessage::BlockChallenge {
+                                            challenge,
+                                            base_time,
+                                        })
+                                        .await;
                                 }
                             }
                             BlockStatus::Pending => {
-                                panic!("Logic error, add_block_by_id should not have been called if the parent is unknown...")
-                            }
-                            BlockStatus::Invalid => {
-                                info!("Could not apply block to ledger, illegal extension...");
-                            }
-                        }
-                    }
-                    ProtocolMessage::BlockSolution { solution } => {
-                        info!(
-                            "Received a solution for challenge: {}",
-                            hex::encode(&solution.challenge[0..8])
-                        );
-                        // check solution quality is high enough
-                        if solution.quality < ledger.quality_threshold {
-                            info!("Solution to block challenge does not meet quality threshold, ignoring");
-                            continue;
-                        }
-
-                        // sign tag and create block
-                        let block = Block::new(
-                            solution.challenge,
-                            solution.tag,
-                            binary_public_key,
-                            keys.sign(&solution.tag).to_bytes().to_vec(),
-                            tx_payload.clone(),
-                        );
-
-                        // add block to ledger
-                        match ledger.apply_block_by_id(&block) {
-                            BlockStatus::Applied => {
-                                // valid extension to the ledger, gossip to the network
-                                info!("Applied new block generated locally to the ledger!");
-                                // block.print();
-
-                                let proof = Proof::new(
-                                    solution.encoding,
-                                    crypto::get_merkle_proof(solution.index, &merkle_proofs),
-                                    solution.index,
-                                );
-
-                                let solve = main_to_sol_tx.send(ProtocolMessage::BlockChallenge {
-                                    challenge: block.get_id(),
-                                });
-                                let gossip =
-                                    main_to_net_tx.send(ProtocolMessage::BlockProposalLocal {
-                                        full_block: FullBlock { block, proof },
-                                    });
-
-                                join!(solve, gossip);
+                                // this should not happen, control flow logic error
+                                panic!("A block generated locally does not have a known parent...")
                             }
                             BlockStatus::Invalid => {
                                 // illegal extension to the ledger, ignore
                                 // may have applied a better block received over the network while the solution was being generated
                                 info!("Attempted to add locally generated block to the ledger, but was no longer valid");
-                            }
-                            BlockStatus::Pending => {
-                                // this should not happen, control flow logic error
-                                panic!("A block generated locally does not have a known parent...")
                             }
                         }
                     }
@@ -290,9 +377,16 @@ pub async fn run(
                     "Starting gateway with genesis challenge: {}",
                     hex::encode(&genesis_piece_hash[0..8])
                 );
+
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("Time went backwards")
+                    .as_millis();
+
                 main_to_sol_tx
                     .send(ProtocolMessage::BlockChallenge {
                         challenge: genesis_piece_hash,
+                        base_time: timestamp,
                     })
                     .await;
             }

@@ -6,16 +6,42 @@ use ed25519_dalek::Signature;
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::{HashMap, HashSet};
 
 /* ToDo
- *
+ * ----
+ * Figure our right pattern for ensuring the deadline has passed before applying cached blocks
+ * Ensure nodes who receive blocks via gossip/sync do not forward & apply them too early (eager attacks)
+ * Likewise ensure nodes do not recirculate long delay blocks that could flood the network (DoS attacks)
  * Commits to the ledger should be atmoic (if we fail part way through)
- * Properly handle forks
- * Track quality of each fork
- * Make delay random time following a poission distribution around a mean
- * Slowly remove delay until zero erros
+ * Quality/Delay threshold checks and scoring should use the difficulty target for that time
+ *
+ * When a new block deadline "arrives"
+ *  If its parent is the head of a tracked branch:
+ *      Simply extend the branch and add its quality
+ *  Else:
+ *      Get the block and its children
+ *      Trace each child branch until either:
+ *          If all branches are within k-deep
+ *          And there is room for the new branch
+ *          Or the new branch exceeds the quality of an existing branch (if full)
+ *          Then create the new branch (and possibly remove the old branch)
+ *          Ensure we also prune the blocks of that stale branch (that are unique to it) *
+ *
+ * TESTING
+ * -------
+ * Piece count is always 256 for testing for the merkle tree
+ * Plot size is configurable, but must be a multiple of 256
+ * For each challenge, solver will check every 256th piece starting at index and return the top N
+ * We want to start with 256 x 256 pieces
+ * This mean for each challenge the expected quality should be below 2^32 / 2^8 -> 2^24
+ *
+ * SECURITY
+ * --------
+ * measure how far ahead a node can predict, based on its storage power
+ * combine with simulation to see what advantage this provides
+ * measure how much time this gives it for on-demand encoding
+ *
  *
 */
 
@@ -23,6 +49,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct Block {
     pub reward: u32,
     pub timestamp: u128,
+    pub delay: u32,
     pub parent_id: [u8; 32],
     pub tag: [u8; 32],
     pub public_key: [u8; 32],
@@ -32,20 +59,23 @@ pub struct Block {
 
 impl Block {
     pub fn new(
+        timestamp: u128,
+        delay: u32,
         parent_id: [u8; 32],
         tag: [u8; 32],
         public_key: [u8; 32],
         signature: Vec<u8>,
         tx_payload: Vec<u8>,
     ) -> Block {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_millis();
+        // let timestamp = SystemTime::now()
+        //     .duration_since(UNIX_EPOCH)
+        //     .expect("Time went backwards")
+        //     .as_millis();
 
         Block {
             parent_id,
             timestamp,
+            delay,
             tag,
             public_key,
             signature,
@@ -60,7 +90,7 @@ impl Block {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
         bincode::deserialize(bytes).map_err(|error| {
-            debug!("Failed to deserialize Block: {}", error);
+            warn!("Failed to deserialize Block: {}", error);
             ()
         })
     }
@@ -69,6 +99,7 @@ impl Block {
         crypto::digest_sha_256(&self.to_bytes())
     }
 
+    // TODO: base on difficulty threshold
     pub fn get_quality(&self) -> u8 {
         utils::measure_quality(&self.tag)
     }
@@ -81,7 +112,7 @@ impl Block {
         let signature = Signature::from_bytes(&self.signature).unwrap();
 
         if public_key.verify_strict(&self.tag, &signature).is_err() {
-            info!("Invalid block, signature is invalid");
+            warn!("Invalid block, signature is invalid");
             return false;
         }
 
@@ -139,7 +170,7 @@ impl Proof {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
         bincode::deserialize(bytes).map_err(|error| {
-            debug!("Failed to deserialize proof: {}", error);
+            warn!("Failed to deserialize proof: {}", error);
             ()
         })
     }
@@ -177,21 +208,26 @@ pub struct FullBlock {
 impl FullBlock {
     pub fn is_valid(
         &self,
-        piece_count: usize,
         merkle_root: &[u8],
         genesis_piece_hash: &[u8; 32],
         sloth: &sloth::Sloth,
     ) -> bool {
         // ensure challenge index is correct
-        if self.proof.piece_index != utils::modulo(&self.block.parent_id, piece_count) as u64 {
-            info!("Invalid full block, piece index does not match challenge and piece size");
+
+        let adjusted_proof_index = self.proof.piece_index % PIECE_COUNT as u64;
+        let derived_proof_index = utils::modulo(&self.block.parent_id, PIECE_COUNT) as u64;
+
+        if adjusted_proof_index != derived_proof_index {
+            warn!("Adjusted is: {}", adjusted_proof_index);
+            warn!("Derived is: {}", derived_proof_index);
+            warn!("Invalid full block, piece index does not match challenge and piece size");
             return false;
         }
 
         // validate the tag
         let local_tag = crypto::create_hmac(&self.proof.encoding, &self.block.parent_id);
         if local_tag.cmp(&self.block.tag) != Ordering::Equal {
-            info!("Invalid full block, tag is invalid");
+            warn!("Invalid full block, tag is invalid");
             return false;
         }
 
@@ -201,7 +237,7 @@ impl FullBlock {
             &self.proof.merkle_proof,
             merkle_root,
         ) {
-            info!("Invalid full block, merkle proof is invalid");
+            warn!("Invalid full block, merkle proof is invalid");
             return false;
         }
 
@@ -221,7 +257,7 @@ impl FullBlock {
 
         let decoding_hash = crypto::digest_sha_256(&decoding.to_vec());
         if genesis_piece_hash.cmp(&decoding_hash) != Ordering::Equal {
-            info!("Invalid full block, encoding is invalid");
+            warn!("Invalid full block, encoding is invalid");
             // utils::compare_bytes(&proof.encoding, &proof.encoding, &decoding);
             return false;
         }
@@ -233,7 +269,7 @@ impl FullBlock {
             .verify_strict(&self.block.tag, &signature)
             .is_err()
         {
-            info!("Invalid full block, signature is invalid");
+            warn!("Invalid full block, signature is invalid");
             return false;
         }
 
@@ -253,8 +289,41 @@ pub enum BlockStatus {
     Invalid, // attempted to apply to the ledger but could not (fork)
 }
 
+pub struct Branch {
+    pub head_block_id: [u8; 32],
+    pub quality: u32,
+    pub height: u32,
+}
+
+impl Branch {
+    /// Create a new branch from genesis
+    pub fn new(block: &Block) -> Branch {
+        Branch {
+            head_block_id: block.get_id(),
+            quality: block.delay,
+            height: 0u32,
+        }
+    }
+
+    /// Add a block to the head of an existing branch
+    pub fn extend(&mut self, block: &Block) {
+        self.head_block_id = block.get_id();
+        self.quality += block.delay;
+        self.height += 1;
+    }
+
+    /// Create a new branch from an existing branch
+    pub fn fork() {}
+
+    /// Remove a branch from the ledger (and child blocks)
+    pub fn prune() {}
+
+    pub fn get() {}
+}
+
 pub struct Ledger {
     balances: HashMap<[u8; 32], usize>, // the current balance of all accounts
+    branches: HashSet<Branch>,
     applied_blocks_by_id: HashMap<[u8; 32], BlockWrapper>, // all applied blocks, stored by hash
     applied_block_ids_by_index: HashMap<u32, Vec<[u8; 32]>>, // hash for applied blocks, by block height
     pending_blocks_by_id: HashMap<[u8; 32], FullBlock>, // all pending blocks (unseen parent) by hash
@@ -264,7 +333,7 @@ pub struct Ledger {
     pub merkle_root: Vec<u8>,                           // only inlcuded for test ledger
     pub genesis_piece_hash: [u8; 32],
     pub quality_threshold: u8, // current quality target
-    pub sloth: sloth::Sloth,   // a sloth instance for decoding (verifying)
+    pub sloth: sloth::Sloth,   // a sloth instance for decoding (verifying) blocks
 }
 
 impl Ledger {
@@ -275,6 +344,7 @@ impl Ledger {
 
         Ledger {
             balances: HashMap::new(),
+            branches: HashSet::new(),
             applied_blocks_by_id: HashMap::new(),
             applied_block_ids_by_index: HashMap::new(),
             pending_blocks_by_id: HashMap::new(),
@@ -317,8 +387,11 @@ impl Ledger {
     }
 
     /// Retrieve a block by id (hash)
-    pub fn get_block_by_id(&self, id: &[u8; 32]) -> Block {
-        self.applied_blocks_by_id.get(id).unwrap().block.clone()
+    pub fn get_block_by_id(&self, id: &[u8; 32]) -> Option<Block> {
+        match self.applied_blocks_by_id.get(id) {
+            Some(block_wrapper) => Some(block_wrapper.block.clone()),
+            None => None,
+        }
     }
 
     /// Apply a new block to the ledger by id (hash)
@@ -326,6 +399,7 @@ impl Ledger {
         let block_id = block.get_id();
 
         // if not the genesis block then update parent with id
+        // TODO: refactor s.t. this check is not needed
         if self.height > 0 {
             // does parent exist in block map
             match self.applied_blocks_by_id.get_mut(&block.parent_id) {
@@ -334,6 +408,7 @@ impl Ledger {
                         // first block seen at this level, apply
                         parent_block_wrapper.children.push(block_id);
                     } else {
+                        // TODO: this fork should be allowed
                         // we have a fork, must compare quality, for now return invalid
                         info!("\n *** Warning -- A FORK has occurred ***");
                         return BlockStatus::Invalid;
@@ -348,6 +423,45 @@ impl Ledger {
                 }
             }
         }
+
+        // confirmed blocks: those > k-deep
+        // recent blocks: those <= k-deep
+        // heads: the tip of each branch
+
+        // only return one solution from genesis challenge
+        // for each challenge return the two best solutions
+        // forge each block and wait for arrival
+        // when the block arrives:
+        // if parent is in recent blocks
+        // add to recent blocks
+        // solve on top of
+        // if not
+        // the block is confirmed (and to late to bild on)
+        // the block has expired (too far behind the longest head)
+
+        // it shouldn't be k per se, but the delta between arrival times of each head
+        // sort recent blocks by arrival times
+        // walk backwards to last block from best
+        // if steps is greather K then confirm the block
+        // how do we remove the stale blocks then (and catch their arrivals)
+
+        // don't apply any rewards until the block is confirmed
+
+        // create the branch from block
+        // have to track a different tx set for each branch
+        // most tx will be the same between different branches
+        // aside from the coinbase tx
+        // would be much simpler if we just kept all blocks in the chain
+
+        // figure out which branch to extend
+        // in the simple case there is only one branch
+
+        // generally it could be either
+        // the head of any branch
+        // or some block further back in the branch
+
+        // set of blocks that may still be extended (k-deep)
+        // every time a branch is extended we remove from the set and the new one
 
         // update height
         self.height += 1;
@@ -390,74 +504,64 @@ impl Ledger {
     }
 
     /// Apply a pending block that is cached to the ledger, recursively checking to see if it is the parent of some other pending block. Ledger should be fully synced when complete.
-    pub fn apply_pending_block(&mut self, parent_id: [u8; 32]) -> [u8; 32] {
-        match self.pending_parents_by_id.get(&parent_id) {
-            Some(child_id) => {
-                match self.pending_blocks_by_id.get(child_id) {
-                    Some(full_block) => {
-                        info!(
-                            "Got child full block with id: {}",
-                            hex::encode(&full_block.block.get_id()[0..8])
-                        );
+    pub fn apply_pending_children(&mut self, mut parent_block_id: [u8; 32]) -> ([u8; 32], u128) {
+        loop {
+            match self.pending_parents_by_id.get(&parent_block_id) {
+                Some(pending_child_id) => {
+                    match self.pending_blocks_by_id.get(pending_child_id) {
+                        Some(pending_full_block) => {
+                            info!(
+                                "Got pending child full block with id: {}",
+                                hex::encode(&pending_full_block.block.get_id()[0..8])
+                            );
+                            // ensure the block is not in the ledger already
+                            if self.is_block_applied(&pending_full_block.block.get_id()) {
+                                panic!("Logic error, attempting to apply a pending block that is already in the ledger");
+                            }
+                            // ensure the parent is applied
+                            if !self.is_block_applied(&pending_full_block.block.parent_id) {
+                                panic!("Logic error, attempting to apply a pending block whose parent is not applied");
+                            }
+                            // TODO: use correct quality threshold (delay actually)
+                            // if full_block.block.get_quality() < self.quality_threshold {
+                            //     panic!("Logic error, cached full block has insufficient quality");
+                            // }
+                            let pending_block_copy = pending_full_block.block.clone();
+                            // TODO: wait for arrival of each block before moving ahead
 
-                        // ensure the block is not in the ledger already
-                        if self.is_block_applied(&full_block.block.get_id()) {
-                            panic!("Logic error, attempting to apply a pending block that is already in the ledger");
-                        }
-
-                        // ensure the parent is applied
-                        if !self.is_block_applied(&full_block.block.parent_id) {
-                            panic!("Logic error, attempting to apply a pending block whose parent is not applied");
-                        }
-
-                        if !full_block.is_valid(
-                            PLOT_SIZE,
-                            &self.merkle_root,
-                            &self.genesis_piece_hash,
-                            &self.sloth,
-                        ) {
-                            panic!("Logic error, cached full block is invalid");
-                        }
-
-                        if full_block.block.get_quality() < self.quality_threshold {
-                            panic!("Logic error, cached full block has insufficient quality");
-                        }
-
-                        let block_copy = full_block.block.clone();
-
-                        // remove from pending blocks and pending parents
-                        self.pending_blocks_by_id.remove(&block_copy.get_id());
-                        self.pending_parents_by_id.remove(&block_copy.parent_id);
-
-                        // add the block by id
-                        match self.apply_block_by_id(&block_copy) {
-                            BlockStatus::Applied => {
-                                // either continue (call recursive) or solve
-                                info!("Successfully applied pending block!");
-                                let block_id = block_copy.get_id();
-                                if self.is_pending_parent(&block_id) {
-                                    self.apply_pending_block(block_id)
-                                } else {
-                                    block_id
+                            // remove from pending blocks and pending parents
+                            self.pending_blocks_by_id
+                                .remove(&pending_block_copy.get_id());
+                            self.pending_parents_by_id
+                                .remove(&pending_block_copy.parent_id);
+                            // add the block by id
+                            match self.apply_block_by_id(&pending_block_copy) {
+                                BlockStatus::Applied => {
+                                    // either continue (call recursive) or solve
+                                    info!("Successfully applied pending block!");
+                                    parent_block_id = pending_block_copy.get_id();
+                                    if !self.is_pending_parent(&parent_block_id) {
+                                        return (parent_block_id, pending_block_copy.timestamp);
+                                    }
+                                }
+                                BlockStatus::Pending => {
+                                    panic!("Logic error, the block is already pending!");
+                                }
+                                BlockStatus::Invalid => {
+                                    panic!("Logic error, pending block should not be invalid!");
                                 }
                             }
-                            BlockStatus::Pending => {
-                                panic!("Logic error, the block is already pending!");
-                            }
-                            BlockStatus::Invalid => {
-                                panic!("Logic error, pending block should not be invalid!");
-                            }
+                        }
+                        None => {
+                            panic!(
+                                "Pending blocks are out of sync, cannot retrieve full pending block"
+                            );
                         }
                     }
-                    None => {
-                        panic!(
-                            "Pending blocks are out of sync, cannot retrieve full pending block"
-                        );
-                    }
                 }
-            }
-            None => {
-                panic!("Pending blocks are out of sync, cannot retrieve parent reference");
+                None => {
+                    panic!("Pending blocks are out of sync, cannot retrieve parent reference");
+                }
             }
         }
     }
@@ -476,6 +580,7 @@ impl Ledger {
     }
 
     pub fn get_block_height(&self) -> usize {
+        // TODO: maybe this should be cached locally?
         self.applied_blocks_by_id.len()
     }
 }
@@ -484,11 +589,17 @@ impl Ledger {
 mod tests {
 
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn block() {
         let tx_payload = crypto::generate_random_piece().to_vec();
         let block = Block::new(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_millis(),
+            300u32,
             crypto::random_bytes_32(),
             crypto::random_bytes_32(),
             crypto::random_bytes_32(),

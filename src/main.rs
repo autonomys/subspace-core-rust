@@ -1,12 +1,13 @@
 #![allow(dead_code)]
 
-#[macro_use]
 extern crate log;
 
 use log::LevelFilter;
 
 use async_std::sync::channel;
 use async_std::task;
+use console::AppState;
+use crossbeam_channel::unbounded;
 use futures::join;
 use log::*;
 use manager::ProtocolMessage;
@@ -14,53 +15,25 @@ use network::NodeType;
 use std::env;
 use std::net::SocketAddr;
 use std::thread;
-
 use subspace_core_rust::*;
 use tui_logger::{init_logger, set_default_level};
 
-use console::AppState;
-use crossbeam_channel::unbounded;
-
 /* ToDo
- *
- * Just build something that works
- * Then bench it over a live network
- * Then stress test for known attacks
- * Then get it production ready
- *
- * Implement a basic tui console
- * Import existing code
- * Reorder main with channels
- * Read state in manager
- * Connect network events to manager
- *
- *
+ * ----
+ * Optionally run the console app, just log to console instead
  * Base piece audits on block height and piece index correctly
  * Refactor audits / reads to use piece indcies instead of hashes throughout (map arch)
- * Determine what needs to be done to support forks in the ledger
- * Compare quality to target based on size, not leading zeros
- * Implement difficulty threshold correctly
- * Implement a timeout based on deadlines
  *
- * Security Experiments
- *
+ * Implementation Security
+ * -----------------------
  * Ensure that block and tx signatures are not malleable
  * Ensure that an attacker cannot crash a node by intentionally creating a panic condition
- * No way to malleate on the work difficulty threshold
- * Run security simulations
- *
- * Production Ready Tasks
- *
- * CUDA plotter
- * Secure wallet implementation
- * Add a notion of transactions
- * Erasure code state, build the state chain, light client syc
- *
- *
+ * No way to malleate on the difficulty target
  *
 */
 
-fn main() {
+#[async_std::main]
+async fn main() {
     /*
      * Startup: cargo run <node_type> <custom_path>
      *
@@ -111,6 +84,7 @@ fn main() {
             let (main_to_sol_tx, main_to_sol_rx) = channel::<ProtocolMessage>(32);
             let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(32);
             let sol_to_main_tx = any_to_main_tx.clone();
+            let main_to_main_tx = any_to_main_tx.clone();
 
             // only plot/solve if gateway or farmer
             if node_type == NodeType::Farmer || node_type == NodeType::Gateway {
@@ -135,6 +109,7 @@ fn main() {
                 any_to_main_rx,
                 main_to_net_tx,
                 main_to_sol_tx,
+                main_to_main_tx,
                 state_sender,
             );
 

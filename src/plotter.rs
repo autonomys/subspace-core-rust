@@ -5,7 +5,7 @@ use crate::plot::Plot;
 use async_std::task;
 use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, StreamExt};
-use indicatif::ProgressBar;
+// use indicatif::ProgressBar;
 use log::*;
 use rayon::prelude::*;
 use rug::integer::Order;

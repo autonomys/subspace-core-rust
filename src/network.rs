@@ -25,13 +25,10 @@ use std::{fmt, mem};
  *
  * Fix all unwrap calls
  * Ensure message size does not exceed 16k
- * Refactor both connection loops into a single function
  * Exchange peers on sync (and ensure peers request works)
- * Handle dropped connections with an event
  * Add another peer to replace the dropped one
- * Handle queued messages to dropped connections (in case connection can not be found)
  * Handle empty block responses, currently that peer will randomly come again soon
- * Hanle errors as results
+ * Handle errors as results
  * Write tests
  * Filter duplicate message with cache at manager using get_id
  * Handle get peers response with outbound message correctly
