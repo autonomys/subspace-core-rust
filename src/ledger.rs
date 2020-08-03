@@ -6,7 +6,7 @@ use ed25519_dalek::Signature;
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /* ToDo
  * ----
@@ -16,17 +16,41 @@ use std::collections::{HashMap, HashSet};
  * Commits to the ledger should be atmoic (if we fail part way through)
  * Quality/Delay threshold checks and scoring should use the difficulty target for that time
  *
- * When a new block deadline "arrives"
- *  If its parent is the head of a tracked branch:
- *      Simply extend the branch and add its quality
- *  Else:
- *      Get the block and its children
- *      Trace each child branch until either:
- *          If all branches are within k-deep
- *          And there is room for the new branch
- *          Or the new branch exceeds the quality of an existing branch (if full)
- *          Then create the new branch (and possibly remove the old branch)
- *          Ensure we also prune the blocks of that stale branch (that are unique to it) *
+ * Why does consensus occasionally stall?
+ * First, the channel buffers are overflowing -> use mpsc::unbounded?
+ * Second, the disk reads are overflowing
+ *
+ * Degree of Simulation (DoS): How may solutions I present for each challenge
+ * Confirmation Depth (CD): How deep a potential block may be before we confirm its parent and prune
+ * Solve Complexity (SC): The number of disk reads per challenge (equal to my replication factor)
+ *
+ * Complexity = SC x (DoS + 1) ^ CD
+ *
+ * Example: 1 GB Ledger / 1 TB Drive => 1,000 RF
+ * CD = 4 Levels
+ * DoS = 8 (secure)
+ *
+ * Complexity = 1,000 x 9^4
+ * Complexity = 6.5 Million 4k reads per challenge
+ *
+ * 24 GB/sec read throughput
+ *
+ * 256 x 8^3 = 500 Mb/sec
+ *
+ * Refactoring
+ * -----------
+ * Store all blocks in the same hashmap with a wrapper for status
+ * Statuses include confirmed, pending_arrival, pending_parent, pending_confirmation
+ *
+ * new local -> pending arrival
+ * new gossip -> pending parent or pending arrival
+ * arrives -> pending confirmation (or discarded)
+ * confirmed -> (or discarded)
+ *
+ * new via sync -> check for arrival, check for parent
+ *
+ * Instead of passing blocks around in protocol messages, just pass their id
+ *
  *
  * TESTING
  * -------
@@ -67,11 +91,6 @@ impl Block {
         signature: Vec<u8>,
         tx_payload: Vec<u8>,
     ) -> Block {
-        // let timestamp = SystemTime::now()
-        //     .duration_since(UNIX_EPOCH)
-        //     .expect("Time went backwards")
-        //     .as_millis();
-
         Block {
             parent_id,
             timestamp,
@@ -277,61 +296,26 @@ impl FullBlock {
     }
 }
 
-// to track known children, for managing forks
-pub struct BlockWrapper {
-    pub block: Block,
-    pub children: Vec<[u8; 32]>,
-}
-
 pub enum BlockStatus {
-    Applied, // applied to the ledger, extending the current head legally
-    Pending, // parent is unknown, cached until parent is received
-    Invalid, // attempted to apply to the ledger but could not (fork)
-}
-
-pub struct Branch {
-    pub head_block_id: [u8; 32],
-    pub quality: u32,
-    pub height: u32,
-}
-
-impl Branch {
-    /// Create a new branch from genesis
-    pub fn new(block: &Block) -> Branch {
-        Branch {
-            head_block_id: block.get_id(),
-            quality: block.delay,
-            height: 0u32,
-        }
-    }
-
-    /// Add a block to the head of an existing branch
-    pub fn extend(&mut self, block: &Block) {
-        self.head_block_id = block.get_id();
-        self.quality += block.delay;
-        self.height += 1;
-    }
-
-    /// Create a new branch from an existing branch
-    pub fn fork() {}
-
-    /// Remove a branch from the ledger (and child blocks)
-    pub fn prune() {}
-
-    pub fn get() {}
+    // Arrived,   // tracked in recent blocks, but not included in the ledger
+    Confirmed, // applied to the ledger, extending the current head legally
+    Pending,   // parent is unknown, cached until parent is received
+    Invalid,   // attempted to apply to the ledger but could not
 }
 
 pub struct Ledger {
-    balances: HashMap<[u8; 32], usize>, // the current balance of all accounts
-    branches: HashSet<Branch>,
-    applied_blocks_by_id: HashMap<[u8; 32], BlockWrapper>, // all applied blocks, stored by hash
-    applied_block_ids_by_index: HashMap<u32, Vec<[u8; 32]>>, // hash for applied blocks, by block height
+    recent_blocks_by_id: HashMap<[u8; 32], Block>, // recently arrived blocks that have not been confirmed
+    recent_children_by_parent_id: HashMap<[u8; 32], Vec<[u8; 32]>>,
+    applied_blocks_by_id: HashMap<[u8; 32], Block>, // all applied blocks, stored by hash
+    applied_block_id_by_index: HashMap<u32, [u8; 32]>, // hash for applied blocks, by block height
+    balances: HashMap<[u8; 32], usize>,             // the current balance of all accounts
     pending_blocks_by_id: HashMap<[u8; 32], FullBlock>, // all pending blocks (unseen parent) by hash
     pending_parents_by_id: HashMap<[u8; 32], [u8; 32]>, // all parents we are expecting, with their child (which will be in pending blocks)
     pub height: u32,                                    // current block height
     pub quality: u32,                                   // aggregate quality for this chain
     pub merkle_root: Vec<u8>,                           // only inlcuded for test ledger
     pub genesis_piece_hash: [u8; 32],
+    pub latest_block_hash: [u8; 32],
     pub quality_threshold: u8, // current quality target
     pub sloth: sloth::Sloth,   // a sloth instance for decoding (verifying) blocks
 }
@@ -343,16 +327,18 @@ impl Ledger {
         let sloth = sloth::Sloth::init(prime_size);
 
         Ledger {
-            balances: HashMap::new(),
-            branches: HashSet::new(),
+            recent_blocks_by_id: HashMap::new(),
+            recent_children_by_parent_id: HashMap::new(),
             applied_blocks_by_id: HashMap::new(),
-            applied_block_ids_by_index: HashMap::new(),
+            applied_block_id_by_index: HashMap::new(),
             pending_blocks_by_id: HashMap::new(),
             pending_parents_by_id: HashMap::new(),
+            balances: HashMap::new(),
             height: 0,
             quality: 0,
             merkle_root,
             genesis_piece_hash,
+            latest_block_hash: genesis_piece_hash,
             quality_threshold: INITIAL_QUALITY_THRESHOLD,
             sloth,
         }
@@ -370,98 +356,180 @@ impl Ledger {
 
     /// Retrieve the first block at a given index (block height)
     pub fn get_block_by_index(&self, index: u32) -> Option<Block> {
-        // ToDo
-        // for now take the first id in the vec
-        // later we will have to handle forks and reorgs
-        self.applied_block_ids_by_index
+        self.applied_block_id_by_index
             .get(&index)
-            .and_then(|block_ids| {
+            .and_then(|block_id| {
                 Some(
                     self.applied_blocks_by_id
-                        .get(&block_ids[0])
+                        .get(&block_id.clone())
                         .expect("Block index and blocks map have gotten out of sync!")
-                        .block
                         .clone(),
                 )
             })
     }
 
     /// Retrieve a block by id (hash)
-    pub fn get_block_by_id(&self, id: &[u8; 32]) -> Option<Block> {
+    pub fn get_confirmed_block_by_id(&self, id: &[u8; 32]) -> Option<Block> {
         match self.applied_blocks_by_id.get(id) {
-            Some(block_wrapper) => Some(block_wrapper.block.clone()),
+            Some(block) => Some(block.clone()),
             None => None,
         }
+    }
+
+    /// Retrieve a recent block by id (hash)
+    pub fn get_recent_block_by_id(&self, id: &[u8; 32]) -> Option<Block> {
+        match self.recent_blocks_by_id.get(id) {
+            Some(block) => Some(block.clone()),
+            None => None,
+        }
+    }
+
+    // recursively remove all recent descendants for a set of siblings
+    pub fn prune_branches(&mut self, siblings: Vec<[u8; 32]>) {
+        for sibling in siblings.iter() {
+            // remove the sibling from recent blocks
+            self.recent_blocks_by_id.remove(sibling);
+
+            // get pointers to its children
+            // let children = self
+            //     .recent_children_by_parent_id
+            //     .get(sibling)
+            //     .unwrap()
+            //     .clone();
+
+            match self.recent_children_by_parent_id.get(sibling) {
+                Some(children) => {
+                    // remove all children
+                    self.prune_branches(children.clone());
+                }
+                None => {}
+            }
+
+            // remove the pointers to its children
+            self.recent_children_by_parent_id.remove(sibling);
+            // warn!("Removing pruned child block");
+        }
+    }
+
+    /// On block arrival add it to the recent block pool and check if it results in a confirmation
+    pub fn apply_recent_block(&mut self, block: &Block) -> BlockStatus {
+        // given a block_id of a recently arrived block
+
+        if self.height == 0 {
+            // genesis block, apply and confirm immediately
+            info!("Applying the genesis block");
+            return self.apply_block_by_id(block);
+        } else {
+            // normal block, find parent and handle
+
+            // look for parent in recent blocks
+            match self.get_recent_block_by_id(&block.parent_id) {
+                Some(first_parent_block) => {
+                    let block_id = block.get_id();
+
+                    // info!("Applying a block with a recent parent");
+
+                    // add to recent blocks
+                    self.recent_blocks_by_id.insert(block_id, block.clone());
+
+                    // get or create reference to parent, then add
+                    self.recent_children_by_parent_id
+                        .entry(block.parent_id)
+                        .and_modify(|children| children.push(block_id))
+                        .or_insert(vec![block_id]);
+
+                    let mut parent_block = first_parent_block;
+                    let mut branch_depth = 1;
+
+                    // count recent blocks back
+                    while let Some(next_parent_block) =
+                        self.get_recent_block_by_id(&parent_block.parent_id)
+                    {
+                        branch_depth += 1;
+                        parent_block = next_parent_block;
+                    }
+
+                    // info!(
+                    //     "Branch depth is is: {}/{}",
+                    //     branch_depth, CONFIRMATION_DEPTH
+                    // );
+
+                    if branch_depth >= CONFIRMATION_DEPTH {
+                        // apply the last parent and remove from recent blocks
+                        let confirmed_block_id = parent_block.get_id();
+                        self.recent_blocks_by_id.remove(&confirmed_block_id);
+
+                        // warn!("Confirming block, removing from recent and deleting child pointers");
+
+                        // remove all siblings of oldest parent
+                        let siblings: Vec<[u8; 32]> = self
+                            .recent_children_by_parent_id
+                            .get(&parent_block.parent_id)
+                            .unwrap()
+                            .clone()
+                            .iter()
+                            .filter(|child_id| **child_id != confirmed_block_id)
+                            .map(|child_id| *child_id)
+                            .collect();
+
+                        self.prune_branches(siblings);
+
+                        // stop tracking the last confirmed block
+                        self.recent_children_by_parent_id
+                            .remove(&parent_block.parent_id);
+
+                        // apply the new confirmed block
+                        return self.apply_block_by_id(&parent_block);
+                    }
+
+                    // TODO: Change this status to a better name
+                    return BlockStatus::Confirmed;
+                }
+                None => {
+                    // warn!(
+                    //     "Could not find parent block in recent blocks, checking confirmed blocks"
+                    // );
+                }
+            }
+
+            // look for parent in confimred blocks
+            match self.get_confirmed_block_by_id(&block.parent_id) {
+                Some(_parent_block) => {
+                    if block.parent_id == self.latest_block_hash {
+                        let block_id = block.get_id();
+                        // add to recent blocks
+                        self.recent_blocks_by_id.insert(block_id, block.clone());
+
+                        // get or create reference to parent, then add child
+                        self.recent_children_by_parent_id
+                            .entry(block.parent_id)
+                            .and_modify(|children| children.push(block_id))
+                            .or_insert(vec![block_id]);
+
+                        // info!("Added recent block directly to confirmed block");
+
+                        // TODO: Change this status to a better name
+                        return BlockStatus::Confirmed;
+                    } else {
+                        // warn!("Recent block is late, its parent has already been confirmed!")
+                    }
+                }
+                None => {
+                    // warn!("Recent block could not be applied, could not find a parent!");
+                }
+            }
+
+            BlockStatus::Invalid
+        }
+
+        // what about recent gossip for a node who is syncing?
     }
 
     /// Apply a new block to the ledger by id (hash)
     pub fn apply_block_by_id(&mut self, block: &Block) -> BlockStatus {
         let block_id = block.get_id();
 
-        // if not the genesis block then update parent with id
-        // TODO: refactor s.t. this check is not needed
-        if self.height > 0 {
-            // does parent exist in block map
-            match self.applied_blocks_by_id.get_mut(&block.parent_id) {
-                Some(parent_block_wrapper) => {
-                    if parent_block_wrapper.children.is_empty() {
-                        // first block seen at this level, apply
-                        parent_block_wrapper.children.push(block_id);
-                    } else {
-                        // TODO: this fork should be allowed
-                        // we have a fork, must compare quality, for now return invalid
-                        info!("\n *** Warning -- A FORK has occurred ***");
-                        return BlockStatus::Invalid;
-                    }
-                }
-                None => {
-                    info!(
-                        "Could not find parent block in blocks_by_id with id: {}",
-                        hex::encode(&block.parent_id)
-                    );
-                    return BlockStatus::Pending;
-                }
-            }
-        }
-
-        // confirmed blocks: those > k-deep
-        // recent blocks: those <= k-deep
-        // heads: the tip of each branch
-
-        // only return one solution from genesis challenge
-        // for each challenge return the two best solutions
-        // forge each block and wait for arrival
-        // when the block arrives:
-        // if parent is in recent blocks
-        // add to recent blocks
-        // solve on top of
-        // if not
-        // the block is confirmed (and to late to bild on)
-        // the block has expired (too far behind the longest head)
-
-        // it shouldn't be k per se, but the delta between arrival times of each head
-        // sort recent blocks by arrival times
-        // walk backwards to last block from best
-        // if steps is greather K then confirm the block
-        // how do we remove the stale blocks then (and catch their arrivals)
-
-        // don't apply any rewards until the block is confirmed
-
-        // create the branch from block
-        // have to track a different tx set for each branch
-        // most tx will be the same between different branches
-        // aside from the coinbase tx
-        // would be much simpler if we just kept all blocks in the chain
-
-        // figure out which branch to extend
-        // in the simple case there is only one branch
-
-        // generally it could be either
-        // the head of any branch
-        // or some block further back in the branch
-
-        // set of blocks that may still be extended (k-deep)
-        // every time a branch is extended we remove from the set and the new one
+        self.latest_block_hash = block_id;
 
         // update height
         self.height += 1;
@@ -475,24 +543,15 @@ impl Ledger {
             .and_modify(|balance| *balance += block.reward as usize)
             .or_insert(block.reward as usize);
 
-        // add new block to block map
-        let block_wrapper = BlockWrapper {
-            block: block.clone(),
-            children: Vec::new(),
-        };
-
-        self.applied_blocks_by_id.insert(block_id, block_wrapper);
+        self.applied_blocks_by_id.insert(block_id, block.clone());
 
         // Adds a pointer to this block id for the given index in the ledger
-        // Multiple blocks may exist at the same index, the first block reflects the longest chain
-        self.applied_block_ids_by_index
-            .entry(self.height - 1)
-            .and_modify(|v| v.push(block_id))
-            .or_insert_with(|| vec![block_id]);
+        self.applied_block_id_by_index
+            .insert(self.height - 1, block_id);
 
-        info!("Added block with id: {}", hex::encode(&block_id[0..8]));
+        // info!("Added block with id: {}", hex::encode(&block_id[0..8]));
 
-        BlockStatus::Applied
+        BlockStatus::Confirmed
     }
 
     /// Cache a pending block and add parent to watch list. When parent is received, it will be applied to the ledger.
@@ -536,7 +595,7 @@ impl Ledger {
                                 .remove(&pending_block_copy.parent_id);
                             // add the block by id
                             match self.apply_block_by_id(&pending_block_copy) {
-                                BlockStatus::Applied => {
+                                BlockStatus::Confirmed => {
                                     // either continue (call recursive) or solve
                                     info!("Successfully applied pending block!");
                                     parent_block_id = pending_block_copy.get_id();

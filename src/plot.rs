@@ -357,6 +357,7 @@ impl Plot {
         piece_count: usize,
         replication_factor: u32,
         target: u32,
+        is_genesis: bool,
     ) -> Vec<Solution> {
         // choose the correct "virtual" piece
         let base_index = utils::modulo(&challenge, piece_count);
@@ -382,7 +383,11 @@ impl Plot {
 
         // sort the solutions so that smallest delay is first
         solutions.sort_by_key(|s| s.delay);
-        solutions[0..DEGREE_OF_SIMULATION].to_vec()
+        let mut set_size = DEGREE_OF_SIMULATION;
+        if is_genesis {
+            set_size = 1
+        }
+        solutions[0..set_size].to_vec()
     }
 
     /// Writes the map to disk to persist between sessions (does not load on startup yet)

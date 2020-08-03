@@ -41,6 +41,7 @@ pub async fn run(
             ProtocolMessage::BlockChallenge {
                 challenge,
                 base_time,
+                is_genesis,
             } => {
                 let solutions = plot
                     .solve(
@@ -49,8 +50,11 @@ pub async fn run(
                         PIECE_COUNT,
                         replication_factor,
                         target_value,
+                        is_genesis,
                     )
                     .await;
+
+                // info!("Solver is sending solutions to main");
 
                 sol_to_main_tx
                     .send(ProtocolMessage::BlockSolutions { solutions })

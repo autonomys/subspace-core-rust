@@ -105,9 +105,9 @@ async fn main() {
             let mut ledger = ledger::Ledger::new(merkle_root, genesis_piece_hash);
 
             // create channels between background tasks
-            let (main_to_net_tx, main_to_net_rx) = channel::<ProtocolMessage>(32);
-            let (main_to_sol_tx, main_to_sol_rx) = channel::<ProtocolMessage>(32);
-            let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(32);
+            let (main_to_net_tx, main_to_net_rx) = channel::<ProtocolMessage>(4096);
+            let (main_to_sol_tx, main_to_sol_rx) = channel::<ProtocolMessage>(4096);
+            let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(4096);
             let sol_to_main_tx = any_to_main_tx.clone();
             let main_to_main_tx = any_to_main_tx.clone();
 
