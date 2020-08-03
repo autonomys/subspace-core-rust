@@ -2,9 +2,9 @@
 
 use super::*;
 use crate::plot::Plot;
-use async_std::task;
-// use indicatif::ProgressBar;
 use async_std::path::PathBuf;
+use async_std::task;
+use indicatif::ProgressBar;
 use log::*;
 use rayon::prelude::*;
 use rug::integer::Order;
@@ -39,6 +39,11 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
                 // init sloth
                 let sloth = sloth::Sloth::init(PRIME_SIZE_BITS);
 
+                let mut bar: Option<ProgressBar> = None;
+                if !CONSOLE {
+                    bar = Some(ProgressBar::new(PLOT_SIZE as u64))
+                };
+
                 // plot pieces in parallel on all cores, using IV as a source of randomness
                 // this is just for efficient testing atm
                 (0..PLOT_SIZE).into_par_iter().for_each(|index| {
@@ -61,21 +66,42 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
                             let _ = plot.write(piece, index).await;
                         }
                     });
-                    // bar.inc(1);
+                    if let Some(b) = &bar {
+                        b.inc(1);
+                    }
                 });
+
+                if let Some(b) = &bar {
+                    b.finish();
+                }
 
                 task::block_on(plot.force_write_map())
             }
         });
 
-        // let bar = ProgressBar::new(PLOT_SIZE as u64);
         let plot_time = Instant::now();
 
         info!("Sloth is slowly plotting {} pieces...", PLOT_SIZE);
 
-        plotting_fut.await.expect("Failed to plot");
+        if !CONSOLE {
+            println!(
+                r#"
+          `""==,,__
+            `"==..__"=..__ _    _..-==""_
+                 .-,`"=/ /\ \""/_)==""``
+                ( (    | | | \/ |
+                 \ '.  |  \;  \ /
+                  |  \ |   |   ||
+             ,-._.'  |_|   |   ||
+            .\_/\     -'   ;   Y
+           |  `  |        /    |-.
+           '. __/_    _.-'     /'
+                  `'-.._____.-'
+        "#
+            );
+        }
 
-        // bar.finish();
+        plotting_fut.await.expect("Failed to plot");
 
         let total_plot_time = plot_time.elapsed();
         let average_plot_time =

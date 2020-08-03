@@ -399,11 +399,13 @@ pub async fn run(
         }
 
         // send state update requests in a loop to network
-        loop {
-            main_to_net_tx
-                .send(ProtocolMessage::StateUpdateRequest)
-                .await;
-            task::sleep(Duration::from_millis(1000)).await;
+        if CONSOLE {
+            loop {
+                main_to_net_tx
+                    .send(ProtocolMessage::StateUpdateRequest)
+                    .await;
+                task::sleep(Duration::from_millis(1000)).await;
+            }
         }
     };
 

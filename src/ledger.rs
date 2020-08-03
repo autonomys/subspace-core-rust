@@ -543,7 +543,7 @@ impl Ledger {
         self.applied_block_id_by_index
             .insert(self.height - 1, block_id);
 
-        // info!("Added block with id: {}", hex::encode(&block_id[0..8]));
+        info!("Added block with id: {}", hex::encode(&block_id[0..8]));
 
         BlockStatus::Confirmed
     }
