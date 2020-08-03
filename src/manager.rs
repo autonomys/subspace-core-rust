@@ -65,6 +65,7 @@ pub enum ProtocolMessage {
     BlockChallenge {
         challenge: [u8; 32],
         base_time: u128,
+        is_genesis: bool,
     },
     /// Solver sends a set of solutions back to main for application
     BlockSolutions {
@@ -160,7 +161,7 @@ pub async fn run(
                         }
 
                         match ledger.apply_block_by_id(&block) {
-                            BlockStatus::Applied => {
+                            BlockStatus::Confirmed => {
                                 // may still need to skip the loop before solving, in case any more pending blocks have queued
 
                                 info!("Applied new block received over the network during sync to the ledger");
@@ -185,6 +186,7 @@ pub async fn run(
                                             .send(ProtocolMessage::BlockChallenge {
                                                 challenge,
                                                 base_time: timestamp,
+                                                is_genesis: false,
                                             })
                                             .await;
                                     }
@@ -263,7 +265,7 @@ pub async fn run(
                         // );
 
                         for solution in solutions.into_iter() {
-                            info!("Received a solution with delay: {}", solution.delay);
+                            // info!("Received a solution with delay: {}", solution.delay);
 
                             // immediately gossip, on arrival apply, solve if valid extension
 
@@ -307,46 +309,39 @@ pub async fn run(
                         }
                     }
                     ProtocolMessage::BlockArrived { block } => {
-                        // attempt to apply the block to the ledger, optionally solve
-
                         // TODO: ensure that we do not apply stale blocks to the ledger
+                        // info!("A new block has arrived");
 
-                        match ledger.apply_block_by_id(&block) {
-                            BlockStatus::Applied => {
-                                info!("Applied new block to the ledger on deadline arrival!");
-                                // block.print();
-
-                                // check if pending parent
-                                // TODO: have to ensure that when applying pending blocks, their deadline is honored
+                        match ledger.apply_recent_block(&block) {
+                            BlockStatus::Confirmed => {
                                 let block_id = block.get_id();
-                                let mut challenge = block_id;
-                                let mut base_time = block.timestamp;
-                                if ledger.is_pending_parent(&block_id) {
-                                    let (last_challenge, last_base_time) =
-                                        ledger.apply_pending_children(block_id);
-                                    challenge = last_challenge;
-                                    base_time = last_base_time;
-                                }
+                                let challenge = block_id;
+                                let base_time = block.timestamp;
+
+                                // TODO: Handle the potential for cached blocks waiting for a parents arrival
+                                // if ledger.is_pending_parent(&block_id) {
+                                //     let (last_challenge, last_base_time) =
+                                //         ledger.apply_pending_children(block_id);
+                                //     challenge = last_challenge;
+                                //     base_time = last_base_time;
+                                // }
 
                                 if node_type == NodeType::Farmer || node_type == NodeType::Gateway {
                                     // now we solve
+
+                                    // info!("Sending challenge to solver");
+
                                     main_to_sol_tx
                                         .send(ProtocolMessage::BlockChallenge {
                                             challenge,
                                             base_time,
+                                            is_genesis: false,
                                         })
                                         .await;
                                 }
                             }
-                            BlockStatus::Pending => {
-                                // this should not happen, control flow logic error
-                                panic!("A block generated locally does not have a known parent...")
-                            }
-                            BlockStatus::Invalid => {
-                                // illegal extension to the ledger, ignore
-                                // may have applied a better block received over the network while the solution was being generated
-                                info!("Attempted to add locally generated block to the ledger, but was no longer valid");
-                            }
+                            BlockStatus::Pending => {}
+                            BlockStatus::Invalid => {}
                         }
                     }
                     ProtocolMessage::StateUpdateResponse { mut state } => {
@@ -387,6 +382,7 @@ pub async fn run(
                     .send(ProtocolMessage::BlockChallenge {
                         challenge: genesis_piece_hash,
                         base_time: timestamp,
+                        is_genesis: true,
                     })
                     .await;
             }
