@@ -47,7 +47,7 @@ Remove `config.json`, `plot.bin` and `plot-map.bin` at the location where client
 4. ~~Ledger~~
 5. ~~TCP Gossip Network~~
 6. ~~Terminal Console~~
-7. Manages Forks
+7. ~~Manages Forks~~
 8. Basic tx scheme
 9. Erasrue code state
 

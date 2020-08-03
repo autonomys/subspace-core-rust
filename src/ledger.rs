@@ -390,16 +390,10 @@ impl Ledger {
             // remove the sibling from recent blocks
             self.recent_blocks_by_id.remove(sibling);
 
-            // get pointers to its children
-            // let children = self
-            //     .recent_children_by_parent_id
-            //     .get(sibling)
-            //     .unwrap()
-            //     .clone();
-
             match self.recent_children_by_parent_id.get(sibling) {
                 Some(children) => {
                     // remove all children
+                    #[allow(mutable_borrow_reservation_conflict)]
                     self.prune_branches(children.clone());
                 }
                 None => {}

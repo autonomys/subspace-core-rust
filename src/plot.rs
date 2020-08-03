@@ -444,7 +444,7 @@ mod tests {
 
         let piece = crypto::generate_random_piece();
 
-        let mut plot = Plot::open_or_create(&path).await.unwrap();
+        let plot = Plot::open_or_create(&path).await.unwrap();
         plot.write(piece, 0).await.unwrap();
         let extracted_piece = plot.read(0).await.unwrap();
 
