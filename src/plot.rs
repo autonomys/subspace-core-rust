@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use super::*;
 use crate::Piece;
 use crate::PIECE_SIZE;
 use async_std::fs::OpenOptions;
@@ -13,8 +12,8 @@ use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
 use futures::SinkExt;
 use futures::StreamExt;
-use log::error;
-use std::collections::HashMap;
+use rocksdb::IteratorMode;
+use rocksdb::DB;
 use std::convert::TryInto;
 use std::io;
 use std::io::SeekFrom;
@@ -30,7 +29,7 @@ const OFFSET_LENGTH: usize = mem::size_of::<u64>();
 #[derive(Debug)]
 pub enum PlotCreationError {
     PlotOpen(io::Error),
-    PlotMapOpen(io::Error),
+    PlotMapOpen(rocksdb::Error),
     MapRead(io::Error),
 }
 
@@ -94,42 +93,10 @@ impl Plot {
             .await
             .map_err(PlotCreationError::PlotOpen)?;
 
-        let mut map_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path.join("plot-map.bin"))
-            .await
-            .map_err(PlotCreationError::PlotMapOpen)?;
-
-        let mut map = HashMap::new();
-
-        {
-            let map_bytes_len = map_file
-                .metadata()
-                .await
-                .map_err(PlotCreationError::MapRead)?
-                .len();
-            let mut buffer = [0u8; INDEX_LENGTH + OFFSET_LENGTH];
-            // let mut buffer = Vec::with_capacity(index_length + offset_length);
-            if map_bytes_len > 0 {
-                map_file
-                    .seek(SeekFrom::Start(0))
-                    .await
-                    .map_err(PlotCreationError::MapRead)?;
-                for _ in (0..map_bytes_len).step_by(INDEX_LENGTH + OFFSET_LENGTH) {
-                    if map_file.read_exact(&mut buffer).await.is_err() {
-                        error!("Bad map, ignoring remaining bytes");
-                        break;
-                    }
-                    let index =
-                        usize::from_le_bytes(buffer[..INDEX_LENGTH].as_ref().try_into().unwrap());
-                    let offset =
-                        u64::from_le_bytes(buffer[INDEX_LENGTH..].as_ref().try_into().unwrap());
-                    map.insert(index, offset);
-                }
-            }
-        }
+        let map_db = Arc::new(
+            // DB::open_default(path.join("plot-map.rocksdb").to_str().unwrap())
+            DB::open_default(path.join("plot-map")).map_err(PlotCreationError::PlotMapOpen)?,
+        );
 
         // Channel with at most single element to throttle loop below if there are no updates
         let (any_requests_sender, mut any_requests_receiver) = mpsc::channel::<()>(1);
@@ -156,14 +123,30 @@ impl Plot {
 
                     match read_request {
                         Some(ReadRequests::IsEmpty { result_sender }) => {
-                            let _ = result_sender.send(map.is_empty());
+                            let _ = result_sender.send(
+                                task::spawn_blocking({
+                                    let map_db = Arc::clone(&map_db);
+                                    move || map_db.iterator(IteratorMode::Start).next().is_none()
+                                })
+                                .await,
+                            );
                         }
                         Some(ReadRequests::ReadEncoding {
                             index,
                             result_sender,
                         }) => {
-                            let _ = result_sender.send(match map.get(&index) {
-                                Some(&position) => {
+                            // TODO: Remove unwrap
+                            let position = task::spawn_blocking({
+                                let map_db = Arc::clone(&map_db);
+                                move || map_db.get(index.to_le_bytes())
+                            })
+                            .await
+                            .unwrap()
+                            .map(|position| {
+                                u64::from_le_bytes(position.as_slice().try_into().unwrap())
+                            });
+                            let _ = result_sender.send(match position {
+                                Some(position) => {
                                     try {
                                         plot_file.seek(SeekFrom::Start(position)).await?;
                                         let mut buffer = [0u8; PIECE_SIZE];
@@ -191,14 +174,26 @@ impl Plot {
                         encoding,
                         result_sender,
                     })) => {
-                        map.remove(&index);
+                        // TODO: remove unwrap
+                        task::spawn_blocking({
+                            let map_db = Arc::clone(&map_db);
+                            move || map_db.delete(index.to_le_bytes())
+                        })
+                        .await
+                        .unwrap();
 
                         let _ = result_sender.send(
                             try {
                                 let position = plot_file.seek(SeekFrom::Current(0)).await?;
                                 plot_file.write_all(&encoding).await?;
 
-                                map.insert(index, position);
+                                // TODO: remove unwrap
+                                task::spawn_blocking({
+                                    let map_db = Arc::clone(&map_db);
+                                    move || map_db.put(index.to_le_bytes(), position.to_le_bytes())
+                                })
+                                .await
+                                .unwrap();
                             },
                         );
                     }
@@ -206,23 +201,19 @@ impl Plot {
                         index,
                         result_sender,
                     })) => {
-                        map.remove(&index);
+                        // TODO: remove unwrap
+                        task::spawn_blocking({
+                            let map_db = Arc::clone(&map_db);
+                            move || map_db.delete(index.to_le_bytes())
+                        })
+                        .await
+                        .unwrap();
 
                         let _ = result_sender.send(Ok(()));
                     }
+                    // TODO: Remove this
                     Ok(Some(WriteRequests::ForceWriteMap { result_sender })) => {
-                        let _ = result_sender.send(
-                            try {
-                                map_file.seek(SeekFrom::Start(0)).await?;
-                                map_file
-                                    .set_len(((INDEX_LENGTH + OFFSET_LENGTH) * map.len()) as u64)
-                                    .await?;
-                                for (index, offset) in map.iter() {
-                                    map_file.write_all(&index.to_le_bytes()).await?;
-                                    map_file.write_all(&offset.to_le_bytes()).await?;
-                                }
-                            },
-                        );
+                        let _ = result_sender.send(Ok(()));
                     }
                     Ok(None) => {
                         return;

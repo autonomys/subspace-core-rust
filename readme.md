@@ -9,6 +9,11 @@ Read the [specifications](/spec/overview.md) (wip) for more details.
 
 If you have not previously installed the `gmp_mpfr_sys` crate, follow these [instructions](https://docs.rs/gmp-mpfr-sys/1.3.0/gmp_mpfr_sys/index.html#building-on-gnulinux).
 
+RocksDB on Linux needs LLVM/Clang:
+```bash
+sudo apt-get install llvm clang
+```
+
 ```
 git clone https://github.com/subspace/subspace-core-rust.git
 cd subspace-core-rust
@@ -37,7 +42,7 @@ Benches single block encode/decode time and full piece encode/decode time for ea
 * `SUBSPACE_DIR` can be used to specify alternative default location for plot to be created in
 
 ### Cleanup
-Remove `config.json`, `plot.bin` and `plot-map.bin` at the location where client stores filed (printed during startup).
+Remove `config.json`, `plot.bin` and `plot-map` at the location where client stores filed (printed during startup).
 
 ### Status
 
