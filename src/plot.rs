@@ -30,6 +30,7 @@ const OFFSET_LENGTH: usize = mem::size_of::<u64>();
 pub enum PlotCreationError {
     PlotOpen(io::Error),
     PlotMapOpen(rocksdb::Error),
+    PlotTagsOpen(rocksdb::Error),
     MapRead(io::Error),
 }
 
@@ -48,6 +49,7 @@ enum ReadRequests {
 enum WriteRequests {
     WriteEncoding {
         encoding: Piece,
+        tag: u64,
         index: usize,
         result_sender: oneshot::Sender<io::Result<()>>,
     },
@@ -96,6 +98,11 @@ impl Plot {
         let map_db = Arc::new(
             // DB::open_default(path.join("plot-map.rocksdb").to_str().unwrap())
             DB::open_default(path.join("plot-map")).map_err(PlotCreationError::PlotMapOpen)?,
+        );
+
+        let tags_db = Arc::new(
+            // DB::open_default(path.join("plot-map.rocksdb").to_str().unwrap())
+            DB::open_default(path.join("plot-tags")).map_err(PlotCreationError::PlotTagsOpen)?,
         );
 
         // Channel with at most single element to throttle loop below if there are no updates
@@ -171,6 +178,7 @@ impl Plot {
                 match write_request {
                     Ok(Some(WriteRequests::WriteEncoding {
                         index,
+                        tag,
                         encoding,
                         result_sender,
                     })) => {
@@ -190,7 +198,17 @@ impl Plot {
                                 // TODO: remove unwrap
                                 task::spawn_blocking({
                                     let map_db = Arc::clone(&map_db);
-                                    move || map_db.put(index.to_le_bytes(), position.to_le_bytes())
+                                    let tags_db = Arc::clone(&tags_db);
+                                    move || {
+                                        tags_db
+                                            .put(tag.to_le_bytes(), index.to_le_bytes())
+                                            .and_then(|_| {
+                                                map_db.put(
+                                                    index.to_le_bytes(),
+                                                    position.to_le_bytes(),
+                                                )
+                                            })
+                                    }
                                 })
                                 .await
                                 .unwrap();
@@ -280,13 +298,14 @@ impl Plot {
     }
 
     /// Writes a piece to the plot by index, will overwrite if piece exists (updates)
-    pub async fn write(&self, encoding: Piece, index: usize) -> io::Result<()> {
+    pub async fn write(&self, encoding: Piece, tag: u64, index: usize) -> io::Result<()> {
         let (result_sender, result_receiver) = oneshot::channel();
 
         self.write_requests_sender
             .clone()
             .send(WriteRequests::WriteEncoding {
                 encoding,
+                tag,
                 index,
                 result_sender,
             })
@@ -373,16 +392,19 @@ mod tests {
     use super::*;
     use crate::crypto;
     use async_std::path::PathBuf;
+    use rand::prelude::*;
 
     #[async_std::test]
     async fn test_basic() {
         let path = PathBuf::from("target").join("test");
 
         let piece = crypto::generate_random_piece();
+        let tag = rand::thread_rng().gen::<u64>();
+        let index = 0;
 
         let plot = Plot::open_or_create(&path).await.unwrap();
-        plot.write(piece, 0).await.unwrap();
-        let extracted_piece = plot.read(0).await.unwrap();
+        plot.write(piece, tag, index).await.unwrap();
+        let extracted_piece = plot.read(index).await.unwrap();
 
         assert_eq!(extracted_piece[..], piece[..]);
 

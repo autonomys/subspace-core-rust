@@ -9,6 +9,7 @@ use log::*;
 use rayon::prelude::*;
 use rug::integer::Order;
 use rug::Integer;
+use std::convert::TryInto;
 use std::time::Instant;
 
 /* ToDo
@@ -59,11 +60,18 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
                         .encode(&mut piece, &integer_expanded_iv, ENCODING_LAYERS_TEST)
                         .unwrap();
 
+                    // TODO: Replace challenge
+                    let tag = u64::from_le_bytes(
+                        crypto::create_hmac(&piece, "subspace".as_bytes())[0..8]
+                            .try_into()
+                            .unwrap(),
+                    );
+
                     task::spawn({
                         let plot = plot.clone();
 
                         async move {
-                            let _ = plot.write(piece, index).await;
+                            let _ = plot.write(piece, tag, index).await;
                         }
                     });
                     if let Some(b) = &bar {
