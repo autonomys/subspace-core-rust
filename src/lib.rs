@@ -30,6 +30,7 @@ pub const SOLVE_WAIT_TIME_MS: u64 = 1000;
 pub const INITIAL_QUALITY_THRESHOLD: u8 = 0;
 pub const DEGREE_OF_SIMULATION: usize = 2;
 pub const CONFIRMATION_DEPTH: usize = 6;
+pub const SOLVE_V2: bool = true;
 pub type Piece = [u8; PIECE_SIZE];
 pub type IV = [u8; IV_SIZE];
 pub type NodeID = IV;
