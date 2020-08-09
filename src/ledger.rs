@@ -65,7 +65,7 @@ pub struct Block {
     pub reward: u32,
     pub timestamp: u128,
     pub delay: u32,
-    pub parent_id: [u8; 32],
+    pub parent_id: BlockId,
     pub challenge: [u8; 32],
     pub tag: [u8; 32],
     pub public_key: [u8; 32],
@@ -78,7 +78,7 @@ impl Block {
         timestamp: u128,
         delay: u32,
         challenge: [u8; 32],
-        parent_id: [u8; 32],
+        parent_id: BlockId,
         tag: [u8; 32],
         public_key: [u8; 32],
         signature: Vec<u8>,
@@ -107,7 +107,7 @@ impl Block {
         })
     }
 
-    pub fn get_id(&self) -> [u8; 32] {
+    pub fn get_id(&self) -> BlockId {
         crypto::digest_sha_256(&self.to_bytes())
     }
 
@@ -317,21 +317,21 @@ impl Display for BlockState {
 
 #[derive(PartialEq, Clone, Debug)]
 pub struct MetaBlock {
-    pub id: [u8; 32],            // hash of the block
-    pub block: Block,            // the block itself
-    pub state: BlockState,       // the state of the block
-    pub children: Vec<[u8; 32]>, // child blocks, will grow quickly then be pruned down to one as confirmed
+    pub id: BlockId,            // hash of the block
+    pub block: Block,           // the block itself
+    pub state: BlockState,      // the state of the block
+    pub children: Vec<BlockId>, // child blocks, will grow quickly then be pruned down to one as confirmed
 }
 
 pub struct Ledger {
-    pub metablocks: HashMap<[u8; 32], MetaBlock>,
-    pub confirmed_blocks_by_index: HashMap<u32, [u8; 32]>,
-    pub pending_children_for_parent: HashMap<[u8; 32], Vec<[u8; 32]>>,
+    pub metablocks: HashMap<BlockId, MetaBlock>,
+    pub confirmed_blocks_by_index: HashMap<u32, BlockId>,
+    pub pending_children_for_parent: HashMap<BlockId, Vec<BlockId>>,
 
-    recent_blocks_by_id: HashMap<[u8; 32], Block>, // recently arrived blocks that have not been confirmed
-    recent_children_by_parent_id: HashMap<[u8; 32], Vec<[u8; 32]>>,
-    applied_blocks_by_id: HashMap<[u8; 32], Block>, // all applied blocks, stored by hash
-    pending_blocks_by_id: HashMap<[u8; 32], FullBlock>, // all pending blocks (unseen parent) by hash
+    recent_blocks_by_id: HashMap<BlockId, Block>, // recently arrived blocks that have not been confirmed
+    recent_children_by_parent_id: HashMap<BlockId, Vec<BlockId>>,
+    applied_blocks_by_id: HashMap<BlockId, Block>, // all applied blocks, stored by hash
+    pending_blocks_by_id: HashMap<BlockId, FullBlock>, // all pending blocks (unseen parent) by hash
 
     balances: HashMap<[u8; 32], usize>, // the current balance of all accounts
 
@@ -340,7 +340,7 @@ pub struct Ledger {
     pub quality: u32,         // aggregate quality for this chain
     pub merkle_root: Vec<u8>, // only inlcuded for test ledger
     pub genesis_piece_hash: [u8; 32],
-    pub latest_block_hash: [u8; 32],
+    pub latest_block_hash: BlockId,
     pub quality_threshold: u8, // current quality target
     pub sloth: sloth::Sloth,   // a sloth instance for decoding (verifying) blocks
 }
@@ -413,7 +413,7 @@ impl Ledger {
     /// On block arrival add it to the recent block pool and check if it results in a confirmation
     pub async fn apply_arrived_block(
         &mut self,
-        block_id: &[u8; 32],
+        block_id: &BlockId,
         sender: &Sender<ProtocolMessage>,
     ) -> Option<MetaBlock> {
         let block = match self.metablocks.get_mut(block_id) {
@@ -528,7 +528,7 @@ impl Ledger {
     }
 
     /// Apply a new block to the ledger by id (hash)
-    pub fn confirm_block(&mut self, block_id: &[u8; 32]) -> Option<MetaBlock> {
+    pub fn confirm_block(&mut self, block_id: &BlockId) -> Option<MetaBlock> {
         let block = self.metablocks.get_mut(block_id).unwrap();
         block.state = BlockState::Confirmed;
         self.latest_block_hash = *block_id;
@@ -580,7 +580,7 @@ impl Ledger {
     }
 
     /// Apply a pending block that is cached to the ledger, recursively checking to see if it is the parent of some other pending block. Ledger should be fully synced when complete.
-    // pub fn apply_pending_children(&mut self, parent_block_id: [u8; 32]) -> ([u8; 32], u128) {
+    // pub fn apply_pending_children(&mut self, parent_block_id: BlockID) -> ([u8; 32], u128) {
     //     loop {
     //         match self.pending_parents_by_id.get(&parent_block_id) {
     //             Some(pending_child_id) => {

@@ -34,6 +34,7 @@ pub const SOLVE_V2: bool = true;
 pub type Piece = [u8; PIECE_SIZE];
 pub type IV = [u8; IV_SIZE];
 pub type NodeID = IV;
+pub type BlockId = [u8; 32];
 pub type ExpandedIV = [u8; PRIME_SIZE_BYTES];
 pub const DEV_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";
