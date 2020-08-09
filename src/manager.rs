@@ -122,9 +122,8 @@ pub async fn wait_for_block_arrival(
     block_id: [u8; 32],
     cached: bool,
     timestamp: u128,
-    sender: &Sender<ProtocolMessage>,
+    sender: Sender<ProtocolMessage>,
 ) {
-    let cloned_sender = sender.clone();
     async_std::task::spawn(async move {
         let time_now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -133,9 +132,9 @@ pub async fn wait_for_block_arrival(
 
         if time_now < timestamp {
             async_std::task::sleep(Duration::from_millis((timestamp - time_now) as u64)).await;
-        };
+        }
 
-        cloned_sender
+        sender
             .send(ProtocolMessage::BlockArrived { block_id, cached })
             .await;
     });
@@ -158,7 +157,13 @@ pub async fn arrive_pending_children(
         // if yes repeat
         // otherewise call normal wait for arrival
 
-        wait_for_block_arrival(*child_block_id, true, child_block.block.timestamp, &sender).await;
+        wait_for_block_arrival(
+            *child_block_id,
+            true,
+            child_block.block.timestamp,
+            sender.clone(),
+        )
+        .await;
 
         // dont want to solve until we are no longer calling cached blocks
         // once we are done calling cached blocks, we need to clear out the rest of them
@@ -288,7 +293,7 @@ pub async fn run(
                             match block.state {
                                 BlockState::New | BlockState::Arrived | BlockState::Confirmed => {
                                     // TODO: decide to gossip the block now or wait until it has arrived?
-                                    // for now gossip optimisitically
+                                    // for now gossip optimistically
                                     main_to_net_tx
                                         .send(ProtocolMessage::BlockProposalRemote {
                                             full_block: full_block.clone(),
@@ -308,7 +313,7 @@ pub async fn run(
                                         full_block.block.get_id(),
                                         false,
                                         full_block.block.timestamp,
-                                        &main_to_main_tx,
+                                        main_to_main_tx.clone(),
                                     )
                                     .await;
                                     continue;
@@ -383,7 +388,7 @@ pub async fn run(
                                 block.get_id(),
                                 false,
                                 block.timestamp,
-                                &main_to_main_tx,
+                                main_to_main_tx.clone(),
                             )
                             .await;
                         }

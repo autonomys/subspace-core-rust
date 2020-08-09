@@ -209,8 +209,8 @@ impl Proof {
         let id = hex::encode(self.get_id());
 
         let pretty_proof = PrettyProof {
-            encoding: hex::encode(self.encoding.clone()),
-            merkle_proof: hex::encode(self.merkle_proof.clone()),
+            encoding: hex::encode(&self.encoding),
+            merkle_proof: hex::encode(&self.merkle_proof),
             piece_index: self.piece_index,
             proof_index: self.proof_index,
         };
@@ -262,7 +262,7 @@ impl FullBlock {
         let layers = ENCODING_LAYERS_TEST;
         let mut decoding = self.proof.encoding.clone();
 
-        sloth.decode(&mut decoding[..], expanded_iv, layers);
+        sloth.decode(decoding.as_mut(), expanded_iv, layers);
 
         // subtract out the index when comparing to the genesis piece
         let index_bytes = utils::usize_to_bytes(self.proof.piece_index as usize);
@@ -270,7 +270,7 @@ impl FullBlock {
             decoding[i] ^= index_bytes[i];
         }
 
-        let decoding_hash = crypto::digest_sha_256(&decoding.to_vec());
+        let decoding_hash = crypto::digest_sha_256(&decoding);
         if genesis_piece_hash.cmp(&decoding_hash) != Ordering::Equal {
             warn!("Invalid full block, encoding is invalid");
             // utils::compare_bytes(&proof.encoding, &proof.encoding, &decoding);
@@ -393,7 +393,7 @@ impl Ledger {
     pub fn get_block_by_index(&self, index: u32) -> Option<Block> {
         self.confirmed_blocks_by_index.get(&index).map(|block_id| {
             self.metablocks
-                .get(&block_id.clone())
+                .get(block_id.as_ref())
                 .expect("Block index and blocks map have gotten out of sync!")
                 .clone()
                 .block
@@ -486,7 +486,7 @@ impl Ledger {
                             return self.confirm_block(&parent_block.id);
                         }
 
-                        return Some(block.clone());
+                        return Some(block);
                     }
                     BlockState::Confirmed => {
                         // special case that only occurs when the second block is applied to the genesis block
@@ -502,7 +502,7 @@ impl Ledger {
 
                         if block.block.parent_id == self.latest_block_hash {
                             first_parent_block.children.push(block.id);
-                            return Some(block.clone());
+                            return Some(block);
                         } else {
                             warn!("Recent block is late, its parent has already been confirmed!")
                         }
