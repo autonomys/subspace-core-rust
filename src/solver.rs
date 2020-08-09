@@ -44,9 +44,33 @@ pub async fn run(
                 challenge,
                 base_time,
             } => {
-                let solutions = plot
-                    .solve(parent_id, challenge, base_time, target_value)
-                    .await;
+                // choose the correct "virtual" piece
+                let base_index = utils::modulo(&challenge, PIECE_COUNT);
+                let mut solutions: Vec<Solution> = Vec::new();
+                // read each "virtual" encoding of that piece
+                for i in 0..REPLICATION_FACTOR {
+                    let index = base_index + (i * REPLICATION_FACTOR) as usize;
+                    let encoding = plot.read(index).await.unwrap();
+                    let tag = crypto::create_hmac(&encoding[..], &challenge);
+                    let sample = utils::bytes_le_to_u32(&tag[0..4]);
+                    let distance = (sample as f64).log2() - (target_value as f64).log2();
+                    let delay = (TARGET_BLOCK_DELAY * 2f64.powf(distance)) as u32;
+
+                    solutions.push(Solution {
+                        parent: parent_id,
+                        challenge,
+                        base_time,
+                        piece_index: index as u64,
+                        proof_index: base_index as u64,
+                        tag,
+                        delay,
+                        encoding,
+                    })
+                }
+
+                // sort the solutions so that smallest delay is first
+                solutions.sort_by_key(|s| s.delay);
+                let solutions = solutions[0..DEGREE_OF_SIMULATION].to_vec();
 
                 // info!("Solver is sending solutions to main");
 

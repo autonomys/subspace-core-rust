@@ -14,7 +14,6 @@ use futures::channel::oneshot;
 use futures::SinkExt;
 use futures::StreamExt;
 use log::error;
-use solver::Solution;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::io;
@@ -334,56 +333,6 @@ impl Plot {
             .expect("Remove encoding result sender was dropped")?;
 
         self.handle_update().await
-    }
-
-    /// Fetches the encoding for an audit and returns the solution with random delay
-    ///
-    /// Given the target:
-    /// Given an expected replication factor (encoding_count) as u32
-    /// Compute the target value as 2^ (32 - log(2) encoding count)
-    ///
-    /// Given a sample:
-    /// Given a 256 bit tag
-    /// Reduce it to a 32 bit number by taking the first four bytes
-    /// Convert to an u32 -> f64 -> take log(2)
-    /// Compute exponent as log2(tag) - log2(tgt)
-    ///
-    /// Compute delay as base_delay * 2^exponent
-    ///
-    pub async fn solve(
-        &self,
-        parent_id: [u8; 32],
-        challenge: [u8; 32],
-        timestamp: u128,
-        target: u32,
-    ) -> Vec<Solution> {
-        // choose the correct "virtual" piece
-        let base_index = utils::modulo(&challenge, PIECE_COUNT);
-        let mut solutions: Vec<Solution> = Vec::new();
-        // read each "virtual" encoding of that piece
-        for i in 0..REPLICATION_FACTOR {
-            let index = base_index + (i * REPLICATION_FACTOR) as usize;
-            let encoding = self.read(index).await.unwrap();
-            let tag = crypto::create_hmac(&encoding[..], &challenge);
-            let sample = utils::bytes_le_to_u32(&tag[0..4]);
-            let distance = (sample as f64).log2() - (target as f64).log2();
-            let delay = (TARGET_BLOCK_DELAY * 2f64.powf(distance)) as u32;
-
-            solutions.push(Solution {
-                parent: parent_id,
-                challenge,
-                base_time: timestamp,
-                piece_index: index as u64,
-                proof_index: base_index as u64,
-                tag,
-                delay,
-                encoding,
-            })
-        }
-
-        // sort the solutions so that smallest delay is first
-        solutions.sort_by_key(|s| s.delay);
-        solutions[0..DEGREE_OF_SIMULATION].to_vec()
     }
 
     /// Writes the map to disk to persist between sessions (does not load on startup yet)
