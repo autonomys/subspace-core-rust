@@ -53,7 +53,7 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
                     // xor first 16 bytes of piece with the index to get a unique piece for each iteration
                     let index_bytes = utils::usize_to_bytes(index);
                     for i in 0..16 {
-                        piece[i] = piece[i] ^ index_bytes[i];
+                        piece[i] ^= index_bytes[i];
                     }
 
                     sloth
@@ -62,7 +62,7 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
 
                     // TODO: Replace challenge
                     let tag = u64::from_le_bytes(
-                        crypto::create_hmac(&piece, "subspace".as_bytes())[0..8]
+                        crypto::create_hmac(&piece, b"subspace")[0..8]
                             .try_into()
                             .unwrap(),
                     );

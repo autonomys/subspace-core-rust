@@ -6,7 +6,6 @@ use async_std::prelude::*;
 use async_std::sync::{channel, Receiver, Sender};
 use bytes::buf::BufMutExt;
 use bytes::{Bytes, BytesMut};
-use console;
 use futures::join;
 use ledger::{Block, FullBlock};
 use log::*;
@@ -106,7 +105,6 @@ impl Message {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
         bincode::deserialize(bytes).map_err(|error| {
             debug!("Failed to deserialize network message: {}", error);
-            ()
         })
     }
 
@@ -374,7 +372,7 @@ pub async fn run(
     let protocol_receiver_loop = async {
         info!("Network is listening for protocol messages");
         loop {
-            if let Some(message) = main_to_net_rx.recv().await.ok() {
+            if let Ok(message) = main_to_net_rx.recv().await {
                 // forward to broker as protocol message
                 broker_sender
                     .send(NetworkEvent::OutboundMessage { message })
@@ -436,12 +434,11 @@ pub async fn run(
 
                             // convert binary to peers, for each peer, attempt to connect
                             // need to write another method to add peer on connection
-                            for potential_peer_addr in contacts.iter() {
-                                let potential_peer = potential_peer_addr.clone();
+                            for potential_peer_addr in contacts.iter().copied() {
                                 while router.peers.len() < MAX_PEERS {
                                     let broker_sender = broker_sender.clone();
                                     async_std::task::spawn(async move {
-                                        connect(potential_peer, broker_sender).await;
+                                        connect(potential_peer_addr, broker_sender).await;
                                     });
                                 }
                             }

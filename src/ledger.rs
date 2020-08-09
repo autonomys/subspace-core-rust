@@ -104,7 +104,6 @@ impl Block {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
         bincode::deserialize(bytes).map_err(|error| {
             warn!("Failed to deserialize Block: {}", error);
-            ()
         })
     }
 
@@ -191,7 +190,6 @@ impl Proof {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
         bincode::deserialize(bytes).map_err(|error| {
             warn!("Failed to deserialize proof: {}", error);
-            ()
         })
     }
 
@@ -269,7 +267,7 @@ impl FullBlock {
         // subtract out the index when comparing to the genesis piece
         let index_bytes = utils::usize_to_bytes(self.proof.piece_index as usize);
         for i in 0..16 {
-            decoding[i] = decoding[i] ^ index_bytes[i];
+            decoding[i] ^= index_bytes[i];
         }
 
         let decoding_hash = crypto::digest_sha_256(&decoding.to_vec());
@@ -406,10 +404,9 @@ impl Ledger {
     pub fn prune_branches(&mut self, siblings: Vec<[u8; 32]>) {
         siblings.iter().for_each(|sibling| {
             warn!("Pruning block: {}", hex::encode(&sibling[0..8]),);
-            match self.metablocks.remove(sibling) {
-                Some(block) => self.prune_branches(block.children),
-                None => {}
-            };
+            if let Some(block) = self.metablocks.remove(sibling) {
+                self.prune_branches(block.children);
+            }
         });
     }
 

@@ -209,7 +209,7 @@ pub async fn run(
         );
 
         loop {
-            if let Some(message) = any_to_main_rx.recv().await.ok() {
+            if let Ok(message) = any_to_main_rx.recv().await {
                 match message {
                     ProtocolMessage::BlockRequestFrom { node_addr, index } => {
                         // TODO: should send a unique message if block has no children to signify that this is the last block
@@ -284,8 +284,8 @@ pub async fn run(
 
                         // TODO: Should check if block is pending parent for children here
 
-                        match ledger.metablocks.get(&full_block.block.parent_id) {
-                            Some(block) => match block.state {
+                        if let Some(block) = ledger.metablocks.get(&full_block.block.parent_id) {
+                            match block.state {
                                 BlockState::New | BlockState::Arrived | BlockState::Confirmed => {
                                     // TODO: decide to gossip the block now or wait until it has arrived?
                                     // for now gossip optimisitically
@@ -314,8 +314,7 @@ pub async fn run(
                                     continue;
                                 }
                                 _ => {}
-                            },
-                            None => {}
+                            }
                         }
 
                         // State is stray or no parent is tracked
@@ -328,7 +327,7 @@ pub async fn run(
                             .pending_children_for_parent
                             .entry(full_block.block.parent_id)
                             .and_modify(|children| children.push(block_id))
-                            .or_insert(vec![block_id]);
+                            .or_insert_with(|| vec![block_id]);
 
                         // TODO: What does this code do???
                         if !ledger.metablocks.contains_key(&full_block.block.parent_id) {
@@ -403,16 +402,11 @@ pub async fn run(
                         if cached {
                             // block was cached and has arrived on sync
                             // check for more cached pending children
-                            match ledger.pending_children_for_parent.get(&block_id) {
-                                Some(children) => {
-                                    arrive_pending_children(
-                                        ledger,
-                                        children.clone(),
-                                        &main_to_main_tx,
-                                    )
+                            if let Some(children) =
+                                ledger.pending_children_for_parent.get(&block_id)
+                            {
+                                arrive_pending_children(ledger, children.clone(), &main_to_main_tx)
                                     .await;
-                                }
-                                None => {}
                             }
                         }
 
