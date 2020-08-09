@@ -82,8 +82,6 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
                 if let Some(b) = &bar {
                     b.finish();
                 }
-
-                task::block_on(plot.force_write_map())
             }
         });
 
@@ -109,7 +107,7 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
             );
         }
 
-        plotting_fut.await.expect("Failed to plot");
+        plotting_fut.await;
 
         let total_plot_time = plot_time.elapsed();
         let average_plot_time =

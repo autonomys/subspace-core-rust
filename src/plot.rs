@@ -19,8 +19,6 @@ use std::io;
 use std::io::SeekFrom;
 use std::mem;
 use std::ops::Deref;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 const INDEX_LENGTH: usize = mem::size_of::<usize>();
@@ -57,16 +55,12 @@ enum WriteRequests {
         index: usize,
         result_sender: oneshot::Sender<io::Result<()>>,
     },
-    ForceWriteMap {
-        result_sender: oneshot::Sender<io::Result<()>>,
-    },
 }
 
 pub struct Inner {
     any_requests_sender: Sender<()>,
     read_requests_sender: UnboundedSender<ReadRequests>,
     write_requests_sender: UnboundedSender<WriteRequests>,
-    updates: Arc<AtomicUsize>,
     update_interval: usize,
 }
 
@@ -229,10 +223,6 @@ impl Plot {
 
                         let _ = result_sender.send(Ok(()));
                     }
-                    // TODO: Remove this
-                    Ok(Some(WriteRequests::ForceWriteMap { result_sender })) => {
-                        let _ = result_sender.send(Ok(()));
-                    }
                     Ok(None) => {
                         return;
                     }
@@ -243,14 +233,12 @@ impl Plot {
             }
         });
 
-        let updates = Arc::new(AtomicUsize::new(0));
         let update_interval = crate::PLOT_UPDATE_INTERVAL;
 
         let inner = Inner {
             any_requests_sender,
             read_requests_sender,
             write_requests_sender,
-            updates,
             update_interval,
         };
 
@@ -317,9 +305,7 @@ impl Plot {
 
         result_receiver
             .await
-            .expect("Write encoding result sender was dropped")?;
-
-        self.handle_update().await
+            .expect("Write encoding result sender was dropped")
     }
 
     /// Removes a piece from the plot by index, by deleting its index from the map
@@ -340,42 +326,7 @@ impl Plot {
 
         result_receiver
             .await
-            .expect("Remove encoding result sender was dropped")?;
-
-        self.handle_update().await
-    }
-
-    /// Writes the map to disk to persist between sessions (does not load on startup yet)
-    pub async fn force_write_map(&self) -> io::Result<()> {
-        let (result_sender, result_receiver) = oneshot::channel();
-
-        self.write_requests_sender
-            .clone()
-            .send(WriteRequests::ForceWriteMap { result_sender })
-            .await
-            .expect("Failed sending force write map request");
-
-        // If fails - it is either full or disconnected, we don't care either way, so ignore result
-        let _ = self.any_requests_sender.clone().try_send(());
-
-        result_receiver
-            .await
-            .expect("Force write map result sender was dropped")?;
-
-        self.updates.store(0, Ordering::Relaxed);
-
-        Ok(())
-    }
-
-    /// Increment a counter to persist the map based on some interval
-    async fn handle_update(&self) -> io::Result<()> {
-        let updates = self.updates.fetch_add(1, Ordering::Relaxed);
-
-        if updates % self.update_interval == 0 {
-            self.force_write_map().await?;
-        }
-
-        Ok(())
+            .expect("Remove encoding result sender was dropped")
     }
 }
 
@@ -407,7 +358,5 @@ mod tests {
         let extracted_piece = plot.read(index).await.unwrap();
 
         assert_eq!(extracted_piece[..], piece[..]);
-
-        plot.force_write_map().await.unwrap();
     }
 }
