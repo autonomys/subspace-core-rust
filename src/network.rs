@@ -460,30 +460,38 @@ pub async fn run(
                             });
                         }
                         Message::BlockResponse { index, block } => {
+                            // TODO: Handle the case where peer does not have the block
+                            let net_to_main_tx = net_to_main_tx.clone();
+                            async_std::task::spawn(async move {
+                                net_to_main_tx
+                                    .send(ProtocolMessage::BlockResponse { index, block })
+                                    .await;
+                            });
+
                             // if no block in response, request from a different peer
-                            match block {
-                                Some(block) => {
-                                    let net_to_main_tx = net_to_main_tx.clone();
+                            // match block {
+                            //     Some(block) => {
+                            //         let net_to_main_tx = net_to_main_tx.clone();
 
-                                    async_std::task::spawn(async move {
-                                        net_to_main_tx
-                                            .send(ProtocolMessage::BlockResponse { block })
-                                            .await;
-                                    });
-                                }
-                                None => {
-                                    info!("Peer did not have block at desired index, requesting from a different peer");
+                            //         async_std::task::spawn(async move {
+                            //             net_to_main_tx
+                            //                 .send(ProtocolMessage::BlockResponse { block })
+                            //                 .await;
+                            //         });
+                            //     }
+                            //     None => {
+                            //         info!("Peer did not have block at desired index, requesting from a different peer");
 
-                                    if let Some(new_peer) =
-                                        router.get_random_peer_excluding(peer_addr)
-                                    {
-                                        router.send(&new_peer, Message::BlockRequest { index });
-                                    } else {
-                                        info!("Failed to request block: no other peers found");
-                                    }
-                                    continue;
-                                }
-                            }
+                            //         if let Some(new_peer) =
+                            //             router.get_random_peer_excluding(peer_addr)
+                            //         {
+                            //             router.send(&new_peer, Message::BlockRequest { index });
+                            //         } else {
+                            //             info!("Failed to request block: no other peers found");
+                            //         }
+                            //         continue;
+                            //     }
+                            // }
                         }
                         Message::BlockProposal { full_block } => {
                             // send to main

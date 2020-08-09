@@ -51,3 +51,9 @@ Remove `config.json`, `plot.bin` and `plot-map.bin` at the location where client
 8. Basic tx scheme
 9. Erasrue code state
 
+### Testing Only
+
+Create a 2GB RAM Disk (mac)
+
+`diskutil erasevolume HFS+ “RAMDisk” hdiutil attach -nomount ram://4194304`
+

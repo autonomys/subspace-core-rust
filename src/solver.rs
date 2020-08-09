@@ -18,9 +18,11 @@ use manager::ProtocolMessage;
 
 #[derive(Copy, Clone)]
 pub struct Solution {
-    pub challenge: [u8; 32], // hash of last block
+    pub parent: [u8; 32],    // hash of last block
+    pub challenge: [u8; 32], // tag of last block
     pub base_time: u128,     // timestamp of last block
-    pub index: u64,          // derived piece_index
+    pub piece_index: u64,    // derived piece_index
+    pub proof_index: u64,    // index for audits and merkle proof
     pub tag: [u8; 32],       // tag for hmac(challenge||encoding)
     pub delay: u32,          // quality of the tag
     pub encoding: Piece,     // the full encoding
@@ -32,26 +34,18 @@ pub async fn run(
     plot: &Plot,
 ) {
     let bits: u32 = 32;
-    let replication_factor = (PLOT_SIZE / PIECE_COUNT) as u32;
-    let target_value = 2u32.pow(bits - (replication_factor as f64).log2() as u32);
+    let target_value = 2u32.pow(bits - (REPLICATION_FACTOR as f64).log2() as u32);
 
     info!("Solve loop is running...");
     loop {
         match main_to_sol_rx.recv().await.unwrap() {
             ProtocolMessage::BlockChallenge {
+                parent_id,
                 challenge,
                 base_time,
-                is_genesis,
             } => {
                 let solutions = plot
-                    .solve(
-                        challenge,
-                        base_time,
-                        PIECE_COUNT,
-                        replication_factor,
-                        target_value,
-                        is_genesis,
-                    )
+                    .solve(parent_id, challenge, base_time, target_value)
                     .await;
 
                 // info!("Solver is sending solutions to main");

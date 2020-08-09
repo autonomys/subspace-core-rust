@@ -352,19 +352,17 @@ impl Plot {
     ///
     pub async fn solve(
         &self,
+        parent_id: [u8; 32],
         challenge: [u8; 32],
         timestamp: u128,
-        piece_count: usize,
-        replication_factor: u32,
         target: u32,
-        is_genesis: bool,
     ) -> Vec<Solution> {
         // choose the correct "virtual" piece
-        let base_index = utils::modulo(&challenge, piece_count);
+        let base_index = utils::modulo(&challenge, PIECE_COUNT);
         let mut solutions: Vec<Solution> = Vec::new();
         // read each "virtual" encoding of that piece
-        for i in 0..replication_factor {
-            let index = base_index + (i * replication_factor) as usize;
+        for i in 0..REPLICATION_FACTOR {
+            let index = base_index + (i * REPLICATION_FACTOR) as usize;
             let encoding = self.read(index).await.unwrap();
             let tag = crypto::create_hmac(&encoding[..], &challenge);
             let sample = utils::bytes_le_to_u32(&tag[0..4]);
@@ -372,9 +370,11 @@ impl Plot {
             let delay = (TARGET_BLOCK_DELAY * 2f64.powf(distance)) as u32;
 
             solutions.push(Solution {
+                parent: parent_id,
                 challenge,
                 base_time: timestamp,
-                index: index as u64,
+                piece_index: index as u64,
+                proof_index: base_index as u64,
                 tag,
                 delay,
                 encoding,
@@ -383,11 +383,7 @@ impl Plot {
 
         // sort the solutions so that smallest delay is first
         solutions.sort_by_key(|s| s.delay);
-        let mut set_size = DEGREE_OF_SIMULATION;
-        if is_genesis {
-            set_size = 1
-        }
-        solutions[0..set_size].to_vec()
+        solutions[0..DEGREE_OF_SIMULATION].to_vec()
     }
 
     /// Writes the map to disk to persist between sessions (does not load on startup yet)
