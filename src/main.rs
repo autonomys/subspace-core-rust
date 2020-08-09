@@ -82,8 +82,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
 
     // set storage path
     let path = env::args()
-        .skip(2)
-        .next()
+        .nth(2)
         .or_else(|| std::env::var("SUBSPACE_DIR").ok())
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -94,7 +93,9 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         });
 
     if !path.exists() {
-        fs::create_dir_all(&path).expect(&format!("Failed to create data directory {:?}", path));
+        fs::create_dir_all(&path).unwrap_or_else(|error| {
+            panic!("Failed to create data directory {:?}: {:?}", path, error)
+        });
     }
 
     info!(

@@ -9,6 +9,7 @@ use log::*;
 use rayon::prelude::*;
 use rug::integer::Order;
 use rug::Integer;
+use std::convert::TryInto;
 use std::time::Instant;
 
 /* ToDo
@@ -52,18 +53,25 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
                     // xor first 16 bytes of piece with the index to get a unique piece for each iteration
                     let index_bytes = utils::usize_to_bytes(index);
                     for i in 0..16 {
-                        piece[i] = piece[i] ^ index_bytes[i];
+                        piece[i] ^= index_bytes[i];
                     }
 
                     sloth
                         .encode(&mut piece, &integer_expanded_iv, ENCODING_LAYERS_TEST)
                         .unwrap();
 
+                    // TODO: Replace challenge
+                    let tag = u64::from_le_bytes(
+                        crypto::create_hmac(&piece, b"subspace")[0..8]
+                            .try_into()
+                            .unwrap(),
+                    );
+
                     task::spawn({
                         let plot = plot.clone();
 
                         async move {
-                            let _ = plot.write(piece, index).await;
+                            let _ = plot.write(piece, tag, index).await;
                         }
                     });
                     if let Some(b) = &bar {
@@ -74,8 +82,6 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
                 if let Some(b) = &bar {
                     b.finish();
                 }
-
-                task::block_on(plot.force_write_map())
             }
         });
 
@@ -101,7 +107,7 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
             );
         }
 
-        plotting_fut.await.expect("Failed to plot");
+        plotting_fut.await;
 
         let total_plot_time = plot_time.elapsed();
         let average_plot_time =

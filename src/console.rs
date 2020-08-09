@@ -47,6 +47,12 @@ pub struct Events {
     tick_handle: thread::JoinHandle<()>,
 }
 
+impl Default for Events {
+    fn default() -> Self {
+        Self::with_config(Config::default())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
     pub exit_key: Key,
@@ -63,10 +69,6 @@ impl Default for Config {
 }
 
 impl Events {
-    pub fn new() -> Events {
-        Events::with_config(Config::default())
-    }
-
     pub fn with_config(config: Config) -> Events {
         let (tx, rx) = mpsc::channel();
         let ignore_exit_key = Arc::new(AtomicBool::new(false));
@@ -150,9 +152,8 @@ impl App {
 
     // maybe work with std channel
     fn update(&mut self) {
-        match self.receiver.try_recv() {
-            Ok(state) => self.state = state,
-            Err(_) => {}
+        if let Ok(state) = self.receiver.try_recv() {
+            self.state = state
         }
     }
 }
@@ -172,7 +173,7 @@ pub fn run(recever: Receiver<AppState>) -> Result<(), Box<dyn Error>> {
     terminal.hide_cursor().unwrap();
 
     // handle events and app state
-    let events = Events::new();
+    let events = Events::default();
     let mut app = App::new(recever);
 
     // setup the ui

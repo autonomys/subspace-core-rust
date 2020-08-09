@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use super::*;
 use crate::Piece;
 use crate::PIECE_SIZE;
 use async_std::fs::OpenOptions;
@@ -13,16 +12,13 @@ use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
 use futures::SinkExt;
 use futures::StreamExt;
-use log::error;
-use solver::Solution;
-use std::collections::HashMap;
+use rocksdb::IteratorMode;
+use rocksdb::DB;
 use std::convert::TryInto;
 use std::io;
 use std::io::SeekFrom;
 use std::mem;
 use std::ops::Deref;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 const INDEX_LENGTH: usize = mem::size_of::<usize>();
@@ -31,7 +27,8 @@ const OFFSET_LENGTH: usize = mem::size_of::<u64>();
 #[derive(Debug)]
 pub enum PlotCreationError {
     PlotOpen(io::Error),
-    PlotMapOpen(io::Error),
+    PlotMapOpen(rocksdb::Error),
+    PlotTagsOpen(rocksdb::Error),
     MapRead(io::Error),
 }
 
@@ -44,20 +41,22 @@ enum ReadRequests {
         index: usize,
         result_sender: oneshot::Sender<io::Result<Piece>>,
     },
+    FindByTag {
+        tag: u64,
+        result_sender: oneshot::Sender<io::Result<(u64, usize)>>,
+    },
 }
 
 #[derive(Debug)]
 enum WriteRequests {
     WriteEncoding {
         encoding: Piece,
+        tag: u64,
         index: usize,
         result_sender: oneshot::Sender<io::Result<()>>,
     },
     RemoveEncoding {
         index: usize,
-        result_sender: oneshot::Sender<io::Result<()>>,
-    },
-    ForceWriteMap {
         result_sender: oneshot::Sender<io::Result<()>>,
     },
 }
@@ -66,7 +65,6 @@ pub struct Inner {
     any_requests_sender: Sender<()>,
     read_requests_sender: UnboundedSender<ReadRequests>,
     write_requests_sender: UnboundedSender<WriteRequests>,
-    updates: Arc<AtomicUsize>,
     update_interval: usize,
 }
 
@@ -95,42 +93,15 @@ impl Plot {
             .await
             .map_err(PlotCreationError::PlotOpen)?;
 
-        let mut map_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path.join("plot-map.bin"))
-            .await
-            .map_err(PlotCreationError::PlotMapOpen)?;
+        let map_db = Arc::new(
+            // DB::open_default(path.join("plot-map.rocksdb").to_str().unwrap())
+            DB::open_default(path.join("plot-map")).map_err(PlotCreationError::PlotMapOpen)?,
+        );
 
-        let mut map = HashMap::new();
-
-        {
-            let map_bytes_len = map_file
-                .metadata()
-                .await
-                .map_err(PlotCreationError::MapRead)?
-                .len();
-            let mut buffer = [0u8; INDEX_LENGTH + OFFSET_LENGTH];
-            // let mut buffer = Vec::with_capacity(index_length + offset_length);
-            if map_bytes_len > 0 {
-                map_file
-                    .seek(SeekFrom::Start(0))
-                    .await
-                    .map_err(PlotCreationError::MapRead)?;
-                for _ in (0..map_bytes_len).step_by(INDEX_LENGTH + OFFSET_LENGTH) {
-                    if map_file.read_exact(&mut buffer).await.is_err() {
-                        error!("Bad map, ignoring remaining bytes");
-                        break;
-                    }
-                    let index =
-                        usize::from_le_bytes(buffer[..INDEX_LENGTH].as_ref().try_into().unwrap());
-                    let offset =
-                        u64::from_le_bytes(buffer[INDEX_LENGTH..].as_ref().try_into().unwrap());
-                    map.insert(index, offset);
-                }
-            }
-        }
+        let tags_db = Arc::new(
+            // DB::open_default(path.join("plot-map.rocksdb").to_str().unwrap())
+            DB::open_default(path.join("plot-tags")).map_err(PlotCreationError::PlotTagsOpen)?,
+        );
 
         // Channel with at most single element to throttle loop below if there are no updates
         let (any_requests_sender, mut any_requests_receiver) = mpsc::channel::<()>(1);
@@ -157,14 +128,30 @@ impl Plot {
 
                     match read_request {
                         Some(ReadRequests::IsEmpty { result_sender }) => {
-                            let _ = result_sender.send(map.is_empty());
+                            let _ = result_sender.send(
+                                task::spawn_blocking({
+                                    let map_db = Arc::clone(&map_db);
+                                    move || map_db.iterator(IteratorMode::Start).next().is_none()
+                                })
+                                .await,
+                            );
                         }
                         Some(ReadRequests::ReadEncoding {
                             index,
                             result_sender,
                         }) => {
-                            let _ = result_sender.send(match map.get(&index) {
-                                Some(&position) => {
+                            // TODO: Remove unwrap
+                            let position = task::spawn_blocking({
+                                let map_db = Arc::clone(&map_db);
+                                move || map_db.get(index.to_le_bytes())
+                            })
+                            .await
+                            .unwrap()
+                            .map(|position| {
+                                u64::from_le_bytes(position.as_slice().try_into().unwrap())
+                            });
+                            let _ = result_sender.send(match position {
+                                Some(position) => {
                                     try {
                                         plot_file.seek(SeekFrom::Start(position)).await?;
                                         let mut buffer = [0u8; PIECE_SIZE];
@@ -178,6 +165,27 @@ impl Plot {
                         None => {
                             return;
                         }
+                        Some(ReadRequests::FindByTag { tag, result_sender }) => {
+                            // TODO: Remove unwrap
+                            let (best_tag, index) = task::spawn_blocking({
+                                let tags_db = Arc::clone(&tags_db);
+                                move || {
+                                    let mut iter = tags_db.raw_iterator();
+                                    iter.seek(tag.to_le_bytes());
+                                    // TODO: Remove unwrap
+                                    let best_tag = iter.key().unwrap();
+                                    let index = iter.value().unwrap();
+
+                                    (
+                                        u64::from_le_bytes(best_tag.try_into().unwrap()),
+                                        usize::from_le_bytes(index.try_into().unwrap()),
+                                    )
+                                }
+                            })
+                            .await;
+
+                            let _ = result_sender.send(Ok((best_tag, index)));
+                        }
                     }
                 }
 
@@ -189,17 +197,40 @@ impl Plot {
                 match write_request {
                     Ok(Some(WriteRequests::WriteEncoding {
                         index,
+                        tag,
                         encoding,
                         result_sender,
                     })) => {
-                        map.remove(&index);
+                        // TODO: remove unwrap
+                        task::spawn_blocking({
+                            let map_db = Arc::clone(&map_db);
+                            move || map_db.delete(index.to_le_bytes())
+                        })
+                        .await
+                        .unwrap();
 
                         let _ = result_sender.send(
                             try {
                                 let position = plot_file.seek(SeekFrom::Current(0)).await?;
                                 plot_file.write_all(&encoding).await?;
 
-                                map.insert(index, position);
+                                // TODO: remove unwrap
+                                task::spawn_blocking({
+                                    let map_db = Arc::clone(&map_db);
+                                    let tags_db = Arc::clone(&tags_db);
+                                    move || {
+                                        tags_db
+                                            .put(tag.to_le_bytes(), index.to_le_bytes())
+                                            .and_then(|_| {
+                                                map_db.put(
+                                                    index.to_le_bytes(),
+                                                    position.to_le_bytes(),
+                                                )
+                                            })
+                                    }
+                                })
+                                .await
+                                .unwrap();
                             },
                         );
                     }
@@ -207,23 +238,15 @@ impl Plot {
                         index,
                         result_sender,
                     })) => {
-                        map.remove(&index);
+                        // TODO: remove unwrap
+                        task::spawn_blocking({
+                            let map_db = Arc::clone(&map_db);
+                            move || map_db.delete(index.to_le_bytes())
+                        })
+                        .await
+                        .unwrap();
 
                         let _ = result_sender.send(Ok(()));
-                    }
-                    Ok(Some(WriteRequests::ForceWriteMap { result_sender })) => {
-                        let _ = result_sender.send(
-                            try {
-                                map_file.seek(SeekFrom::Start(0)).await?;
-                                map_file
-                                    .set_len(((INDEX_LENGTH + OFFSET_LENGTH) * map.len()) as u64)
-                                    .await?;
-                                for (index, offset) in map.iter() {
-                                    map_file.write_all(&index.to_le_bytes()).await?;
-                                    map_file.write_all(&offset.to_le_bytes()).await?;
-                                }
-                            },
-                        );
                     }
                     Ok(None) => {
                         return;
@@ -235,14 +258,12 @@ impl Plot {
             }
         });
 
-        let updates = Arc::new(AtomicUsize::new(0));
         let update_interval = crate::PLOT_UPDATE_INTERVAL;
 
         let inner = Inner {
             any_requests_sender,
             read_requests_sender,
             write_requests_sender,
-            updates,
             update_interval,
         };
 
@@ -289,14 +310,32 @@ impl Plot {
             .expect("Read encoding result sender was dropped")
     }
 
+    pub async fn find_by_tag(&self, tag: u64) -> io::Result<(u64, usize)> {
+        let (result_sender, result_receiver) = oneshot::channel();
+
+        self.read_requests_sender
+            .clone()
+            .send(ReadRequests::FindByTag { tag, result_sender })
+            .await
+            .expect("Failed sending get by tag request");
+
+        // If fails - it is either full or disconnected, we don't care either way, so ignore result
+        let _ = self.any_requests_sender.clone().try_send(());
+
+        result_receiver
+            .await
+            .expect("Get by tag result sender was dropped")
+    }
+
     /// Writes a piece to the plot by index, will overwrite if piece exists (updates)
-    pub async fn write(&self, encoding: Piece, index: usize) -> io::Result<()> {
+    pub async fn write(&self, encoding: Piece, tag: u64, index: usize) -> io::Result<()> {
         let (result_sender, result_receiver) = oneshot::channel();
 
         self.write_requests_sender
             .clone()
             .send(WriteRequests::WriteEncoding {
                 encoding,
+                tag,
                 index,
                 result_sender,
             })
@@ -308,9 +347,7 @@ impl Plot {
 
         result_receiver
             .await
-            .expect("Write encoding result sender was dropped")?;
-
-        self.handle_update().await
+            .expect("Write encoding result sender was dropped")
     }
 
     /// Removes a piece from the plot by index, by deleting its index from the map
@@ -331,92 +368,7 @@ impl Plot {
 
         result_receiver
             .await
-            .expect("Remove encoding result sender was dropped")?;
-
-        self.handle_update().await
-    }
-
-    /// Fetches the encoding for an audit and returns the solution with random delay
-    ///
-    /// Given the target:
-    /// Given an expected replication factor (encoding_count) as u32
-    /// Compute the target value as 2^ (32 - log(2) encoding count)
-    ///
-    /// Given a sample:
-    /// Given a 256 bit tag
-    /// Reduce it to a 32 bit number by taking the first four bytes
-    /// Convert to an u32 -> f64 -> take log(2)
-    /// Compute exponent as log2(tag) - log2(tgt)
-    ///
-    /// Compute delay as base_delay * 2^exponent
-    ///
-    pub async fn solve(
-        &self,
-        parent_id: [u8; 32],
-        challenge: [u8; 32],
-        timestamp: u128,
-        target: u32,
-    ) -> Vec<Solution> {
-        // choose the correct "virtual" piece
-        let base_index = utils::modulo(&challenge, PIECE_COUNT);
-        let mut solutions: Vec<Solution> = Vec::new();
-        // read each "virtual" encoding of that piece
-        for i in 0..REPLICATION_FACTOR {
-            let index = base_index + (i * REPLICATION_FACTOR) as usize;
-            let encoding = self.read(index).await.unwrap();
-            let tag = crypto::create_hmac(&encoding[..], &challenge);
-            let sample = utils::bytes_le_to_u32(&tag[0..4]);
-            let distance = (sample as f64).log2() - (target as f64).log2();
-            let delay = (TARGET_BLOCK_DELAY * 2f64.powf(distance)) as u32;
-
-            solutions.push(Solution {
-                parent: parent_id,
-                challenge,
-                base_time: timestamp,
-                piece_index: index as u64,
-                proof_index: base_index as u64,
-                tag,
-                delay,
-                encoding,
-            })
-        }
-
-        // sort the solutions so that smallest delay is first
-        solutions.sort_by_key(|s| s.delay);
-        solutions[0..DEGREE_OF_SIMULATION].to_vec()
-    }
-
-    /// Writes the map to disk to persist between sessions (does not load on startup yet)
-    pub async fn force_write_map(&self) -> io::Result<()> {
-        let (result_sender, result_receiver) = oneshot::channel();
-
-        self.write_requests_sender
-            .clone()
-            .send(WriteRequests::ForceWriteMap { result_sender })
-            .await
-            .expect("Failed sending force write map request");
-
-        // If fails - it is either full or disconnected, we don't care either way, so ignore result
-        let _ = self.any_requests_sender.clone().try_send(());
-
-        result_receiver
-            .await
-            .expect("Force write map result sender was dropped")?;
-
-        self.updates.store(0, Ordering::Relaxed);
-
-        Ok(())
-    }
-
-    /// Increment a counter to persist the map based on some interval
-    async fn handle_update(&self) -> io::Result<()> {
-        let updates = self.updates.fetch_add(1, Ordering::Relaxed);
-
-        if updates % self.update_interval == 0 {
-            self.force_write_map().await?;
-        }
-
-        Ok(())
+            .expect("Remove encoding result sender was dropped")
     }
 }
 
@@ -433,19 +385,20 @@ mod tests {
     use super::*;
     use crate::crypto;
     use async_std::path::PathBuf;
+    use rand::prelude::*;
 
     #[async_std::test]
     async fn test_basic() {
         let path = PathBuf::from("target").join("test");
 
         let piece = crypto::generate_random_piece();
+        let tag = rand::thread_rng().gen::<u64>();
+        let index = 0;
 
         let plot = Plot::open_or_create(&path).await.unwrap();
-        plot.write(piece, 0).await.unwrap();
-        let extracted_piece = plot.read(0).await.unwrap();
+        plot.write(piece, tag, index).await.unwrap();
+        let extracted_piece = plot.read(index).await.unwrap();
 
         assert_eq!(extracted_piece[..], piece[..]);
-
-        plot.force_write_map().await.unwrap();
     }
 }
