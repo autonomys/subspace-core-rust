@@ -1,6 +1,9 @@
 #![feature(try_blocks)]
 #![feature(drain_filter)]
 
+use async_std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+
 pub mod console;
 pub mod crypto;
 pub mod ledger;
@@ -11,31 +14,43 @@ pub mod plotter;
 pub mod pseudo_wallet;
 pub mod sloth;
 pub mod solver;
+pub mod timer;
 pub mod utils;
+
+// TODO: Should make into actual structs
+pub type Piece = [u8; PIECE_SIZE];
+pub type IV = [u8; IV_SIZE];
+pub type NodeID = IV;
+pub type Tag = u64;
+pub type BlockId = [u8; 32];
+pub type ProofId = [u8; 32];
+pub type ContentId = [u8; 32];
+pub type PublicKey = [u8; 32];
+pub type ExpandedIV = [u8; PRIME_SIZE_BYTES];
+pub type EpochRandomness = Arc<Mutex<HashMap<u64, [u8; 32]>>>;
+pub type EpochChallenge = [u8; 32];
+pub type SlotChallenge = [u8; 32];
 
 pub const PRIME_SIZE_BITS: usize = 256;
 pub const PRIME_SIZE_BYTES: usize = PRIME_SIZE_BITS / 8;
 pub const IV_SIZE: usize = 32;
 pub const PIECE_SIZE: usize = 4096;
 pub const PIECE_COUNT: usize = 256;
-pub const REPLICATION_FACTOR: usize = 8;
+pub const REPLICATION_FACTOR: usize = 256;
 pub const PLOT_SIZE: usize = PIECE_COUNT * REPLICATION_FACTOR;
 pub const BLOCKS_PER_ENCODING: usize = PIECE_SIZE / PRIME_SIZE_BYTES;
 pub const ENCODING_LAYERS_TEST: usize = 1;
 pub const ENCODING_LAYERS_PROD: usize = BLOCKS_PER_ENCODING;
 pub const PLOT_UPDATE_INTERVAL: usize = 10000;
 pub const MAX_PEERS: usize = 8;
-pub const TARGET_BLOCK_DELAY: f64 = 300.0;
-pub const SOLVE_WAIT_TIME_MS: u64 = 1000;
 pub const INITIAL_QUALITY_THRESHOLD: u8 = 0;
-pub const DEGREE_OF_SIMULATION: usize = 2;
 pub const CONFIRMATION_DEPTH: usize = 6;
-pub const SOLVE_V2: bool = true;
-pub type Piece = [u8; PIECE_SIZE];
-pub type IV = [u8; IV_SIZE];
-pub type NodeID = IV;
-pub type BlockId = [u8; 32];
-pub type ExpandedIV = [u8; PRIME_SIZE_BYTES];
 pub const DEV_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";
-pub const CONSOLE: bool = true;
+pub const CONSOLE: bool = false;
+// TODO: build duration object here and only define once
+pub const TIMESLOT_DURATION: u128 = 1000;
+pub const CHALLENGE_LOOKBACK: u64 = 3;
+pub const TIMESLOTS_PER_EPOCH: u64 = 1;
+pub const EPOCH_GRACE_PERIOD: u64 = 1000;
+pub const SOLUTION_RANGE: u64 = std::u64::MAX / PLOT_SIZE as u64 / 2;

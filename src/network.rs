@@ -7,7 +7,7 @@ use async_std::sync::{channel, Receiver, Sender};
 use bytes::buf::BufMutExt;
 use bytes::{Bytes, BytesMut};
 use futures::join;
-use ledger::{Block, FullBlock};
+use ledger::Block;
 use log::*;
 use manager::ProtocolMessage;
 use rand::prelude::*;
@@ -72,9 +72,9 @@ pub enum Message {
     Pong,
     PeersRequest,
     PeersResponse { contacts: Vec<SocketAddr> },
-    BlockRequest { index: u32 },
-    BlockResponse { index: u32, block: Option<Block> },
-    BlockProposal { full_block: FullBlock },
+    BlocksRequest { timeslot: u64 },
+    BlocksResponse { timeslot: u64, blocks: Vec<Block> },
+    BlockProposal { block: Block },
 }
 
 impl Display for Message {
@@ -87,8 +87,8 @@ impl Display for Message {
                 Self::Pong => "Pong",
                 Self::PeersRequest => "PeersRequest",
                 Self::PeersResponse { .. } => "PeersResponse",
-                Self::BlockRequest { .. } => "BlockRequest",
-                Self::BlockResponse { .. } => "BlockResponse",
+                Self::BlocksRequest { .. } => "BlockRequest",
+                Self::BlocksResponse { .. } => "BlockResponse",
                 Self::BlockProposal { .. } => "BlockProposal",
             }
         )
@@ -445,23 +445,23 @@ pub async fn run(
 
                             // if we still have too few peers, should we try another peer
                         }
-                        Message::BlockRequest { index } => {
+                        Message::BlocksRequest { timeslot } => {
                             let net_to_main_tx = net_to_main_tx.clone();
-                            let message = ProtocolMessage::BlockRequestFrom {
+                            let message = ProtocolMessage::BlocksRequestFrom {
                                 node_addr: peer_addr,
-                                index,
+                                timeslot,
                             };
 
                             async_std::task::spawn(async move {
                                 net_to_main_tx.send(message).await;
                             });
                         }
-                        Message::BlockResponse { index, block } => {
+                        Message::BlocksResponse { timeslot, blocks } => {
                             // TODO: Handle the case where peer does not have the block
                             let net_to_main_tx = net_to_main_tx.clone();
                             async_std::task::spawn(async move {
                                 net_to_main_tx
-                                    .send(ProtocolMessage::BlockResponse { index, block })
+                                    .send(ProtocolMessage::BlocksResponse { timeslot, blocks })
                                     .await;
                             });
 
@@ -490,17 +490,14 @@ pub async fn run(
                             //     }
                             // }
                         }
-                        Message::BlockProposal { full_block } => {
+                        Message::BlockProposal { block } => {
                             // send to main
 
                             let net_to_main_tx = net_to_main_tx.clone();
 
                             async_std::task::spawn(async move {
                                 net_to_main_tx
-                                    .send(ProtocolMessage::BlockProposalRemote {
-                                        full_block,
-                                        peer_addr,
-                                    })
+                                    .send(ProtocolMessage::BlockProposalRemote { block, peer_addr })
                                     .await;
                             });
                         }
@@ -509,38 +506,35 @@ pub async fn run(
                 NetworkEvent::OutboundMessage { message } => {
                     // messages received from manager that need to be sent over the network to peers
                     match message {
-                        ProtocolMessage::BlockRequest { index } => {
+                        ProtocolMessage::BlocksRequest { timeslot } => {
                             // ledger requested a block at a given index
                             // send a block_request to one peer chosen at random from gossip group
 
                             if let Some(peer) = router.get_random_peer() {
-                                router.send(&peer, Message::BlockRequest { index });
+                                router.send(&peer, Message::BlocksRequest { timeslot });
                             } else {
-                                info!("Failed to request block at index {}: no peers", index);
+                                info!("Failed to request block at index {}: no peers", timeslot);
                             }
                         }
-                        ProtocolMessage::BlockResponseTo {
+                        ProtocolMessage::BlocksResponseTo {
                             node_addr,
-                            block,
-                            index,
+                            blocks,
+                            timeslot,
                         } => {
                             // send a block back to a peer that has requested it from you
 
-                            router.send(&node_addr, Message::BlockResponse { index, block });
+                            router.send(&node_addr, Message::BlocksResponse { timeslot, blocks });
                         }
-                        ProtocolMessage::BlockProposalRemote {
-                            full_block,
-                            peer_addr,
-                        } => {
+                        ProtocolMessage::BlockProposalRemote { block, peer_addr } => {
                             // propagating a block received over the network that was valid
                             // do not send back to the node who sent to you
 
-                            router.regossip(&peer_addr, Message::BlockProposal { full_block });
+                            router.regossip(&peer_addr, Message::BlockProposal { block });
                         }
-                        ProtocolMessage::BlockProposalLocal { full_block } => {
+                        ProtocolMessage::BlockProposalLocal { block } => {
                             // propagating a block generated locally, send to all
 
-                            router.gossip(Message::BlockProposal { full_block });
+                            router.gossip(Message::BlockProposal { block });
                         }
                         ProtocolMessage::StateUpdateRequest => {
                             let state = router.get_state();

@@ -5,7 +5,7 @@ use async_std::sync::{Receiver, Sender};
 use async_std::task;
 use console::AppState;
 use futures::join;
-use ledger::{Block, BlockState, FullBlock, Proof};
+use ledger::{Block, BlockState};
 use log::*;
 use network::NodeType;
 use solver::Solution;
@@ -15,69 +15,56 @@ use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /*
- * Consider if default should wait for block arrival before collecting tx and gossping or release immeaditely?
- * Maybe rename timestamp to arrival_time
+ * Sync Workflow
  *
- * Deadlines
- * ---------
- * 1) I have solved locally, forge and gossip immediately, wait for deadline before applying and solving on top of (farmer)
- * 2) I have received a block, validate and gossip immediately, wait for deadline before applying to the ledger (peer)
- * 3) I have received a block, validate and gossip immediately, wait for deadline before allying and building (farmer)
+ * Peer requests block at height 0
+ * GW sends block 0
+ * Peer checks to see if has any cached blocks that reference the block received
+ * If yes, peer recursively applies cached blocks
+ * If no, peer requests the next block
  *
- * Farmers will attempt to build on a valid block once it arrives
- * They should then immeadiatley fill with tx and gossip the block (rational behavior)
- *
- * Simplest way to handle sync
- *
- * Cache interim gossip an apply after sync (though we may miss some)
- * Have them sync all gossip after sync, then start listening to gossip
- * How do we send gossip again?
- * Have to get all blocks that have not been applied
- * But theyre all in the same data structure
- * Could just read children down from last confirmed block
- * This would miss blocks that have not arrived
- * But these should be received via gossip if we apply them on arrival
- *
- * Maybe we should think of it more like pub/sub
+ * Need to pull old code for apply_pending_chlildren
+ * Need to complete the code when blocks are received ahead of the current timeslot (wait for arrival)
  *
 */
 
 // TODO: Split this into multiple enums
 pub enum ProtocolMessage {
     /// On sync, main forwards block request to Net for tx from self to peer
-    BlockRequest {
-        index: u32,
+    BlocksRequest {
+        timeslot: u64,
     },
     /// peer receives at Net and forwards request to main for fetch
-    BlockRequestFrom {
+    BlocksRequestFrom {
         node_addr: SocketAddr,
-        index: u32,
+        timeslot: u64,
     },
     /// peer main forwards response back to Net for tx
-    BlockResponseTo {
+    BlocksResponseTo {
         node_addr: SocketAddr,
-        block: Option<Block>,
-        index: u32,
+        blocks: Vec<Block>,
+        timeslot: u64,
     },
     /// self receives at Net and forwards response back to Main
-    BlockResponse {
-        index: u32,
-        block: Option<Block>,
+    BlocksResponse {
+        timeslot: u64,
+        blocks: Vec<Block>,
     },
     /// Net receives new full block, validates/applies, sends back to net for re-gossip
     BlockProposalRemote {
-        full_block: FullBlock,
+        block: Block,
         peer_addr: SocketAddr,
     },
     /// A valid full block has been produced locally and needs to be gossiped
     BlockProposalLocal {
-        full_block: FullBlock,
+        block: Block,
     },
     /// Main sends challenge to solver for evaluation
-    BlockChallenge {
-        parent_id: [u8; 32],
-        challenge: [u8; 32],
-        base_time: u128,
+    SlotChallenge {
+        epoch: u64,
+        timeslot: u64,
+        epoch_randomness: [u8; 32],
+        slot_challenge: [u8; 32],
     },
     /// Solver sends a set of solutions back to main for application
     BlockSolutions {
@@ -87,6 +74,8 @@ pub enum ProtocolMessage {
         block_id: [u8; 32],
         cached: bool,
     },
+    StartFarming,
+    StopFarming,
     /// Main sends a state update request to manager for console state
     StateUpdateRequest,
     /// Manager sends a state update response to main for console state
@@ -101,15 +90,17 @@ impl Display for ProtocolMessage {
             f,
             "{}",
             match self {
-                Self::BlockRequest { .. } => "BlockRequest",
-                Self::BlockResponse { .. } => "BlockResponse",
-                Self::BlockRequestFrom { .. } => "BlockRequestFrom",
-                Self::BlockResponseTo { .. } => "BlockResponseTo",
+                Self::BlocksRequest { .. } => "BlockRequest",
+                Self::BlocksResponse { .. } => "BlockResponse",
+                Self::BlocksRequestFrom { .. } => "BlockRequestFrom",
+                Self::BlocksResponseTo { .. } => "BlockResponseTo",
                 Self::BlockProposalRemote { .. } => "BlockProposalRemote",
                 Self::BlockProposalLocal { .. } => "BlockProposalLocal",
-                Self::BlockChallenge { .. } => "BlockChallenge",
+                Self::SlotChallenge { .. } => "BlockChallenge",
                 Self::BlockSolutions { .. } => "BlockSolutions",
                 Self::BlockArrived { .. } => "BlockArrived",
+                Self::StartFarming => "StartFarming",
+                Self::StopFarming => "StopFarming",
                 Self::StateUpdateRequest { .. } => "StateUpdateRequest",
                 Self::StateUpdateResponse { .. } => "StateUpdateResponse",
             }
@@ -157,13 +148,13 @@ pub async fn arrive_pending_children(
         // if yes repeat
         // otherewise call normal wait for arrival
 
-        wait_for_block_arrival(
-            *child_block_id,
-            true,
-            child_block.block.timestamp,
-            sender.clone(),
-        )
-        .await;
+        // wait_for_block_arrival(
+        //     *child_block_id,
+        //     true,
+        //     child_block.block.timestamp,
+        //     sender.clone(),
+        // )
+        // .await;
 
         // dont want to solve until we are no longer calling cached blocks
         // once we are done calling cached blocks, we need to clear out the rest of them
@@ -174,233 +165,244 @@ pub async fn arrive_pending_children(
 pub async fn run(
     node_type: NodeType,
     genesis_piece_hash: [u8; 32],
-    binary_public_key: [u8; 32],
-    keys: ed25519_dalek::Keypair,
-    merkle_proofs: Vec<Vec<u8>>,
-    tx_payload: Vec<u8>,
     ledger: &mut ledger::Ledger,
     any_to_main_rx: Receiver<ProtocolMessage>,
     main_to_net_tx: Sender<ProtocolMessage>,
-    main_to_sol_tx: Sender<ProtocolMessage>,
     main_to_main_tx: Sender<ProtocolMessage>,
     state_sender: crossbeam_channel::Sender<AppState>,
+    timer_to_solver_tx: Sender<ProtocolMessage>,
+    epoch_tracker: timer::EpochTracker,
 ) {
-    // create the genesis block here
-    let genesis_timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_millis();
-
-    // sign tag and create block
-    let genesis_block = Block::new(
-        genesis_timestamp,
-        0u32,
-        [0u8; 32],
-        [0u8; 32],
-        genesis_piece_hash,
-        binary_public_key,
-        keys.sign(&genesis_piece_hash).to_bytes().to_vec(),
-        tx_payload.clone(),
-    );
-
-    let genesis_block_id = genesis_block.get_id();
-
     let protocol_listener = async {
         info!("Main protocol loop is running...");
-        ledger.apply_genesis_block(&genesis_block);
-        info!(
-            "Applied the genesis block to ledger with id {}",
-            hex::encode(&genesis_block_id)
-        );
+        let is_farming = match node_type {
+            NodeType::Gateway | NodeType::Farmer => true,
+            _ => false,
+        };
+
+        // if gateway init the genesis block set and then start the timer
+        if node_type == NodeType::Gateway {
+            // init ledger from genesis
+            ledger.init_from_genesis().await;
+
+            // TODO: are we sure this is starting at the exaxt right time?
+            // start timer loop
+            let sender = timer_to_solver_tx.clone();
+            let tracker = Arc::clone(&epoch_tracker);
+            async_std::task::spawn(async move {
+                timer::run(
+                    sender,
+                    tracker,
+                    CHALLENGE_LOOKBACK,
+                    CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH,
+                    true,
+                )
+                .await;
+            });
+        } else {
+            // create the initial epoch
+            let initial_epoch = timer::Epoch::new(0);
+            epoch_tracker.lock().await.insert(0, initial_epoch);
+        }
 
         loop {
             if let Ok(message) = any_to_main_rx.recv().await {
                 match message {
-                    ProtocolMessage::BlockRequestFrom { node_addr, index } => {
+                    ProtocolMessage::BlocksRequestFrom {
+                        node_addr,
+                        timeslot,
+                    } => {
                         // TODO: should send a unique message if block has no children to signify that this is the last block
-                        let block = ledger.get_block_by_index(index);
-                        let message = ProtocolMessage::BlockResponseTo {
+                        let blocks = ledger.get_blocks_by_timeslot(timeslot);
+                        let message = ProtocolMessage::BlocksResponseTo {
                             node_addr,
-                            block,
-                            index,
+                            blocks,
+                            timeslot,
                         };
                         main_to_net_tx.send(message).await;
                     }
-                    ProtocolMessage::BlockResponse { block, index } => {
-                        match block {
-                            Some(block) => {
-                                // apply the block, go to the next index
+                    ProtocolMessage::BlocksResponse { blocks, timeslot } => {
+                        // TODO: this is mainly for testing, later this will be replaced by state chain sync
+                        // as such there is no need for validating the block or timestamp
+                        // determine if genesis block or normal block
+                        // apply genesis block
+                        // apply normal block
 
-                                // TODO: this is only a partial block, we have to validate some full blocks too
-                                if !block.is_valid() {
-                                    // TODO: Request from another peer and blacklist this peer
-                                    panic!(
-                                        "Received invalid block response while syncing the chain"
-                                    );
+                        // TODO: sort the blocks lexicographically
+
+                        // get the epoch for this round
+                        let mut epoch = epoch_tracker
+                            .lock()
+                            .await
+                            .get(&(timeslot / TIMESLOTS_PER_EPOCH))
+                            .unwrap()
+                            .clone();
+
+                        // apply each block for the timeslot
+                        for block in blocks.iter() {
+                            ledger.apply_block_from_sync(block.clone()).await;
+                        }
+
+                        // increment the timeslot
+                        ledger.current_timeslot += 1;
+
+                        // increment the epoch on boundary
+                        if ledger.current_timeslot % TIMESLOTS_PER_EPOCH == 0 {
+                            ledger.current_epoch += 1;
+
+                            // close the current epoch here and derive randomness
+                            epoch.close();
+
+                            // create the new epoch
+                            let new_epoch_index = timeslot / TIMESLOTS_PER_EPOCH;
+                            epoch_tracker
+                                .lock()
+                                .await
+                                .insert(new_epoch_index, timer::Epoch::new(new_epoch_index));
+                        }
+
+                        // we want to ensure that all blocks in this timeslot have pending children (else we may have only a partial set)
+                        let mut synced = true;
+                        let block_ids: Vec<BlockId> =
+                            blocks.iter().map(|block| block.get_id()).collect();
+
+                        for block_id in block_ids.iter() {
+                            match ledger.pending_children_for_parent.get(block_id) {
+                                Some(_) => {}
+                                None => {
+                                    synced = false;
+                                    break;
                                 }
-
-                                // TODO: check timestamp has elapsed
-
-                                if index == 0 {
-                                    ledger.apply_genesis_block(&block);
-                                } else {
-                                    ledger.track_block(&block, BlockState::New);
-                                    ledger.confirm_block(&block.get_id());
-                                }
-
-                                // request another block
-                                main_to_net_tx
-                                    .send(ProtocolMessage::BlockRequest {
-                                        index: ledger.height,
-                                    })
-                                    .await;
-                            }
-                            None => {
-                                // we have synced, start applying pending blocks from the last index
-                                info!("Synced the confirmed ledger!");
-
-                                let children = ledger
-                                    .pending_children_for_parent
-                                    .get(&ledger.latest_block_hash)
-                                    .unwrap();
-
-                                arrive_pending_children(ledger, children.clone(), &main_to_main_tx)
-                                    .await;
                             }
                         }
+
+                        if synced {
+                            // if so, then recursively apply all gossip, until we run out of cached blocks
+
+                            // then start the timer
+
+                            let sender = timer_to_solver_tx.clone();
+                            let tracker = Arc::clone(&epoch_tracker);
+
+                            // apply the genesis block
+
+                            // WRONG: We can't start the timer until
+
+                            // start the timer at the right epoch and timeslot
+                            let genesis_block = blocks[0].clone();
+                            let genesis_time = genesis_block.content.timestamp;
+
+                            let current_time = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .expect("Time went backwards")
+                                .as_millis();
+
+                            let elapsed_time = current_time - genesis_time;
+                            let mut elapsed_timeslots = elapsed_time / TIMESLOT_DURATION;
+                            let mut elapsed_epochs =
+                                elapsed_timeslots / TIMESLOTS_PER_EPOCH as u128;
+                            let time_to_next_timeslot =
+                                elapsed_time - (TIMESLOT_DURATION * elapsed_timeslots);
+
+                            // TODO: if time_to_next_timeslot is very small (say less than 10 ms) wait one more timeslot to ensure computation completes
+
+                            async_std::task::sleep(Duration::from_millis(
+                                (time_to_next_timeslot) as u64,
+                            ))
+                            .await;
+
+                            elapsed_timeslots += 1;
+
+                            if elapsed_timeslots % TIMESLOTS_PER_EPOCH as u128 == 0 {
+                                elapsed_epochs += 1;
+                            }
+                            async_std::task::spawn(async move {
+                                timer::run(
+                                    sender,
+                                    tracker,
+                                    elapsed_epochs as u64,
+                                    elapsed_timeslots as u64,
+                                    is_farming,
+                                )
+                                .await;
+                            });
+
+                        // then start farming
+                        } else {
+                            main_to_net_tx
+                                .send(ProtocolMessage::BlocksRequest {
+                                    timeslot: timeslot + 1,
+                                })
+                                .await;
+                        }
                     }
-                    ProtocolMessage::BlockProposalRemote {
-                        full_block,
-                        peer_addr,
-                    } => {
-                        let block_id = full_block.block.get_id();
+                    ProtocolMessage::BlockProposalRemote { block, peer_addr } => {
+                        let block_id = block.get_id();
 
                         if ledger.metablocks.contains_key(&block_id) {
                             info!("Received a block proposal via gossip for known block, ignoring");
                             continue;
                         }
 
-                        // TODO: revise for delay
-                        // check quality first
-                        // if full_block.block.get_quality() < ledger.quality_threshold {
-                        //     info!("Received block proposal with insufficient quality via gossip, ignoring");
-                        //     continue;
-                        // }
+                        // only apply if we have the parent, else cache
+                        // apply if we have one or all of the parents
 
-                        // TODO: Should check if block is pending parent for children here
-
-                        if let Some(block) = ledger.metablocks.get(&full_block.block.parent_id) {
-                            match block.state {
-                                BlockState::New | BlockState::Arrived | BlockState::Confirmed => {
-                                    // TODO: decide to gossip the block now or wait until it has arrived?
-                                    // for now gossip optimistically
-                                    main_to_net_tx
-                                        .send(ProtocolMessage::BlockProposalRemote {
-                                            full_block: full_block.clone(),
-                                            peer_addr,
-                                        })
-                                        .await;
-                                    info!(
-                                        "Waiting for arrival of new block receieved via gossip: {}",
-                                        hex::encode(&block.id[0..8])
-                                    );
-
-                                    // Add to block tracker
-                                    ledger.track_block(&full_block.block, BlockState::New);
-
-                                    // wait for deadline arrival
-                                    wait_for_block_arrival(
-                                        full_block.block.get_id(),
-                                        false,
-                                        full_block.block.timestamp,
-                                        main_to_main_tx.clone(),
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                                _ => {}
+                        for parent_id in block.content.parent_ids.iter() {
+                            if !ledger.metablocks.contains_key(parent_id) {
+                                // cache the block
+                                // ledger.metablocks.insert();
+                                // add to pending children
                             }
                         }
 
-                        // State is stray or no parent is tracked
-                        info!(
-                            "Caching a block proposal that is ahead of local ledger with id: {}",
-                            hex::encode(&full_block.block.get_id()[0..8])
-                        );
-                        ledger.track_block(&full_block.block, BlockState::Stray);
-                        ledger
-                            .pending_children_for_parent
-                            .entry(full_block.block.parent_id)
-                            .and_modify(|children| children.push(block_id))
-                            .or_insert_with(|| vec![block_id]);
+                        // TODO: if the timeslot is beyond the grace period, ignore the block
+                        // TODO: important -- this may lead to forks if nodes are malicous
+                        // TODO: this means we need to support forks in some fashion
 
-                        // TODO: What does this code do???
-                        if !ledger.metablocks.contains_key(&full_block.block.parent_id) {
-                            continue;
+                        // has the timeslot arrived? -> case where a node gossips early intentionally or clocks are out of sync
+                        let time_now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("Time went backwards")
+                            .as_millis();
+
+                        let arrival_time = ledger.genesis_timestamp
+                            + (TIMESLOT_DURATION * block.proof.timeslot as u128);
+
+                        if arrival_time < time_now {
+                            let sender = main_to_main_tx.clone();
+                            async_std::task::spawn(async move {
+                                async_std::task::sleep(Duration::from_millis(
+                                    (arrival_time - time_now) as u64,
+                                ))
+                                .await;
+                                sender
+                                    .send(ProtocolMessage::BlockArrived {
+                                        block_id,
+                                        cached: false,
+                                    })
+                                    .await;
+                            });
                         }
-                    }
-                    ProtocolMessage::BlockSolutions { solutions } => {
-                        for solution in solutions.into_iter() {
-                            // immediately gossip, on arrival apply, solve if valid extension
 
-                            // TODO: once we have enough farmers, ensure that delays > 1 second are ignored
-                            // if solution.delay < 1000u32 {
-                            //     info!("Solution to block challenge has a delay greater than one second, ignoring");
-                            //     continue;
-                            // }
+                        // how do we know if we have to cache the block (if received during sync?)
 
-                            let timestamp = solution.base_time + solution.delay as u128;
-                            // sign tag and create block
-                            let block = Block::new(
-                                timestamp,
-                                solution.delay,
-                                solution.challenge,
-                                solution.parent,
-                                solution.tag,
-                                binary_public_key,
-                                keys.sign(&solution.tag).to_bytes().to_vec(),
-                                tx_payload.clone(),
-                            );
-
-                            // create the proof
-                            let proof = Proof::new(
-                                solution.encoding,
-                                crypto::get_merkle_proof(solution.proof_index, &merkle_proofs),
-                                solution.piece_index,
-                                solution.proof_index,
-                            );
-
-                            // gossip the block immediately
+                        // check if the block is valid and apply
+                        if ledger.validate_and_apply_remote_block(block.clone()).await {
                             main_to_net_tx
-                                .send(ProtocolMessage::BlockProposalLocal {
-                                    full_block: FullBlock {
-                                        block: block.clone(),
-                                        proof,
-                                    },
+                                .send(ProtocolMessage::BlockProposalRemote {
+                                    block: block,
+                                    peer_addr,
                                 })
                                 .await;
-
-                            // Add to block tracker
-                            ledger.track_block(&block, BlockState::New);
-
-                            // wait for deadline arrival
-                            wait_for_block_arrival(
-                                block.get_id(),
-                                false,
-                                block.timestamp,
-                                main_to_main_tx.clone(),
-                            )
-                            .await;
                         }
                     }
                     ProtocolMessage::BlockArrived { block_id, cached } => {
-                        // TODO: ensure that we do not apply stale blocks to the ledger
-                        // info!(
-                        //     "A new block has arrived with id: {}",
-                        //     hex::encode(&block_id[0..8])
-                        // );
+                        info!(
+                            "A new block has arrived with id: {}",
+                            hex::encode(&block_id[0..8])
+                        );
 
-                        ledger.apply_arrived_block(&block_id, &main_to_sol_tx).await;
+                        // ledger.apply_arrived_block(&block_id, &main_to_sol_tx).await;
 
                         // ToDo: Have to wipe cached blocks at some point to prevent memory leak
 
@@ -417,6 +419,24 @@ pub async fn run(
 
                         // have to tell it the node type
                         // and whether to solve or not
+                    }
+                    ProtocolMessage::BlockSolutions { solutions } => {
+                        // TODO: split into two functions
+                        if solutions.is_empty() {
+                            ledger.create_and_apply_local_block(None).await;
+                        } else {
+                            for solution in solutions.into_iter() {
+                                let block = ledger
+                                    .create_and_apply_local_block(Some(solution))
+                                    .await
+                                    .unwrap();
+                                main_to_net_tx
+                                    .send(ProtocolMessage::BlockProposalLocal {
+                                        block: block.clone(),
+                                    })
+                                    .await;
+                            }
+                        }
                     }
                     ProtocolMessage::StateUpdateResponse { mut state } => {
                         state.node_type = node_type.to_string();
@@ -443,21 +463,9 @@ pub async fn run(
                 // send genesis challenge to solver
                 // this will start an eval loop = solve -> create block -> gossip -> solve ...
                 info!(
-                    "Starting gateway with genesis challenge: {}",
+                    "Starting gateway with genesis epoch challenge: {}",
                     hex::encode(&genesis_piece_hash[0..8])
                 );
-
-                // add the block to the ledger
-
-                // should create the genesis block here then apply it and solve
-
-                main_to_sol_tx
-                    .send(ProtocolMessage::BlockChallenge {
-                        parent_id: genesis_block_id,
-                        challenge: genesis_piece_hash,
-                        base_time: genesis_timestamp,
-                    })
-                    .await;
             }
             NodeType::Peer | NodeType::Farmer => {
                 // start syncing the ledger at the genesis block
@@ -466,10 +474,14 @@ pub async fn run(
                 task::sleep(Duration::from_secs(1)).await;
                 info!("New peer starting ledger sync with gateway");
                 main_to_net_tx
-                    .send(ProtocolMessage::BlockRequest { index: 0 })
+                    .send(ProtocolMessage::BlocksRequest { timeslot: 0 })
                     .await;
+
+                // on genesis block
+
+                // init the timer
             }
-        }
+        };
 
         // send state update requests in a loop to network
         if CONSOLE {

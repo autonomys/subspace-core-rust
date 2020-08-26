@@ -48,6 +48,12 @@ pub fn u16_to_bytes_le(number: u16) -> [u8; 2] {
     bytes
 }
 
+pub fn u64_to_bytes_le(number: u16) -> [u8; 2] {
+    let mut bytes = [0u8; 2];
+    bytes.as_mut().write_all(&number.to_le_bytes()).unwrap();
+    bytes
+}
+
 pub fn bytes_to_le_16(array: &[u8]) -> u16 {
     (array[0] as u16) + ((array[1] as u16) << 8)
 }

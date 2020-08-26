@@ -3,16 +3,17 @@
 
 extern crate log;
 
-use log::LevelFilter;
-
 use async_std::sync::channel;
+use async_std::sync::{Arc, Mutex};
 use async_std::task;
 use console::AppState;
 use crossbeam_channel::unbounded;
 use futures::join;
+use log::LevelFilter;
 use log::*;
 use manager::ProtocolMessage;
 use network::NodeType;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::thread;
@@ -23,9 +24,6 @@ use tui_logger::{init_logger, set_default_level};
 
 /* ToDo
  * ----
- * Optionally run the console app, just log to console instead
- * Base piece audits on block height and piece index correctly
- * Refactor audits / reads to use piece indcies instead of hashes throughout (map arch)
  *
  * Implementation Security
  * -----------------------
@@ -65,6 +63,7 @@ async fn main() {
         // run the console app in the foreground, passing the receiver
         console::run(state_receiver).unwrap();
     } else {
+        // TODO: fix default log level and occasinally print state to the console
         env_logger::init();
         run(state_sender).await;
     }
@@ -106,50 +105,51 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     let wallet = Wallet::open_or_create(&path).expect("Failed to init wallet");
     // derive node identity
     let keys = wallet.keypair;
-    let binary_public_key: [u8; 32] = keys.public.to_bytes();
     let node_id = wallet.node_id;
 
     // derive genesis piece
     let genesis_piece = crypto::genesis_piece_from_seed("SUBSPACE");
     let genesis_piece_hash = crypto::digest_sha_256(&genesis_piece);
 
+    // create the randomness tracker
+    let epoch_tracker = Arc::new(Mutex::new(HashMap::new()));
+
     // create the ledger
     let (merkle_proofs, merkle_root) = crypto::build_merkle_tree();
     let tx_payload = crypto::generate_random_piece().to_vec();
-    let mut ledger = ledger::Ledger::new(merkle_root, genesis_piece_hash, node_type);
+    let mut ledger = ledger::Ledger::new(
+        merkle_root,
+        genesis_piece_hash,
+        node_type,
+        keys,
+        tx_payload,
+        merkle_proofs,
+        Arc::clone(&epoch_tracker),
+    );
+
+    let is_farming = match node_type {
+        NodeType::Gateway | NodeType::Farmer => true,
+        _ => false,
+    };
 
     // create channels between background tasks
-    let (main_to_net_tx, main_to_net_rx) = channel::<ProtocolMessage>(4096);
-    let (main_to_sol_tx, main_to_sol_rx) = channel::<ProtocolMessage>(4096);
-    let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(4096);
-    let sol_to_main_tx = any_to_main_tx.clone();
+    let (main_to_net_tx, main_to_net_rx) = channel::<ProtocolMessage>(32);
+    let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(32);
+    let (timer_to_solver_tx, timer_to_solver_rx) = channel::<ProtocolMessage>(32);
+    let solver_to_main_tx = any_to_main_tx.clone();
     let main_to_main_tx = any_to_main_tx.clone();
-
-    // only plot/solve if gateway or farmer
-    if node_type == NodeType::Farmer || node_type == NodeType::Gateway {
-        // plot space (slow...)
-        let plot = plotter::plot(path.into(), node_id, genesis_piece).await;
-
-        // init solve loop
-        task::spawn(async move {
-            solver::run(main_to_sol_rx, sol_to_main_tx, &plot).await;
-        });
-    }
 
     // manager loop
     let main = manager::run(
         node_type,
         genesis_piece_hash,
-        binary_public_key,
-        keys,
-        merkle_proofs,
-        tx_payload,
         &mut ledger,
         any_to_main_rx,
         main_to_net_tx,
-        main_to_sol_tx,
         main_to_main_tx,
         state_sender,
+        timer_to_solver_tx,
+        epoch_tracker,
     );
 
     // network loop
@@ -161,6 +161,35 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         main_to_net_rx,
     );
 
-    // join threads
-    join!(main, net);
+    if is_farming {
+        // plot, slow...
+        let plot = plotter::plot(path.into(), node_id, genesis_piece).await;
+        // start solve loop
+        let solver = solver::run(timer_to_solver_rx, solver_to_main_tx, &plot);
+
+        join!(main, net, solver);
+    } else {
+        // listen and farm
+        join!(main, net);
+    }
+
+    /*
+     * Startup Scenarios
+     *
+     * (1) Start from genesis and farm
+     * (2) Sync from genesis and validate
+     * (3) Sync from genesis and farm
+     *
+     * Sync Process
+     *
+     * (1) Get the first genesis block
+     * (2) Start the timer from genesis time
+     * (3) Continue syncing the ledger
+     * (4) As each epoch is synced, close the epoch to get randomness
+     * (5) Don't start farming (or getting randomness in timer) until the ledger is synced
+     *
+     * Timer has to exist within ledger now
+     * Timer will pass challenges to solver, which will pass solutions to main, and apply to ledger
+     *
+     */
 }

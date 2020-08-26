@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use super::*;
+
 use crate::Piece;
 use crate::PIECE_SIZE;
 use async_std::fs::OpenOptions;
@@ -12,6 +14,7 @@ use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
 use futures::SinkExt;
 use futures::StreamExt;
+// use log::*;
 use rocksdb::IteratorMode;
 use rocksdb::DB;
 use std::convert::TryInto;
@@ -45,13 +48,21 @@ enum ReadRequests {
         tag: u64,
         result_sender: oneshot::Sender<io::Result<(u64, usize)>>,
     },
+    FindByRange {
+        target: u64,
+        range: u64,
+        result_sender: oneshot::Sender<io::Result<Vec<(u64, usize)>>>,
+    },
+    GetKeys {
+        result_sender: oneshot::Sender<io::Result<Vec<u64>>>,
+    },
 }
 
 #[derive(Debug)]
 enum WriteRequests {
     WriteEncoding {
         encoding: Piece,
-        tag: u64,
+        nonce: u64,
         index: usize,
         result_sender: oneshot::Sender<io::Result<()>>,
     },
@@ -71,7 +82,6 @@ pub struct Inner {
 /* ToDo
  *
  * Return result for solve()
- * Detect if plot exists on startup and load
  * Delete entire plot (perhaps with script) for testing
  * Extend tests
  * Resize plot by removing the last x indices and adjusting struct params
@@ -171,6 +181,7 @@ impl Plot {
                                 let tags_db = Arc::clone(&tags_db);
                                 move || {
                                     let mut iter = tags_db.raw_iterator();
+
                                     iter.seek(tag.to_le_bytes());
                                     // TODO: Remove unwrap
                                     let best_tag = iter.key().unwrap();
@@ -186,6 +197,109 @@ impl Plot {
 
                             let _ = result_sender.send(Ok((best_tag, index)));
                         }
+                        Some(ReadRequests::FindByRange {
+                            target,
+                            range,
+                            result_sender,
+                        }) => {
+                            // TODO: Remove unwrap
+                            let solutions = task::spawn_blocking({
+                                let tags_db = Arc::clone(&tags_db);
+                                move || {
+                                    let mut iter = tags_db.raw_iterator();
+
+                                    let mut solutions: Vec<(u64, usize)> = Vec::new();
+
+                                    let (lower, is_lower_overflowed) =
+                                        target.overflowing_sub(range);
+                                    let (upper, is_upper_overflowed) =
+                                        target.overflowing_add(range);
+
+                                    // info!(
+                                    //     "Lower overflow: {} -- Upper overflow: {}",
+                                    //     is_lower_overflowed, is_upper_overflowed
+                                    // );
+
+                                    if is_lower_overflowed || is_upper_overflowed {
+                                        iter.seek_to_first();
+                                        while iter.key().is_some() {
+                                            let tag = u64::from_be_bytes(
+                                                iter.key().unwrap().try_into().unwrap(),
+                                            );
+                                            let index = iter.value().unwrap();
+
+                                            if tag < upper {
+                                                solutions.push((
+                                                    tag,
+                                                    usize::from_le_bytes(index.try_into().unwrap()),
+                                                ));
+                                                iter.next();
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        iter.seek(lower.to_be_bytes());
+                                        while iter.key().is_some() {
+                                            let tag = u64::from_be_bytes(
+                                                iter.key().unwrap().try_into().unwrap(),
+                                            );
+                                            let index = iter.value().unwrap();
+
+                                            solutions.push((
+                                                tag,
+                                                usize::from_le_bytes(index.try_into().unwrap()),
+                                            ));
+                                            iter.next();
+                                        }
+                                    } else {
+                                        iter.seek(lower.to_be_bytes());
+                                        while iter.key().is_some() {
+                                            let tag = u64::from_be_bytes(
+                                                iter.key().unwrap().try_into().unwrap(),
+                                            );
+                                            let index = iter.value().unwrap();
+                                            if tag < upper {
+                                                solutions.push((
+                                                    tag,
+                                                    usize::from_le_bytes(index.try_into().unwrap()),
+                                                ));
+                                                iter.next();
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    solutions
+                                }
+                            })
+                            .await;
+
+                            let _ = result_sender.send(Ok(solutions));
+                        }
+                        Some(ReadRequests::GetKeys { result_sender }) => {
+                            // TODO: Remove unwrap
+                            let keys = task::spawn_blocking({
+                                let tags_db = Arc::clone(&tags_db);
+                                move || {
+                                    let mut iter = tags_db.raw_iterator();
+                                    let mut keys: Vec<u64> = Vec::new();
+
+                                    iter.seek_to_first();
+                                    while iter.key().is_some() {
+                                        keys.push(u64::from_be_bytes(
+                                            iter.key().unwrap().try_into().unwrap(),
+                                        ));
+                                        iter.next();
+                                    }
+
+                                    keys
+                                }
+                            })
+                            .await;
+
+                            let _ = result_sender.send(Ok(keys));
+                        }
                     }
                 }
 
@@ -197,7 +311,7 @@ impl Plot {
                 match write_request {
                     Ok(Some(WriteRequests::WriteEncoding {
                         index,
-                        tag,
+                        nonce,
                         encoding,
                         result_sender,
                     })) => {
@@ -218,15 +332,16 @@ impl Plot {
                                 task::spawn_blocking({
                                     let map_db = Arc::clone(&map_db);
                                     let tags_db = Arc::clone(&tags_db);
+                                    let tag = crypto::create_hmac(&encoding, &nonce.to_le_bytes());
                                     move || {
-                                        tags_db
-                                            .put(tag.to_le_bytes(), index.to_le_bytes())
-                                            .and_then(|_| {
+                                        tags_db.put(&tag[0..8], index.to_le_bytes()).and_then(
+                                            |_| {
                                                 map_db.put(
                                                     index.to_le_bytes(),
                                                     position.to_le_bytes(),
                                                 )
-                                            })
+                                            },
+                                        )
                                     }
                                 })
                                 .await
@@ -327,15 +442,59 @@ impl Plot {
             .expect("Get by tag result sender was dropped")
     }
 
+    pub async fn find_by_range(
+        &self,
+        target_hash: &[u8],
+        range: u64,
+    ) -> io::Result<Vec<(u64, usize)>> {
+        let (result_sender, result_receiver) = oneshot::channel();
+
+        let target = u64::from_be_bytes(target_hash[0..8].try_into().unwrap());
+
+        self.read_requests_sender
+            .clone()
+            .send(ReadRequests::FindByRange {
+                target,
+                range,
+                result_sender,
+            })
+            .await
+            .expect("Failed sending get by range request");
+
+        // If fails - it is either full or disconnected, we don't care either way, so ignore result
+        let _ = self.any_requests_sender.clone().try_send(());
+
+        result_receiver
+            .await
+            .expect("Get by range result sender was dropped")
+    }
+
+    pub async fn get_keys(&self) -> io::Result<Vec<u64>> {
+        let (result_sender, result_receiver) = oneshot::channel();
+
+        self.read_requests_sender
+            .clone()
+            .send(ReadRequests::GetKeys { result_sender })
+            .await
+            .expect("Failed sending get keys request");
+
+        // If fails - it is either full or disconnected, we don't care either way, so ignore result
+        let _ = self.any_requests_sender.clone().try_send(());
+
+        result_receiver
+            .await
+            .expect("Get keys result sender was dropped")
+    }
+
     /// Writes a piece to the plot by index, will overwrite if piece exists (updates)
-    pub async fn write(&self, encoding: Piece, tag: u64, index: usize) -> io::Result<()> {
+    pub async fn write(&self, encoding: Piece, nonce: u64, index: usize) -> io::Result<()> {
         let (result_sender, result_receiver) = oneshot::channel();
 
         self.write_requests_sender
             .clone()
             .send(WriteRequests::WriteEncoding {
                 encoding,
-                tag,
+                nonce,
                 index,
                 result_sender,
             })
