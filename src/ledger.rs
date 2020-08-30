@@ -609,7 +609,7 @@ impl Ledger {
     /// validate and apply a block received via gossip
     pub async fn validate_and_apply_remote_block(&mut self, block: Block) -> bool {
         let randomness_epoch = block.proof.epoch - CHALLENGE_LOOKBACK;
-        let challenge_index = block.proof.timeslot % TIMESLOTS_PER_EPOCH as u64;
+        let challenge_index = (block.proof.timeslot % TIMESLOTS_PER_EPOCH as u64) as usize;
         info!(
             "Validating and applying block for epoch: {} at timeslot {}",
             randomness_epoch, challenge_index
@@ -619,7 +619,6 @@ impl Ledger {
         let epoch = self.epoch_tracker.get_epoch(randomness_epoch).await;
 
         if !epoch.is_closed {
-            error!("Epoch being used for randomness is still open!");
             panic!("Epoch being used for randomness is still open!");
         }
 
@@ -628,7 +627,7 @@ impl Ledger {
             &self.merkle_root,
             &self.genesis_piece_hash,
             &epoch.randomness,
-            &epoch.get_challenge_for_timeslot(challenge_index as usize),
+            &epoch.get_challenge_for_timeslot(challenge_index),
             &self.sloth,
         ) {
             return false;
@@ -743,22 +742,22 @@ impl Ledger {
     pub async fn validate_and_apply_cached_block(&mut self, block: Block) -> bool {
         //TODO: must handle the case where the epoch is still open
 
-        let current_epoch = block.proof.epoch - CHALLENGE_LOOKBACK;
-        let challenge_epoch_index = block.proof.timeslot % TIMESLOTS_PER_EPOCH as u64;
+        let randomness_epoch_index = block.proof.epoch - CHALLENGE_LOOKBACK;
+        let challenge_timeslot_index = block.proof.timeslot % TIMESLOTS_PER_EPOCH as u64;
         info!(
             "Validating and applying cached block for epoch: {} at timeslot {}",
-            current_epoch, challenge_epoch_index
+            randomness_epoch_index, challenge_timeslot_index
         );
 
         // get correct randomness for this block
-        let epoch = self.epoch_tracker.get_epoch(current_epoch).await;
+        let epoch = self.epoch_tracker.get_epoch(randomness_epoch_index).await;
 
         // check if the block is valid
         if !block.is_valid(
             &self.merkle_root,
             &self.genesis_piece_hash,
             &epoch.randomness,
-            &epoch.get_challenge_for_timeslot(challenge_epoch_index as usize),
+            &epoch.get_challenge_for_timeslot(challenge_timeslot_index as usize),
             &self.sloth,
         ) {
             return false;
