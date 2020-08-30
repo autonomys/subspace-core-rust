@@ -458,7 +458,6 @@ impl Ledger {
             self.current_epoch += 1;
         }
 
-        // init the first epoch
         self.epoch_tracker.create_epoch(self.current_epoch).await;
 
         self.unseen_block_ids.insert(parent_id);

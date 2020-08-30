@@ -130,11 +130,11 @@ pub async fn run(
             // start timer loop
             ledger.timer_is_running = true;
 
-            let sender = timer_to_solver_tx.clone();
+            let timer_to_solver_tx = timer_to_solver_tx.clone();
             let epoch_tracker = epoch_tracker.clone();
             async_std::task::spawn(async move {
                 timer::run(
-                    sender,
+                    timer_to_solver_tx,
                     epoch_tracker,
                     CHALLENGE_LOOKBACK,
                     CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH,
@@ -155,12 +155,11 @@ pub async fn run(
                         timeslot,
                     } => {
                         // TODO: check to make sure that the requested timeslot is not ahead of local timeslot
-                        let blocks: Option<Vec<Block>>;
-                        if timeslot > ledger.current_timeslot {
-                            blocks = None;
+                        let blocks = if timeslot > ledger.current_timeslot {
+                            None
                         } else {
-                            blocks = Some(ledger.get_blocks_by_timeslot(timeslot));
-                        }
+                            Some(ledger.get_blocks_by_timeslot(timeslot))
+                        };
 
                         let message = ProtocolMessage::BlocksResponseTo {
                             node_addr,
