@@ -1,8 +1,8 @@
 use crate::timer::Epoch;
+use crate::BlockId;
 use crate::CHALLENGE_LOOKBACK;
 use async_std::sync::Mutex;
 use std::collections::HashMap;
-use std::ops::Deref;
 use std::sync::Arc;
 
 #[derive(Default, Clone)]
@@ -24,19 +24,26 @@ impl EpochTracker {
             .insert(epoch_index, Epoch::new(epoch_index));
     }
 
+    /// Returns `true` in case no blocks for this timeslot existed before
+    pub async fn add_block_to_epoch(
+        &self,
+        epoch_index: u64,
+        timeslot: u64,
+        block_id: BlockId,
+    ) -> bool {
+        let mut new_timeslot = true;
+        self.0.lock().await.entry(epoch_index).and_modify(|epoch| {
+            new_timeslot = epoch.add_block_to_timeslot(timeslot, block_id);
+        });
+
+        new_timeslot
+    }
+
     pub async fn close_epoch(&self, epoch_index: u64) {
         self.0
             .lock()
             .await
             .entry(epoch_index)
             .and_modify(|epoch| epoch.close());
-    }
-}
-
-impl Deref for EpochTracker {
-    type Target = Arc<Mutex<HashMap<u64, Epoch>>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
     }
 }

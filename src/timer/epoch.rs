@@ -20,7 +20,7 @@ pub struct Epoch {
 
 // TODO: Make into an enum for a cleaner implementation, separate into active and closed epoch
 impl Epoch {
-    pub fn new(index: u64) -> Epoch {
+    pub(super) fn new(index: u64) -> Epoch {
         let randomness = crypto::digest_sha_256(&index.to_le_bytes());
 
         Epoch {
@@ -32,7 +32,7 @@ impl Epoch {
     }
 
     /// Returns `true` in case no blocks for this timeslot existed before
-    pub fn add_block_to_timeslot(&mut self, timeslot: u64, block_id: BlockId) -> bool {
+    pub(super) fn add_block_to_timeslot(&mut self, timeslot: u64, block_id: BlockId) -> bool {
         let mut new_timeslot = true;
         self.slots
             .entry(timeslot)
@@ -50,7 +50,7 @@ impl Epoch {
         self.challenges[timeslot]
     }
 
-    pub fn close(&mut self) {
+    pub(super) fn close(&mut self) {
         let xor_result =
             self.slots
                 .values()

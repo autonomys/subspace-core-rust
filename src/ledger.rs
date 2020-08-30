@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 // use std::convert::TryInto;
 use crate::solver::SolverMessage;
-use crate::timer::{Epoch, EpochTracker};
+use crate::timer::EpochTracker;
 use async_std::sync::Sender;
 use std::fmt;
 use std::fmt::Display;
@@ -397,7 +397,7 @@ impl Ledger {
         let mut parent_id: BlockId = [0u8; 32];
 
         for epoch_index in 0..CHALLENGE_LOOKBACK {
-            let mut epoch = Epoch::new(epoch_index as u64);
+            self.epoch_tracker.create_epoch(epoch_index).await;
 
             for _ in 0..TIMESLOTS_PER_EPOCH {
                 let proof = Proof {
@@ -436,7 +436,9 @@ impl Ledger {
                 parent_id = block.get_id();
 
                 self.current_timeslot += 1;
-                epoch.add_block_to_timeslot(self.current_timeslot, parent_id);
+                self.epoch_tracker
+                    .add_block_to_epoch(epoch_index, self.current_timeslot, parent_id)
+                    .await;
 
                 info!(
                     "Applied a genesis block to ledger with id {}",
@@ -451,11 +453,7 @@ impl Ledger {
                 async_std::task::sleep(Duration::from_millis((timestamp - time_now) as u64)).await;
             }
 
-            epoch.close();
-            self.epoch_tracker
-                .lock()
-                .await
-                .insert(self.current_epoch, epoch);
+            self.epoch_tracker.close_epoch(epoch_index).await;
 
             info!("Updated randomness for epoch: {}", self.current_epoch);
             self.current_epoch += 1;
@@ -570,15 +568,10 @@ impl Ledger {
                 // TODO: collect all blocks for a slot, then order blocks, then order tx
 
                 // update the epoch for this block
-                // TODO: Make convenience method on epoch that returns a result
-                let mut new_timeslot = true;
-                self.epoch_tracker
-                    .lock()
-                    .await
-                    .entry(block.proof.epoch)
-                    .and_modify(|epoch| {
-                        new_timeslot = epoch.add_block_to_timeslot(block.proof.timeslot, block_id);
-                    });
+                let new_timeslot = self
+                    .epoch_tracker
+                    .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
+                    .await;
 
                 // if we are on the last timeslot, advance the epoch
                 if (self.current_timeslot + 1) % TIMESLOTS_PER_EPOCH == 0 {
@@ -687,15 +680,10 @@ impl Ledger {
         // TODO: collect all blocks for a slot, then order blocks, then order tx
 
         // update the epoch for this block
-        // TODO: Make convenience method on epoch that returns a result
-        let mut new_timeslot = true;
-        self.epoch_tracker
-            .lock()
-            .await
-            .entry(block.proof.epoch)
-            .and_modify(|epoch| {
-                new_timeslot = epoch.add_block_to_timeslot(block.proof.timeslot, block_id);
-            });
+        let new_timeslot = self
+            .epoch_tracker
+            .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
+            .await;
 
         // if we are on the last timeslot, close the epoch
         if (self.current_timeslot + 1) % TIMESLOTS_PER_EPOCH == 0 {
@@ -763,12 +751,8 @@ impl Ledger {
 
         // have to update the epoch and close on boundaries
         self.epoch_tracker
-            .lock()
-            .await
-            .entry(block.proof.epoch)
-            .and_modify(|epoch| {
-                epoch.add_block_to_timeslot(block.proof.timeslot, block_id);
-            });
+            .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
+            .await;
     }
 
     /// validate and apply a cached block from gossip after sycing the ledger
