@@ -46,6 +46,7 @@ impl Epoch {
     }
 
     pub fn get_challenge_for_timeslot(&self, timeslot: usize) -> SlotChallenge {
+        // TODO: No guarantee index exists
         self.challenges[timeslot]
     }
 

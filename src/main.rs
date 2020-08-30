@@ -1,10 +1,7 @@
 #![feature(try_blocks)]
 #![allow(dead_code)]
 
-extern crate log;
-
 use async_std::sync::channel;
-use async_std::sync::{Arc, Mutex};
 use async_std::task;
 use console::AppState;
 use crossbeam_channel::unbounded;
@@ -13,13 +10,13 @@ use log::LevelFilter;
 use log::*;
 use manager::ProtocolMessage;
 use network::NodeType;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::thread;
 use std::{env, fs};
 use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::solver::SolverMessage;
+use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::*;
 use tui_logger::{init_logger, set_default_level};
 
@@ -113,7 +110,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     let genesis_piece_hash = crypto::digest_sha_256(&genesis_piece);
 
     // create the randomness tracker
-    let epoch_tracker = Arc::new(Mutex::new(HashMap::new()));
+    let epoch_tracker = EpochTracker::default();
 
     // create the ledger
     let (merkle_proofs, merkle_root) = crypto::build_merkle_tree();
@@ -125,7 +122,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         keys,
         tx_payload,
         merkle_proofs,
-        Arc::clone(&epoch_tracker),
+        epoch_tracker.clone(),
     );
 
     let is_farming = matches!(node_type, NodeType::Gateway | NodeType::Farmer);

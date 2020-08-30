@@ -1,10 +1,12 @@
 #![allow(dead_code)]
 
 mod epoch;
+mod epoch_tracker;
 
 use super::*;
 use crate::solver::SolverMessage;
 pub use crate::timer::epoch::Epoch;
+pub use crate::timer::epoch_tracker::EpochTracker;
 use async_std::prelude::*;
 use async_std::stream;
 use async_std::sync::Sender;
@@ -16,16 +18,6 @@ use std::time::Duration;
  * Remove duplication of epoch/timeslot tracking between ledger and timer
  *
 */
-
-pub type EpochTracker = Arc<Mutex<HashMap<u64, Epoch>>>;
-
-// pub struct EpochTracker ( Arc<Mutex<HashMap<u64, Epoch>>>);
-
-// impl EpochTracker {
-//     pub async fn get(&self, current) {
-
-//     }
-// }
 
 pub async fn run(
     timer_to_solver_tx: Sender<SolverMessage>,

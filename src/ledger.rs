@@ -11,6 +11,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 // use std::convert::TryInto;
 use crate::solver::SolverMessage;
+use crate::timer::{Epoch, EpochTracker};
 use async_std::sync::Sender;
 use std::fmt;
 use std::fmt::Display;
@@ -308,7 +309,7 @@ pub struct MetaBlock {
 
 pub struct Ledger {
     pub metablocks: HashMap<BlockId, MetaBlock>,
-    pub epochs: timer::EpochTracker,
+    pub epoch_tracker: EpochTracker,
     pub current_epoch: u64,
     pub current_timeslot: u64,
     pub confirmed_blocks_by_timeslot: HashMap<u64, Vec<BlockId>>,
@@ -340,7 +341,7 @@ impl Ledger {
         keys: ed25519_dalek::Keypair,
         tx_payload: Vec<u8>,
         merkle_proofs: Vec<Vec<u8>>,
-        epochs: timer::EpochTracker,
+        epoch_tracker: EpochTracker,
     ) -> Ledger {
         // init sloth
         let prime_size = PRIME_SIZE_BITS;
@@ -348,7 +349,7 @@ impl Ledger {
 
         Ledger {
             metablocks: HashMap::new(),
-            epochs,
+            epoch_tracker,
             current_epoch: 0,
             current_timeslot: 0,
             confirmed_blocks_by_timeslot: HashMap::new(),
@@ -396,7 +397,7 @@ impl Ledger {
         let mut parent_id: BlockId = [0u8; 32];
 
         for epoch_index in 0..CHALLENGE_LOOKBACK {
-            let mut epoch = timer::Epoch::new(epoch_index as u64);
+            let mut epoch = Epoch::new(epoch_index as u64);
 
             for _ in 0..TIMESLOTS_PER_EPOCH {
                 let proof = Proof {
@@ -451,15 +452,18 @@ impl Ledger {
             }
 
             epoch.close();
-            self.epochs.lock().await.insert(self.current_epoch, epoch);
+            self.epoch_tracker
+                .lock()
+                .await
+                .insert(self.current_epoch, epoch);
 
             info!("Updated randomness for epoch: {}", self.current_epoch);
             self.current_epoch += 1;
         }
 
         // init the first epoch
-        let first_random_epoch = timer::Epoch::new(self.current_epoch);
-        self.epochs
+        let first_random_epoch = Epoch::new(self.current_epoch);
+        self.epoch_tracker
             .lock()
             .await
             .insert(self.current_epoch, first_random_epoch);
@@ -572,7 +576,7 @@ impl Ledger {
                 // update the epoch for this block
                 // TODO: Make convenience method on epoch that returns a result
                 let mut new_timeslot = true;
-                self.epochs
+                self.epoch_tracker
                     .lock()
                     .await
                     .entry(block.proof.epoch)
@@ -635,7 +639,7 @@ impl Ledger {
 
         // get correct randomness for this block
         let epoch = self
-            .epochs
+            .epoch_tracker
             .lock()
             .await
             .get(&randomness_epoch)
@@ -695,7 +699,7 @@ impl Ledger {
         // update the epoch for this block
         // TODO: Make convenience method on epoch that returns a result
         let mut new_timeslot = true;
-        self.epochs
+        self.epoch_tracker
             .lock()
             .await
             .entry(block.proof.epoch)
@@ -768,7 +772,7 @@ impl Ledger {
         );
 
         // have to update the epoch and close on boundaries
-        self.epochs
+        self.epoch_tracker
             .lock()
             .await
             .entry(block.proof.epoch)
@@ -790,7 +794,7 @@ impl Ledger {
 
         // get correct randomness for this block
         let epoch = self
-            .epochs
+            .epoch_tracker
             .lock()
             .await
             .get(&current_epoch)
@@ -865,7 +869,7 @@ impl Ledger {
 
                 // close the epoch
                 let epoch_index = self.current_timeslot / TIMESLOTS_PER_EPOCH as u64;
-                self.epochs
+                self.epoch_tracker
                     .lock()
                     .await
                     .entry(epoch_index - CHALLENGE_LOOKBACK)
@@ -878,10 +882,10 @@ impl Ledger {
 
                 // create the new epoch
                 let new_epoch_index = self.current_epoch + 1;
-                self.epochs
+                self.epoch_tracker
                     .lock()
                     .await
-                    .insert(new_epoch_index, timer::Epoch::new(new_epoch_index));
+                    .insert(new_epoch_index, Epoch::new(new_epoch_index));
 
                 info!("Creating a new empty epoch for epoch {}", new_epoch_index);
             }
@@ -922,7 +926,7 @@ impl Ledger {
         if elapsed_timeslots % TIMESLOTS_PER_EPOCH as u128 == 0 {
             elapsed_epochs += 1;
         }
-        let epoch_tracker = Arc::clone(&self.epochs);
+        let epoch_tracker = self.epoch_tracker.clone();
         async_std::task::spawn(async move {
             timer::run(
                 timer_to_solver_tx,

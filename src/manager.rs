@@ -133,11 +133,11 @@ pub async fn run(
             ledger.timer_is_running = true;
 
             let sender = timer_to_solver_tx.clone();
-            let tracker = Arc::clone(&epoch_tracker);
+            let epoch_tracker = epoch_tracker.clone();
             async_std::task::spawn(async move {
                 timer::run(
                     sender,
-                    tracker,
+                    epoch_tracker,
                     CHALLENGE_LOOKBACK,
                     CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH,
                     true,
