@@ -136,7 +136,6 @@ pub async fn run(
                 timer::run(
                     timer_to_solver_tx,
                     epoch_tracker,
-                    CHALLENGE_LOOKBACK,
                     CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH,
                     true,
                 )
@@ -144,7 +143,7 @@ pub async fn run(
             });
         } else {
             // create the initial epoch
-            epoch_tracker.create_epoch(0).await;
+            ledger.current_epoch = epoch_tracker.advance_epoch().await;
         }
 
         'outer: loop {
@@ -200,10 +199,6 @@ pub async fn run(
 
                         // TODO: sort the blocks lexicographically (on client or server)
 
-                        // get the epoch for this round
-                        let current_epoch = timeslot / TIMESLOTS_PER_EPOCH;
-                        // info!("Getting randomness for epoch {} during sync", current_epoch);
-
                         // apply each block for the timeslot
                         for block in blocks.iter() {
                             ledger.apply_block_from_sync(block.clone()).await;
@@ -214,23 +209,17 @@ pub async fn run(
 
                         // increment the epoch on boundary
                         if ledger.current_timeslot % TIMESLOTS_PER_EPOCH == 0 {
+                            // create new epoch
+                            let current_epoch = epoch_tracker.advance_epoch().await;
+
                             info!(
-                                "Closing randomness for epoch {} during sync",
-                                ledger.current_epoch
+                                "Closed randomness for epoch {} during sync",
+                                current_epoch - 1
                             );
 
-                            ledger.current_epoch += 1;
-
-                            // close the current epoch here and derive randomness
-                            epoch_tracker.close_epoch(current_epoch).await;
-
-                            // create the new epoch
-                            let new_epoch_index = ledger.current_epoch;
-                            epoch_tracker.create_epoch(new_epoch_index).await;
-
                             info!(
-                                "Creating a new empty epoch during sync blocks for index {}",
-                                new_epoch_index
+                                "Created a new empty epoch during sync blocks for index {}",
+                                current_epoch
                             );
                         }
 

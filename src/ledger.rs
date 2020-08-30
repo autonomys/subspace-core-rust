@@ -395,13 +395,13 @@ impl Ledger {
         let mut timestamp = self.genesis_timestamp as u64;
         let mut parent_id: BlockId = [0u8; 32];
 
-        for epoch_index in 0..CHALLENGE_LOOKBACK {
-            self.epoch_tracker.create_epoch(epoch_index).await;
+        for _ in 0..CHALLENGE_LOOKBACK {
+            let current_epoch = self.epoch_tracker.advance_epoch().await;
 
             for _ in 0..TIMESLOTS_PER_EPOCH {
                 let proof = Proof {
                     randomness: self.genesis_piece_hash,
-                    epoch: self.current_epoch,
+                    epoch: current_epoch,
                     timeslot: self.current_timeslot,
                     public_key: self.keys.public.to_bytes(),
                     tag: 0,
@@ -436,7 +436,7 @@ impl Ledger {
 
                 self.current_timeslot += 1;
                 self.epoch_tracker
-                    .add_block_to_epoch(epoch_index, self.current_timeslot, parent_id)
+                    .add_block_to_epoch(current_epoch, self.current_timeslot, parent_id)
                     .await;
 
                 info!(
@@ -451,14 +451,9 @@ impl Ledger {
                 timestamp += TIMESLOT_DURATION;
                 async_std::task::sleep(Duration::from_millis(timestamp - time_now as u64)).await;
             }
-
-            self.epoch_tracker.close_epoch(epoch_index).await;
-
-            info!("Updated randomness for epoch: {}", self.current_epoch);
-            self.current_epoch += 1;
         }
 
-        self.epoch_tracker.create_epoch(self.current_epoch).await;
+        self.epoch_tracker.advance_epoch().await;
 
         self.unseen_block_ids.insert(parent_id);
     }
@@ -571,11 +566,6 @@ impl Ledger {
                     .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
                     .await;
 
-                // if we are on the last timeslot, advance the epoch
-                if (self.current_timeslot + 1) % TIMESLOTS_PER_EPOCH == 0 {
-                    self.current_epoch += 1;
-                }
-
                 if new_timeslot {
                     self.current_timeslot += 1;
                 }
@@ -584,10 +574,6 @@ impl Ledger {
                 return Some(block);
             }
             None => {
-                if (self.current_timeslot + 1) % TIMESLOTS_PER_EPOCH == 0 {
-                    self.current_epoch += 1;
-                }
-
                 self.current_timeslot += 1;
                 return None;
             }
@@ -682,11 +668,6 @@ impl Ledger {
             .epoch_tracker
             .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
             .await;
-
-        // if we are on the last timeslot, close the epoch
-        if (self.current_timeslot + 1) % TIMESLOTS_PER_EPOCH == 0 {
-            self.current_epoch += 1;
-        }
 
         if new_timeslot {
             self.current_timeslot += 1;
@@ -831,24 +812,15 @@ impl Ledger {
             self.current_timeslot += 1;
 
             if self.current_timeslot % TIMESLOTS_PER_EPOCH == 0 {
-                self.current_epoch += 1;
-
-                // close the epoch
-                let epoch_index = self.current_timeslot / TIMESLOTS_PER_EPOCH as u64;
-                self.epoch_tracker
-                    .close_epoch(epoch_index - CHALLENGE_LOOKBACK)
-                    .await;
+                // create the new epoch
+                let current_epoch = self.epoch_tracker.advance_epoch().await;
 
                 info!(
-                    "Closing randomness for epoch {} during apply cached blocks",
-                    epoch_index - CHALLENGE_LOOKBACK
+                    "Closed randomness for epoch {} during apply cached blocks",
+                    current_epoch - CHALLENGE_LOOKBACK
                 );
 
-                // create the new epoch
-                let new_epoch_index = self.current_epoch + 1;
-                self.epoch_tracker.create_epoch(new_epoch_index).await;
-
-                info!("Creating a new empty epoch for epoch {}", new_epoch_index);
+                info!("Creating a new empty epoch for epoch {}", current_epoch);
             }
         }
         true
@@ -875,7 +847,6 @@ impl Ledger {
             .as_millis() as u64;
         let elapsed_time = current_time - genesis_time;
         let mut elapsed_timeslots = elapsed_time / TIMESLOT_DURATION;
-        let mut elapsed_epochs = elapsed_timeslots / TIMESLOTS_PER_EPOCH;
         let time_to_next_timeslot = (TIMESLOT_DURATION * (elapsed_timeslots + 1)) - elapsed_time;
 
         self.genesis_timestamp = genesis_time;
@@ -883,15 +854,11 @@ impl Ledger {
 
         async_std::task::sleep(Duration::from_millis(time_to_next_timeslot)).await;
         elapsed_timeslots += 1;
-        if elapsed_timeslots % TIMESLOTS_PER_EPOCH == 0 {
-            elapsed_epochs += 1;
-        }
         let epoch_tracker = self.epoch_tracker.clone();
         async_std::task::spawn(async move {
             timer::run(
                 timer_to_solver_tx,
                 epoch_tracker,
-                elapsed_epochs as u64,
                 elapsed_timeslots as u64,
                 is_farming,
             )

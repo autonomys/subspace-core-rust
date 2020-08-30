@@ -15,19 +15,18 @@ use std::time::Duration;
 
 /* ToDo
  *
- * Remove duplication of epoch/timeslot tracking between ledger and timer
+ * Remove duplication of timeslot tracking between ledger and timer
  *
 */
 
 pub async fn run(
     timer_to_solver_tx: Sender<SolverMessage>,
     epoch_tracker: EpochTracker,
-    initial_epoch_index: u64,
     initial_timeslot_index: u64,
     is_farming: bool,
 ) {
     // set initial values
-    let mut current_epoch_index = initial_epoch_index;
+    let mut current_epoch_index = epoch_tracker.get_current_epoch().await;
     let mut current_timeslot_index = initial_timeslot_index;
 
     // info! {"Initial epoch index is: {}", current_epoch_index};
@@ -75,40 +74,13 @@ pub async fn run(
 
         // update epoch on boundaries
         if current_timeslot_index % TIMESLOTS_PER_EPOCH == 0 {
-            if is_farming {
-                // get the new epoch
-                info!(
-                    "Getting randomness for epoch: {}",
-                    current_epoch_index - CHALLENGE_LOOKBACK
-                );
-                // TODO: Handle edge case where messages are delayed
-                // NOTE: Code for getting epoch was already moved to the beginning on while loop,
-                // so above TODO may be irrelevant
-            }
-
-            let old_epoch_index = current_epoch_index;
-            current_epoch_index += 1;
-
             // create the next epoch
-            epoch_tracker.create_epoch(current_epoch_index).await;
+            current_epoch_index = epoch_tracker.advance_epoch().await;
 
             info!(
                 "Timer is creating a new empty epoch at epoch index {}",
                 current_epoch_index
             );
-
-            let epoch_tracker = epoch_tracker.clone();
-            async_std::task::spawn(async move {
-                // wait for grace period
-                async_std::task::sleep(EPOCH_GRACE_PERIOD).await;
-
-                // get epoch from tracker and close
-                epoch_tracker.close_epoch(old_epoch_index).await;
-
-                info!("Timer is closing randomness for epoch: {}", old_epoch_index);
-
-                // TODO: remove the expired epoch so that tracker does not grow unbounded
-            });
         }
     }
 }
