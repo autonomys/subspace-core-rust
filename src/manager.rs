@@ -196,12 +196,6 @@ pub async fn run(
                             .duration_since(UNIX_EPOCH)
                             .expect("Time went backwards");
 
-                        error!(
-                            "next_timeslot_arrival_time {} time_now {}",
-                            next_timeslot_arrival_time.as_millis(),
-                            time_now.as_millis()
-                        );
-
                         if next_timeslot_arrival_time < time_now {
                             // request the next timeslot
                             main_to_net_tx
