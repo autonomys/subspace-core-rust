@@ -44,15 +44,13 @@ pub enum ProtocolMessage {
     /// peer main forwards response back to Net for tx
     BlocksResponseTo {
         node_addr: SocketAddr,
-        blocks: Option<Vec<Block>>,
+        blocks: Vec<Block>,
         timeslot: u64,
-        current_timeslot: u64,
     },
     /// self receives at Net and forwards response back to Main
     BlocksResponse {
-        blocks: Option<Vec<Block>>,
+        blocks: Vec<Block>,
         timeslot: u64,
-        current_timeslot: u64,
     },
     /// Net receives new full block, validates/applies, sends back to net for re-gossip
     BlockProposalRemote {
@@ -146,7 +144,7 @@ pub async fn run(
             epoch_tracker.advance_epoch().await;
         }
 
-        'outer: loop {
+        loop {
             if let Ok(message) = any_to_main_rx.recv().await {
                 match message {
                     ProtocolMessage::BlocksRequestFrom {
@@ -154,61 +152,28 @@ pub async fn run(
                         timeslot,
                     } => {
                         // TODO: check to make sure that the requested timeslot is not ahead of local timeslot
-                        let blocks = if timeslot > ledger.current_timeslot {
-                            None
-                        } else {
-                            Some(ledger.get_blocks_by_timeslot(timeslot))
-                        };
+                        let blocks = ledger.get_blocks_by_timeslot(timeslot);
 
                         let message = ProtocolMessage::BlocksResponseTo {
                             node_addr,
                             blocks,
                             timeslot,
-                            current_timeslot: ledger.current_timeslot,
                         };
                         main_to_net_tx.send(message).await;
                     }
-                    ProtocolMessage::BlocksResponse {
-                        blocks,
-                        timeslot,
-                        current_timeslot,
-                    } => {
+                    ProtocolMessage::BlocksResponse { blocks, timeslot } => {
                         // TODO: this is mainly for testing, later this will be replaced by state chain sync
                         // so there is no need for validating the block or timestamp
-
-                        // once we have all blocks, apply cached gossip
-                        if blocks.is_none() {
-                            // call sync and start timer
-                            info!("Applying cached blocks");
-                            if !ledger.apply_cached_blocks(current_timeslot - 1).await {
-                                error!("Unable to sync the ledger, invalid blocks!");
-                                panic!("Unable to sync the ledger, invalid blocks!");
-                            }
-
-                            ledger
-                                .start_timer_from_genesis_time(
-                                    timer_to_solver_tx.clone(),
-                                    is_farming,
-                                )
-                                .await;
-
-                            continue 'outer;
-                        }
-                        // else unwrap the blocks
-                        let blocks = blocks.unwrap();
 
                         // TODO: sort the blocks lexicographically (on client or server)
 
                         // apply each block for the timeslot
-                        for block in blocks.iter() {
-                            ledger.apply_block_from_sync(block.clone()).await;
+                        for block in blocks.into_iter() {
+                            ledger.apply_block_from_sync(block).await;
                         }
 
-                        // increment the timeslot
-                        ledger.current_timeslot += 1;
-
                         // increment the epoch on boundary
-                        if ledger.current_timeslot % TIMESLOTS_PER_EPOCH as u64 == 0 {
+                        if (timeslot + 1) % TIMESLOTS_PER_EPOCH as u64 == 0 {
                             // create new epoch
                             let current_epoch = epoch_tracker.advance_epoch().await;
 
@@ -223,12 +188,42 @@ pub async fn run(
                             );
                         }
 
-                        // request the next timeslot
-                        main_to_net_tx
-                            .send(ProtocolMessage::BlocksRequest {
-                                timeslot: timeslot + 1,
-                            })
-                            .await;
+                        let next_timeslot_arrival_time = Duration::from_millis(
+                            ((timeslot + 1) * TIMESLOT_DURATION) + ledger.genesis_timestamp as u64,
+                        );
+
+                        let time_now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("Time went backwards");
+
+                        error!(
+                            "next_timeslot_arrival_time {} time_now {}",
+                            next_timeslot_arrival_time.as_millis(),
+                            time_now.as_millis()
+                        );
+
+                        if next_timeslot_arrival_time < time_now {
+                            // request the next timeslot
+                            main_to_net_tx
+                                .send(ProtocolMessage::BlocksRequest {
+                                    timeslot: timeslot + 1,
+                                })
+                                .await;
+                        } else {
+                            // once we have all blocks, apply cached gossip
+                            // call sync and start timer
+                            info!("Applying cached blocks");
+                            if !ledger.apply_cached_blocks(timeslot).await {
+                                panic!("Unable to sync the ledger, invalid blocks!");
+                            }
+
+                            ledger
+                                .start_timer_from_genesis_time(
+                                    timer_to_solver_tx.clone(),
+                                    is_farming,
+                                )
+                                .await;
+                        }
                     }
                     ProtocolMessage::BlockProposalRemote { block, peer_addr } => {
                         info!(

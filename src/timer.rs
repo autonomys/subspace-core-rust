@@ -27,10 +27,10 @@ pub async fn run(
 ) {
     // set initial values
     let mut current_epoch_index = epoch_tracker.get_current_epoch().await;
-    let mut current_timeslot_index = initial_timeslot;
+    let mut current_timeslot = initial_timeslot;
 
     // info! {"Initial epoch index is: {}", current_epoch_index};
-    // info!("Inital timeslot index is: {}", current_timeslot_index);
+    // info!("Inital timeslot is: {}", current_timeslot);
 
     info!(
         "Getting randomness for initial epoch: {}",
@@ -43,7 +43,7 @@ pub async fn run(
     // advance through timeslot on set interval
     let mut interval = stream::interval(Duration::from_millis(TIMESLOT_DURATION));
     while interval.next().await.is_some() {
-        info!("Timer has arrived on timeslot: {}", current_timeslot_index);
+        info!("Timer has arrived on timeslot: {}", current_timeslot);
         let epoch = epoch_tracker.get_loopback_epoch(current_epoch_index).await;
 
         if !epoch.is_closed {
@@ -54,26 +54,24 @@ pub async fn run(
         }
 
         if is_farming {
-            let timeslot_index = current_timeslot_index as usize % TIMESLOTS_PER_EPOCH;
-
             // derive slot challenge and send to solver
 
-            let slot_challenge = epoch.get_challenge_for_timeslot(timeslot_index);
+            let slot_challenge = epoch.get_challenge_for_timeslot(current_timeslot);
 
             timer_to_solver_tx
                 .send(SolverMessage::SlotChallenge {
                     epoch: current_epoch_index,
-                    timeslot: current_timeslot_index,
+                    timeslot: current_timeslot,
                     epoch_randomness: epoch.randomness,
                     slot_challenge,
                 })
                 .await;
         }
 
-        current_timeslot_index += 1;
+        current_timeslot += 1;
 
         // update epoch on boundaries
-        if current_timeslot_index as usize % TIMESLOTS_PER_EPOCH == 0 {
+        if current_timeslot % TIMESLOTS_PER_EPOCH == 0 {
             // create the next epoch
             current_epoch_index = epoch_tracker.advance_epoch().await;
 

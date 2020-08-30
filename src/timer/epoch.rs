@@ -11,7 +11,7 @@ pub struct Epoch {
     /// has the randomness been derived and the epoch closed?
     pub is_closed: bool,
     /// slot indices and vec of block ids, some will be empty, some one, some many
-    slots: HashMap<u64, Vec<BlockId>>,
+    timeslots: HashMap<u64, Vec<BlockId>>,
     /// challenges derived from randomness at closure, one per slot
     challenges: Vec<SlotChallenge>,
     /// overall randomness for this epoch
@@ -25,17 +25,18 @@ impl Epoch {
 
         Epoch {
             is_closed: false,
-            slots: HashMap::new(),
-            challenges: Vec::with_capacity(TIMESLOTS_PER_EPOCH),
+            timeslots: HashMap::new(),
+            challenges: Vec::with_capacity(TIMESLOTS_PER_EPOCH as usize),
             randomness,
         }
     }
 
     /// Returns `true` in case no blocks for this timeslot existed before
     pub(super) fn add_block_to_timeslot(&mut self, timeslot: u64, block_id: BlockId) -> bool {
+        let timeslot_index = timeslot % TIMESLOTS_PER_EPOCH;
         let mut new_timeslot = true;
-        self.slots
-            .entry(timeslot)
+        self.timeslots
+            .entry(timeslot_index)
             .and_modify(|list| {
                 list.push(block_id);
                 new_timeslot = false;
@@ -45,14 +46,15 @@ impl Epoch {
         new_timeslot
     }
 
-    pub fn get_challenge_for_timeslot(&self, timeslot: usize) -> SlotChallenge {
+    pub fn get_challenge_for_timeslot(&self, timeslot: u64) -> SlotChallenge {
+        let timeslot_index = timeslot % TIMESLOTS_PER_EPOCH;
         // TODO: No guarantee index exists
-        self.challenges[timeslot]
+        self.challenges[timeslot_index as usize]
     }
 
     pub(super) fn close(&mut self) {
         let xor_result =
-            self.slots
+            self.timeslots
                 .values()
                 .flatten()
                 .fold([0u8; 32], |mut randomness, block_id| {
