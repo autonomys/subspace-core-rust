@@ -15,7 +15,7 @@ struct Inner {
 pub struct EpochTracker(Arc<Mutex<Inner>>);
 
 impl EpochTracker {
-    pub async fn get_current_epoch(&self) -> u64 {
+    pub(super) async fn get_current_epoch(&self) -> u64 {
         self.0.lock().await.current_epoch
     }
 
