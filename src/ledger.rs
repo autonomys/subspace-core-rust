@@ -374,16 +374,15 @@ impl Ledger {
 
     /// Retrieve all blocks for a timeslot, return an empty vec if no blocks
     pub fn get_blocks_by_timeslot(&self, timeslot: u64) -> Vec<Block> {
-        match self.confirmed_blocks_by_timeslot.get(&timeslot) {
-            Some(block_ids) => {
-                let mut blocks: Vec<Block> = Vec::new();
-                for block_id in block_ids.iter() {
-                    blocks.push(self.metablocks.get(block_id).unwrap().block.clone());
-                }
-                return blocks;
-            }
-            None => return vec![],
-        };
+        self.confirmed_blocks_by_timeslot
+            .get(&timeslot)
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .map(|block_id| self.metablocks.get(block_id).unwrap().block.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Start a new chain from genesis as a gateway node
@@ -863,8 +862,7 @@ impl Ledger {
         is_farming: bool,
     ) {
         info!("Starting the timer from genesis time");
-        let genesis_block_id: BlockId =
-            self.confirmed_blocks_by_timeslot.get(&0).unwrap()[0].clone();
+        let genesis_block_id: BlockId = self.confirmed_blocks_by_timeslot.get(&0).unwrap()[0];
         let genesis_block = self
             .metablocks
             .get(&genesis_block_id)

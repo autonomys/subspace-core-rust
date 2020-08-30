@@ -119,10 +119,7 @@ pub async fn run(
 ) {
     let protocol_listener = async {
         info!("Main protocol loop is running...");
-        let is_farming = match node_type {
-            NodeType::Gateway | NodeType::Farmer => true,
-            _ => false,
-        };
+        let is_farming = matches!(node_type, NodeType::Gateway | NodeType::Farmer);
 
         // if gateway init the genesis block set and then start the timer
         if node_type == NodeType::Gateway {

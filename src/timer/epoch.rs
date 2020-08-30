@@ -40,7 +40,7 @@ impl Epoch {
                 list.push(block_id);
                 new_timeslot = false;
             })
-            .or_insert(vec![block_id]);
+            .or_insert_with(|| vec![block_id]);
 
         new_timeslot
     }
