@@ -3,6 +3,7 @@
 
 use async_std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use std::time::Duration;
 
 pub mod console;
 pub mod crypto;
@@ -50,8 +51,9 @@ pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const CONSOLE: bool = false;
 // TODO: build duration object here and only define once
 // TODO: add documentation on allowed parameters for time
-pub const TIMESLOT_DURATION: u128 = 250;
+pub const TIMESLOT_DURATION: u64 = 250;
 pub const CHALLENGE_LOOKBACK: u64 = 4;
 pub const TIMESLOTS_PER_EPOCH: u64 = 4;
-pub const EPOCH_GRACE_PERIOD: u64 = TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION as u64;
+pub const EPOCH_GRACE_PERIOD: Duration =
+    Duration::from_millis(TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION);
 pub const SOLUTION_RANGE: u64 = std::u64::MAX / PLOT_SIZE as u64 / 2;

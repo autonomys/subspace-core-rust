@@ -8,8 +8,10 @@ use network::NodeType;
 use serde::{Deserialize, Serialize};
 use solver::Solution;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 // use std::convert::TryInto;
+use crate::solver::SolverMessage;
+use crate::timer::EpochTracker;
 use async_std::sync::Sender;
 use std::fmt;
 use std::fmt::Display;
@@ -183,13 +185,20 @@ impl Block {
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct Proof {
-    pub randomness: ProofId,  // epoch challenge
-    pub epoch: u64,           // epoch index
-    pub timeslot: u64,        // time slot
-    pub public_key: [u8; 32], // farmers public key
-    pub tag: Tag,             // hmac of encoding with a nonce
-    pub nonce: u128,          // nonce for salting the tag
-    pub piece_index: u64,     // index of piece for encoding
+    /// epoch challenge
+    pub randomness: ProofId,
+    /// epoch index
+    pub epoch: u64,
+    /// time slot
+    pub timeslot: u64,
+    /// farmers public key
+    pub public_key: [u8; 32],
+    /// hmac of encoding with a nonce
+    pub tag: Tag,
+    /// nonce for salting the tag
+    pub nonce: u128,
+    /// index of piece for encoding
+    pub piece_index: u64,
 }
 
 impl Proof {
@@ -223,7 +232,7 @@ pub struct Content {
     pub parent_ids: Vec<ContentId>, // ids of all parent blocks not yet seen
     pub proof_id: ProofId,          // id of matching proof
     pub proof_signature: Vec<u8>,   // signature of the proof with same public key
-    pub timestamp: u128,            // when this block was created (from Nodes local view)
+    pub timestamp: u64,             // when this block was created (from Nodes local view)
     // TODO: Should be a vec of TX IDs
     pub tx_ids: Vec<u8>, // ids of all unseen transactions seen by this block
     // TODO: account for farmers who sign the same proof with two different contents
@@ -307,15 +316,13 @@ pub struct MetaBlock {
 
 pub struct Ledger {
     pub metablocks: HashMap<BlockId, MetaBlock>,
-    pub epochs: timer::EpochTracker,
-    pub current_epoch: u64,
-    pub current_timeslot: u64,
+    pub epoch_tracker: EpochTracker,
     pub confirmed_blocks_by_timeslot: HashMap<u64, Vec<BlockId>>,
     // TODO: add ordered confirmed_blocks_by_block_height
-    pub cached_blocks_for_timeslot: HashMap<u64, Vec<BlockId>>,
+    pub cached_blocks_for_timeslot: BTreeMap<u64, Vec<BlockId>>,
     balances: HashMap<[u8; 32], usize>, // the current balance of all accounts
     pub unseen_block_ids: HashSet<BlockId>,
-    pub genesis_timestamp: u128,
+    pub genesis_timestamp: u64,
     pub timer_is_running: bool,
 
     pub node_type: NodeType,
@@ -339,7 +346,7 @@ impl Ledger {
         keys: ed25519_dalek::Keypair,
         tx_payload: Vec<u8>,
         merkle_proofs: Vec<Vec<u8>>,
-        epochs: timer::EpochTracker,
+        epoch_tracker: EpochTracker,
     ) -> Ledger {
         // init sloth
         let prime_size = PRIME_SIZE_BITS;
@@ -347,11 +354,9 @@ impl Ledger {
 
         Ledger {
             metablocks: HashMap::new(),
-            epochs,
-            current_epoch: 0,
-            current_timeslot: 0,
+            epoch_tracker,
             confirmed_blocks_by_timeslot: HashMap::new(),
-            cached_blocks_for_timeslot: HashMap::new(),
+            cached_blocks_for_timeslot: BTreeMap::new(),
             unseen_block_ids: HashSet::new(),
             genesis_timestamp: 0,
             timer_is_running: false,
@@ -372,16 +377,15 @@ impl Ledger {
 
     /// Retrieve all blocks for a timeslot, return an empty vec if no blocks
     pub fn get_blocks_by_timeslot(&self, timeslot: u64) -> Vec<Block> {
-        match self.confirmed_blocks_by_timeslot.get(&timeslot) {
-            Some(block_ids) => {
-                let mut blocks: Vec<Block> = Vec::new();
-                for block_id in block_ids.iter() {
-                    blocks.push(self.metablocks.get(block_id).unwrap().block.clone());
-                }
-                return blocks;
-            }
-            None => return vec![],
-        };
+        self.confirmed_blocks_by_timeslot
+            .get(&timeslot)
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .map(|block_id| self.metablocks.get(block_id).unwrap().block.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Start a new chain from genesis as a gateway node
@@ -389,19 +393,21 @@ impl Ledger {
         self.genesis_timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
-            .as_millis();
+            .as_millis() as u64;
 
-        let mut timestamp = self.genesis_timestamp;
+        let mut timestamp = self.genesis_timestamp as u64;
         let mut parent_id: BlockId = [0u8; 32];
 
-        for epoch_index in 0..CHALLENGE_LOOKBACK {
-            let mut epoch = timer::Epoch::new(epoch_index as u64);
+        for _ in 0..CHALLENGE_LOOKBACK {
+            let current_epoch = self.epoch_tracker.advance_epoch().await;
 
-            for _ in 0..TIMESLOTS_PER_EPOCH {
+            for current_timeslot in (0..TIMESLOTS_PER_EPOCH)
+                .map(|timeslot_index| timeslot_index + current_epoch * TIMESLOTS_PER_EPOCH)
+            {
                 let proof = Proof {
                     randomness: self.genesis_piece_hash,
-                    epoch: self.current_epoch,
-                    timeslot: self.current_timeslot,
+                    epoch: current_epoch,
+                    timeslot: current_timeslot,
                     public_key: self.keys.public.to_bytes(),
                     tag: 0,
                     nonce: 0,
@@ -412,7 +418,7 @@ impl Ledger {
                     parent_ids: vec![parent_id],
                     proof_id: proof.get_id(),
                     proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
-                    timestamp: timestamp,
+                    timestamp,
                     tx_ids: Vec::new(),
                     signature: Vec::new(),
                 };
@@ -430,11 +436,12 @@ impl Ledger {
                     data: Some(data),
                 };
 
-                self.apply_genesis_block(&block);
+                self.apply_genesis_block(&block, current_timeslot);
                 parent_id = block.get_id();
 
-                self.current_timeslot += 1;
-                epoch.slots.insert(self.current_timeslot, vec![parent_id]);
+                self.epoch_tracker
+                    .add_block_to_epoch(current_epoch, current_timeslot, parent_id)
+                    .await;
 
                 info!(
                     "Applied a genesis block to ledger with id {}",
@@ -446,28 +453,18 @@ impl Ledger {
                     .as_millis();
 
                 timestamp += TIMESLOT_DURATION;
-                async_std::task::sleep(Duration::from_millis((timestamp - time_now) as u64)).await;
+
+                async_std::task::sleep(Duration::from_millis(timestamp - time_now as u64)).await;
             }
-
-            epoch.close();
-            self.epochs.lock().await.insert(self.current_epoch, epoch);
-
-            info!("Updated randomness for epoch: {}", self.current_epoch);
-            self.current_epoch += 1;
         }
 
-        // init the first epoch
-        let first_random_epoch = timer::Epoch::new(self.current_epoch);
-        self.epochs
-            .lock()
-            .await
-            .insert(self.current_epoch, first_random_epoch);
+        self.epoch_tracker.advance_epoch().await;
 
         self.unseen_block_ids.insert(parent_id);
     }
 
     /// apply each genesis block to the ledger
-    pub fn apply_genesis_block(&mut self, block: &Block) {
+    pub fn apply_genesis_block(&mut self, block: &Block, timeslot: u64) {
         let block_id = block.get_id();
         let mut pruned_block = block.clone();
         pruned_block.prune();
@@ -486,7 +483,7 @@ impl Ledger {
 
         // Adds a pointer to this block id for the given timeslot in the ledger
         self.confirmed_blocks_by_timeslot
-            .entry(self.current_timeslot)
+            .entry(timeslot)
             .and_modify(|block_ids| block_ids.push(block_id))
             .or_insert(vec![block_id]);
     }
@@ -517,7 +514,7 @@ impl Ledger {
                 let timestamp = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .expect("Time went backwards")
-                    .as_millis();
+                    .as_millis() as u64;
                 // must get parents from the chain
                 // TODO: only get parents that are not at the same level
                 // TODO: create an empty vec then do memswap between unseen parent and unseen block ids
@@ -526,7 +523,7 @@ impl Ledger {
                     parent_ids: unseen_parents,
                     proof_id: proof.get_id(),
                     proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
-                    timestamp: timestamp,
+                    timestamp,
                     tx_ids: self.tx_payload.clone(),
                     signature: Vec::new(),
                 };
@@ -560,50 +557,23 @@ impl Ledger {
                     .entry(crypto::digest_sha_256(&block.proof.public_key))
                     .and_modify(|balance| *balance += 1)
                     .or_insert(1);
-                // Adds a pointer to this block id for the given timelsot in the ledger
+                // Adds a pointer to this block id for the given timeslot in the ledger
                 self.confirmed_blocks_by_timeslot
-                    .entry(self.current_timeslot)
+                    .entry(solution.timeslot)
                     .and_modify(|block_ids| block_ids.push(block_id))
                     .or_insert(vec![block_id]);
 
                 // TODO: collect all blocks for a slot, then order blocks, then order tx
 
                 // update the epoch for this block
-                // TODO: Make convenience method on epoch that returns a result
-                let mut new_timeslot = true;
-                self.epochs
-                    .lock()
-                    .await
-                    .entry(block.proof.epoch)
-                    .and_modify(|epoch| {
-                        epoch
-                            .slots
-                            .entry(block.proof.timeslot)
-                            .and_modify(|timeslot| {
-                                timeslot.push(block_id);
-                                new_timeslot = false;
-                            })
-                            .or_insert(vec![block_id]);
-                    });
+                self.epoch_tracker
+                    .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
+                    .await;
 
-                // if we are on the last timeslot, advance the epoch
-                if (self.current_timeslot + 1) % TIMESLOTS_PER_EPOCH == 0 {
-                    self.current_epoch += 1;
-                }
-
-                if new_timeslot {
-                    self.current_timeslot += 1;
-                }
-
-                // info!("Applied block to ledger at slot: {}", self.current_timeslot);
+                // info!("Applied block to ledger at timeslot: {}", solution.timeslot);
                 return Some(block);
             }
             None => {
-                if (self.current_timeslot + 1) % TIMESLOTS_PER_EPOCH == 0 {
-                    self.current_epoch += 1;
-                }
-
-                self.current_timeslot += 1;
                 return None;
             }
         };
@@ -632,24 +602,17 @@ impl Ledger {
 
     /// validate and apply a block received via gossip
     pub async fn validate_and_apply_remote_block(&mut self, block: Block) -> bool {
-        let randomness_epoch = block.proof.epoch - CHALLENGE_LOOKBACK;
-        let challenge_index = block.proof.timeslot % TIMESLOTS_PER_EPOCH;
+        let randomness_epoch_index = block.proof.epoch - CHALLENGE_LOOKBACK;
+        let challenge_timeslot = block.proof.timeslot;
         info!(
             "Validating and applying block for epoch: {} at timeslot {}",
-            randomness_epoch, challenge_index
+            randomness_epoch_index, challenge_timeslot
         );
 
         // get correct randomness for this block
-        let epoch = self
-            .epochs
-            .lock()
-            .await
-            .get(&randomness_epoch)
-            .unwrap()
-            .clone();
+        let epoch = self.epoch_tracker.get_epoch(randomness_epoch_index).await;
 
         if !epoch.is_closed {
-            error!("Epoch being used for randomness is still open!");
             panic!("Epoch being used for randomness is still open!");
         }
 
@@ -658,7 +621,7 @@ impl Ledger {
             &self.merkle_root,
             &self.genesis_piece_hash,
             &epoch.randomness,
-            &epoch.challenges[challenge_index as usize],
+            &epoch.get_challenge_for_timeslot(challenge_timeslot),
             &self.sloth,
         ) {
             return false;
@@ -690,40 +653,18 @@ impl Ledger {
             .entry(crypto::digest_sha_256(&block.proof.public_key))
             .and_modify(|balance| *balance += 1)
             .or_insert(1);
-        // Adds a pointer to this block id for the given timelsot in the ledger
+        // Adds a pointer to this block id for the given timeslots in the ledger
         self.confirmed_blocks_by_timeslot
-            .entry(self.current_timeslot)
+            .entry(block.proof.timeslot)
             .and_modify(|block_ids| block_ids.push(block_id))
             .or_insert(vec![block_id]);
 
         // TODO: collect all blocks for a slot, then order blocks, then order tx
 
         // update the epoch for this block
-        // TODO: Make convenience method on epoch that returns a result
-        let mut new_timeslot = true;
-        self.epochs
-            .lock()
-            .await
-            .entry(block.proof.epoch)
-            .and_modify(|epoch| {
-                epoch
-                    .slots
-                    .entry(block.proof.timeslot)
-                    .and_modify(|timeslot| {
-                        timeslot.push(block_id);
-                        new_timeslot = false;
-                    })
-                    .or_insert(vec![block_id]);
-            });
-
-        // if we are on the last timeslot, close the epoch
-        if (self.current_timeslot + 1) % TIMESLOTS_PER_EPOCH == 0 {
-            self.current_epoch += 1;
-        }
-
-        if new_timeslot {
-            self.current_timeslot += 1;
-        }
+        self.epoch_tracker
+            .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
+            .await;
 
         // TODO: apply children of this block that were depending on it
 
@@ -732,6 +673,9 @@ impl Ledger {
 
     /// validate a block received via sync from another node
     pub async fn apply_block_from_sync(&mut self, block: Block) {
+        if self.genesis_timestamp == 0 {
+            self.genesis_timestamp = block.content.timestamp;
+        }
         let block_id = block.get_id();
         self.metablocks.insert(
             block_id,
@@ -744,14 +688,22 @@ impl Ledger {
         );
 
         // check if the block is in pending gossip and remove
-        self.cached_blocks_for_timeslot
-            .entry(block.proof.timeslot)
-            .and_modify(|block_ids| {
-                block_ids
-                    .iter()
-                    .position(|blk_id| *blk_id == block_id)
-                    .map(|index| block_ids.remove(index));
-            });
+        {
+            let mut is_empty = false;
+            self.cached_blocks_for_timeslot
+                .entry(block.proof.timeslot)
+                .and_modify(|block_ids| {
+                    block_ids
+                        .iter()
+                        .position(|blk_id| *blk_id == block_id)
+                        .map(|index| block_ids.remove(index));
+                    is_empty = block_ids.is_empty();
+                });
+            if is_empty {
+                self.cached_blocks_for_timeslot
+                    .remove(&block.proof.timeslot);
+            }
+        }
 
         // TODO: update chain quality
 
@@ -771,57 +723,41 @@ impl Ledger {
         }
         // Adds a pointer to this block id for the given timelsot in the ledger
         self.confirmed_blocks_by_timeslot
-            .entry(self.current_timeslot)
+            .entry(block.proof.timeslot)
             .and_modify(|block_ids| block_ids.push(block_id))
             .or_insert(vec![block_id]);
 
         info!(
             "Applied new block during sync at timeslot: {}",
-            self.current_timeslot
+            block.proof.timeslot
         );
 
         // have to update the epoch and close on boundaries
-        self.epochs
-            .lock()
-            .await
-            .entry(block.proof.epoch)
-            .and_modify(|epoch| {
-                epoch
-                    .slots
-                    .entry(block.proof.timeslot)
-                    .and_modify(|timeslot| {
-                        timeslot.push(block_id);
-                    })
-                    .or_insert(vec![block_id]);
-            });
+        self.epoch_tracker
+            .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
+            .await;
     }
 
     /// validate and apply a cached block from gossip after sycing the ledger
     pub async fn validate_and_apply_cached_block(&mut self, block: Block) -> bool {
         //TODO: must handle the case where the epoch is still open
 
-        let current_epoch = block.proof.epoch - CHALLENGE_LOOKBACK;
-        let challenge_epoch_index = block.proof.timeslot % TIMESLOTS_PER_EPOCH;
+        let randomness_epoch_index = block.proof.epoch - CHALLENGE_LOOKBACK;
+        let challenge_timeslot = block.proof.timeslot;
         info!(
             "Validating and applying cached block for epoch: {} at timeslot {}",
-            current_epoch, challenge_epoch_index
+            randomness_epoch_index, challenge_timeslot
         );
 
         // get correct randomness for this block
-        let epoch = self
-            .epochs
-            .lock()
-            .await
-            .get(&current_epoch)
-            .unwrap()
-            .clone();
+        let epoch = self.epoch_tracker.get_epoch(randomness_epoch_index).await;
 
         // check if the block is valid
         if !block.is_valid(
             &self.merkle_root,
             &self.genesis_piece_hash,
             &epoch.randomness,
-            &epoch.challenges[challenge_epoch_index as usize],
+            &epoch.get_challenge_for_timeslot(challenge_timeslot),
             &self.sloth,
         ) {
             return false;
@@ -855,7 +791,7 @@ impl Ledger {
             .or_insert(1);
         // Adds a pointer to this block id for the given timelsot in the ledger
         self.confirmed_blocks_by_timeslot
-            .entry(self.current_timeslot)
+            .entry(block.proof.timeslot)
             .and_modify(|block_ids| block_ids.push(block_id))
             .or_insert(vec![block_id]);
 
@@ -863,90 +799,69 @@ impl Ledger {
     }
 
     /// apply the cached block to the ledger
-    pub async fn apply_cached_blocks(&mut self, last_timeslot: u64) -> bool {
-        while self.current_timeslot <= last_timeslot {
-            let block_ids = match self.cached_blocks_for_timeslot.get(&self.current_timeslot) {
-                Some(block_ids) => block_ids.clone(),
-                None => vec![],
-            };
-
-            for block_id in block_ids.iter() {
-                let cached_block = self.metablocks.get(block_id).unwrap().block.clone();
-                if !self.validate_and_apply_cached_block(cached_block).await {
-                    return false;
+    pub async fn apply_cached_blocks(&mut self, timeslot: u64) -> bool {
+        for current_timeslot in timeslot.. {
+            if let Some(block_ids) = self.cached_blocks_for_timeslot.remove(&current_timeslot) {
+                for block_id in block_ids.iter() {
+                    let cached_block = self.metablocks.get(block_id).unwrap().block.clone();
+                    if !self.validate_and_apply_cached_block(cached_block).await {
+                        return false;
+                    }
                 }
             }
 
-            self.current_timeslot += 1;
-
-            if self.current_timeslot % TIMESLOTS_PER_EPOCH == 0 {
-                self.current_epoch += 1;
-
-                // close the epoch
-                let epoch_index = self.current_timeslot / TIMESLOTS_PER_EPOCH as u64;
-                self.epochs
-                    .lock()
-                    .await
-                    .entry(epoch_index - CHALLENGE_LOOKBACK)
-                    .and_modify(|epoch| epoch.close());
+            if current_timeslot % TIMESLOTS_PER_EPOCH as u64 == 0 {
+                // create the new epoch
+                let current_epoch = self.epoch_tracker.advance_epoch().await;
 
                 info!(
-                    "Closing randomness for epoch {} during apply cached blocks",
-                    epoch_index - CHALLENGE_LOOKBACK
+                    "Closed randomness for epoch {} during apply cached blocks",
+                    current_epoch - CHALLENGE_LOOKBACK
                 );
 
-                // create the new epoch
-                let new_epoch_index = self.current_epoch + 1;
-                self.epochs
-                    .lock()
-                    .await
-                    .insert(new_epoch_index, timer::Epoch::new(new_epoch_index));
+                info!("Creating a new empty epoch for epoch {}", current_epoch);
+            }
 
-                info!("Creating a new empty epoch for epoch {}", new_epoch_index);
+            if self.cached_blocks_for_timeslot.is_empty() {
+                break;
             }
         }
+
         true
     }
 
     /// start the timer after syncing the ledger
     pub async fn start_timer_from_genesis_time(
         &mut self,
-        timer_to_solver_tx: Sender<manager::ProtocolMessage>,
+        timer_to_solver_tx: Sender<SolverMessage>,
         is_farming: bool,
     ) {
         info!("Starting the timer from genesis time");
-        let genesis_block_id: BlockId =
-            self.confirmed_blocks_by_timeslot.get(&0).unwrap()[0].clone();
+        let genesis_block_id: BlockId = self.confirmed_blocks_by_timeslot.get(&0).unwrap()[0];
         let genesis_block = self
             .metablocks
             .get(&genesis_block_id)
             .unwrap()
             .clone()
             .block;
-        let genesis_time = genesis_block.content.timestamp;
+        let genesis_time = genesis_block.content.timestamp as u64;
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
-            .as_millis();
+            .as_millis() as u64;
         let elapsed_time = current_time - genesis_time;
         let mut elapsed_timeslots = elapsed_time / TIMESLOT_DURATION;
-        let mut elapsed_epochs = elapsed_timeslots / TIMESLOTS_PER_EPOCH as u128;
         let time_to_next_timeslot = (TIMESLOT_DURATION * (elapsed_timeslots + 1)) - elapsed_time;
 
-        self.genesis_timestamp = genesis_time;
         self.timer_is_running = true;
 
-        async_std::task::sleep(Duration::from_millis((time_to_next_timeslot) as u64)).await;
+        async_std::task::sleep(Duration::from_millis(time_to_next_timeslot)).await;
         elapsed_timeslots += 1;
-        if elapsed_timeslots % TIMESLOTS_PER_EPOCH as u128 == 0 {
-            elapsed_epochs += 1;
-        }
-        let epoch_tracker = Arc::clone(&self.epochs);
+        let epoch_tracker = self.epoch_tracker.clone();
         async_std::task::spawn(async move {
             timer::run(
                 timer_to_solver_tx,
                 epoch_tracker,
-                elapsed_epochs as u64,
                 elapsed_timeslots as u64,
                 is_farming,
             )
