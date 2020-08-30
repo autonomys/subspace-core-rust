@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use super::*;
+use crate::solver::SolverMessage;
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
 use console::AppState;
@@ -61,13 +62,6 @@ pub enum ProtocolMessage {
     BlockProposalLocal {
         block: Block,
     },
-    /// Main sends challenge to solver for evaluation
-    SlotChallenge {
-        epoch: u64,
-        timeslot: u64,
-        epoch_randomness: [u8; 32],
-        slot_challenge: [u8; 32],
-    },
     /// Solver sends a set of solutions back to main for application
     BlockSolutions {
         solutions: Vec<Solution>,
@@ -99,7 +93,6 @@ impl Display for ProtocolMessage {
                 Self::BlocksResponseTo { .. } => "BlockResponseTo",
                 Self::BlockProposalRemote { .. } => "BlockProposalRemote",
                 Self::BlockProposalLocal { .. } => "BlockProposalLocal",
-                Self::SlotChallenge { .. } => "BlockChallenge",
                 Self::BlockSolutions { .. } => "BlockSolutions",
                 Self::BlockArrived { .. } => "BlockArrived",
                 Self::StartFarming => "StartFarming",
@@ -120,7 +113,7 @@ pub async fn run(
     main_to_net_tx: Sender<ProtocolMessage>,
     main_to_main_tx: Sender<ProtocolMessage>,
     state_sender: crossbeam_channel::Sender<AppState>,
-    timer_to_solver_tx: Sender<ProtocolMessage>,
+    timer_to_solver_tx: Sender<SolverMessage>,
     epoch_tracker: timer::EpochTracker,
 ) {
     let protocol_listener = async {

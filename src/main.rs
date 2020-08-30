@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::{env, fs};
 use subspace_core_rust::pseudo_wallet::Wallet;
+use subspace_core_rust::solver::SolverMessage;
 use subspace_core_rust::*;
 use tui_logger::{init_logger, set_default_level};
 
@@ -127,15 +128,12 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         Arc::clone(&epoch_tracker),
     );
 
-    let is_farming = match node_type {
-        NodeType::Gateway | NodeType::Farmer => true,
-        _ => false,
-    };
+    let is_farming = matches!(node_type, NodeType::Gateway | NodeType::Farmer);
 
     // create channels between background tasks
     let (main_to_net_tx, main_to_net_rx) = channel::<ProtocolMessage>(32);
     let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(32);
-    let (timer_to_solver_tx, timer_to_solver_rx) = channel::<ProtocolMessage>(32);
+    let (timer_to_solver_tx, timer_to_solver_rx) = channel::<SolverMessage>(32);
     let solver_to_main_tx = any_to_main_tx.clone();
     let main_to_main_tx = any_to_main_tx.clone();
 

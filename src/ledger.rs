@@ -10,6 +10,7 @@ use solver::Solution;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 // use std::convert::TryInto;
+use crate::solver::SolverMessage;
 use async_std::sync::Sender;
 use std::fmt;
 use std::fmt::Display;
@@ -911,7 +912,7 @@ impl Ledger {
     /// start the timer after syncing the ledger
     pub async fn start_timer_from_genesis_time(
         &mut self,
-        timer_to_solver_tx: Sender<manager::ProtocolMessage>,
+        timer_to_solver_tx: Sender<SolverMessage>,
         is_farming: bool,
     ) {
         info!("Starting the timer from genesis time");

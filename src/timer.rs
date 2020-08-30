@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
 use super::*;
+use crate::solver::SolverMessage;
 use async_std::prelude::*;
 use async_std::stream;
 use async_std::sync::Sender;
 use log::*;
-use manager::ProtocolMessage;
 use std::time::Duration;
 
 /* ToDo
@@ -66,7 +66,7 @@ impl Epoch {
 }
 
 pub async fn run(
-    timer_to_solver_tx: Sender<ProtocolMessage>,
+    timer_to_solver_tx: Sender<SolverMessage>,
     epoch_tracker: EpochTracker,
     initial_epoch_index: u64,
     initial_timeslot_index: u64,
@@ -89,7 +89,7 @@ pub async fn run(
 
     // advance through timeslot on set interval
     let mut interval = stream::interval(Duration::from_millis(TIMESLOT_DURATION as u64));
-    while let Some(_) = interval.next().await {
+    while interval.next().await.is_some() {
         info!("Timer has arrived on timeslot: {}", current_timeslot_index);
         // TODO: Make this into a method on epoch_tracker
         let epoch = epoch_tracker
@@ -115,7 +115,7 @@ pub async fn run(
             let slot_challenge = epoch.challenges[timeslot_index as usize];
 
             timer_to_solver_tx
-                .send(ProtocolMessage::SlotChallenge {
+                .send(SolverMessage::SlotChallenge {
                     epoch: current_epoch_index,
                     timeslot: current_timeslot_index,
                     epoch_randomness: epoch.randomness,
