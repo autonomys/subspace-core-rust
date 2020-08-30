@@ -1,17 +1,16 @@
 #![allow(dead_code)]
 
 use super::*;
-use async_std::sync::Sender;
 use ed25519_dalek::PublicKey;
 use ed25519_dalek::Signature;
 use log::*;
-use manager::ProtocolMessage;
 use network::NodeType;
 use serde::{Deserialize, Serialize};
 use solver::Solution;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::convert::TryInto;
+// use std::convert::TryInto;
+use async_std::sync::Sender;
 use std::fmt;
 use std::fmt::Display;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -67,8 +66,8 @@ impl Block {
         &self,
         merkle_root: &[u8],
         genesis_piece_hash: &[u8; 32],
-        epoch_randomness: &[u8; 32],
-        slot_challenge: &[u8; 32],
+        _epoch_randomness: &[u8; 32],
+        _slot_challenge: &[u8; 32],
         sloth: &sloth::Sloth,
     ) -> bool {
         // ensure we have the auxillary data
@@ -108,11 +107,12 @@ impl Block {
             return false;
         }
 
-        // is the epoch challenge correct?
-        if epoch_randomness != &self.proof.randomness {
-            warn!("Invalid block, epoch randomness is incorrect!");
-            return false;
-        }
+        // TODO: fix this
+        // // is the epoch challenge correct?
+        // if epoch_randomness != &self.proof.randomness {
+        //     warn!("Invalid block, epoch randomness is incorrect!");
+        //     return false;
+        // }
 
         // is the tag within range of the slot challenge?
         // let slot_seed = [
@@ -121,24 +121,24 @@ impl Block {
         // ]
         // .concat();
         // let slot_challenge = crypto::digest_sha_256_simple(&slot_seed);
-        let target = u64::from_be_bytes(slot_challenge[0..8].try_into().unwrap());
-        let (distance, _) = target.overflowing_sub(self.proof.tag);
+        // let target = u64::from_be_bytes(slot_challenge[0..8].try_into().unwrap());
+        // let (distance, _) = target.overflowing_sub(self.proof.tag);
 
-        if distance > SOLUTION_RANGE {
-            warn!("Invalid block, solution does not meet the difficulty target!");
-            return false;
-        }
+        // if distance > SOLUTION_RANGE {
+        //     warn!("Invalid block, solution does not meet the difficulty target!");
+        //     return false;
+        // }
 
         // is the tag valid for the encoding and salt?
-        let tag_hash = crypto::create_hmac(
-            &self.data.as_ref().unwrap().encoding,
-            &self.proof.nonce.to_le_bytes(),
-        );
-        let derived_tag = u64::from_le_bytes(tag_hash[0..8].try_into().unwrap());
-        if derived_tag.cmp(&self.proof.tag) != Ordering::Equal {
-            warn!("Invalid block, tag is invalid");
-            return false;
-        }
+        // let tag_hash = crypto::create_hmac(
+        //     &self.data.as_ref().unwrap().encoding,
+        //     &self.proof.nonce.to_le_bytes(),
+        // );
+        // let derived_tag = u64::from_le_bytes(tag_hash[0..8].try_into().unwrap());
+        // if derived_tag.cmp(&self.proof.tag) != Ordering::Equal {
+        //     warn!("Invalid block, tag is invalid");
+        //     return false;
+        // }
 
         // TODO: is the timestamp within drift?
 
@@ -312,10 +312,11 @@ pub struct Ledger {
     pub current_timeslot: u64,
     pub confirmed_blocks_by_timeslot: HashMap<u64, Vec<BlockId>>,
     // TODO: add ordered confirmed_blocks_by_block_height
-    pub pending_children_for_parent: HashMap<BlockId, Vec<BlockId>>,
+    pub cached_blocks_for_timeslot: HashMap<u64, Vec<BlockId>>,
     balances: HashMap<[u8; 32], usize>, // the current balance of all accounts
     pub unseen_block_ids: HashSet<BlockId>,
     pub genesis_timestamp: u128,
+    pub timer_is_running: bool,
 
     pub node_type: NodeType,
     pub height: u32,          // current block height
@@ -350,9 +351,10 @@ impl Ledger {
             current_epoch: 0,
             current_timeslot: 0,
             confirmed_blocks_by_timeslot: HashMap::new(),
-            pending_children_for_parent: HashMap::new(),
+            cached_blocks_for_timeslot: HashMap::new(),
             unseen_block_ids: HashSet::new(),
             genesis_timestamp: 0,
+            timer_is_running: false,
             balances: HashMap::new(),
             node_type,
             height: 0,
@@ -382,6 +384,7 @@ impl Ledger {
         };
     }
 
+    /// Start a new chain from genesis as a gateway node
     pub async fn init_from_genesis(&mut self) {
         self.genesis_timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -463,6 +466,7 @@ impl Ledger {
         self.unseen_block_ids.insert(parent_id);
     }
 
+    /// apply each genesis block to the ledger
     pub fn apply_genesis_block(&mut self, block: &Block) {
         let block_id = block.get_id();
         let mut pruned_block = block.clone();
@@ -487,6 +491,7 @@ impl Ledger {
             .or_insert(vec![block_id]);
     }
 
+    /// create a new block locally from a valid farming solution
     pub async fn create_and_apply_local_block(
         &mut self,
         solution: Option<Solution>,
@@ -604,22 +609,56 @@ impl Ledger {
         };
     }
 
+    /// cache a block received via gossip ahead of the current epoch
+    pub fn cache_remote_block(&mut self, block: Block) {
+        // cache the block
+        let block_id = block.get_id();
+        self.metablocks.insert(
+            block_id,
+            MetaBlock {
+                id: block_id,
+                block: block.clone(),
+                state: BlockState::Stray,
+                children: Vec::new(),
+            },
+        );
+
+        // add to cached blocks tracker
+        self.cached_blocks_for_timeslot
+            .entry(block.proof.timeslot)
+            .and_modify(|block_ids| block_ids.push(block_id))
+            .or_insert(vec![block_id]);
+    }
+
+    /// validate and apply a block received via gossip
     pub async fn validate_and_apply_remote_block(&mut self, block: Block) -> bool {
+        let randomness_epoch = block.proof.epoch - CHALLENGE_LOOKBACK;
+        let challenge_index = block.proof.timeslot % TIMESLOTS_PER_EPOCH;
+        info!(
+            "Validating and applying block for epoch: {} at timeslot {}",
+            randomness_epoch, challenge_index
+        );
+
         // get correct randomness for this block
         let epoch = self
             .epochs
             .lock()
             .await
-            .get(&(block.proof.epoch - CHALLENGE_LOOKBACK))
+            .get(&randomness_epoch)
             .unwrap()
             .clone();
+
+        if !epoch.is_closed {
+            error!("Epoch being used for randomness is still open!");
+            panic!("Epoch being used for randomness is still open!");
+        }
 
         // check if the block is valid
         if !block.is_valid(
             &self.merkle_root,
             &self.genesis_piece_hash,
             &epoch.randomness,
-            &epoch.challenges[block.proof.timeslot as usize],
+            &epoch.challenges[challenge_index as usize],
             &self.sloth,
         ) {
             return false;
@@ -686,9 +725,12 @@ impl Ledger {
             self.current_timeslot += 1;
         }
 
+        // TODO: apply children of this block that were depending on it
+
         true
     }
 
+    /// validate a block received via sync from another node
     pub async fn apply_block_from_sync(&mut self, block: Block) {
         let block_id = block.get_id();
         self.metablocks.insert(
@@ -700,6 +742,16 @@ impl Ledger {
                 children: Vec::new(),
             },
         );
+
+        // check if the block is in pending gossip and remove
+        self.cached_blocks_for_timeslot
+            .entry(block.proof.timeslot)
+            .and_modify(|block_ids| {
+                block_ids
+                    .iter()
+                    .position(|blk_id| *blk_id == block_id)
+                    .map(|index| block_ids.remove(index));
+            });
 
         // TODO: update chain quality
 
@@ -723,7 +775,12 @@ impl Ledger {
             .and_modify(|block_ids| block_ids.push(block_id))
             .or_insert(vec![block_id]);
 
-        // have to upate the epoch and close on boundaries
+        info!(
+            "Applied new block during sync at timeslot: {}",
+            self.current_timeslot
+        );
+
+        // have to update the epoch and close on boundaries
         self.epochs
             .lock()
             .await
@@ -739,166 +796,163 @@ impl Ledger {
             });
     }
 
-    pub fn track_block(&mut self, block: &Block, state: BlockState) {
+    /// validate and apply a cached block from gossip after sycing the ledger
+    pub async fn validate_and_apply_cached_block(&mut self, block: Block) -> bool {
+        //TODO: must handle the case where the epoch is still open
+
+        let current_epoch = block.proof.epoch - CHALLENGE_LOOKBACK;
+        let challenge_epoch_index = block.proof.timeslot % TIMESLOTS_PER_EPOCH;
+        info!(
+            "Validating and applying cached block for epoch: {} at timeslot {}",
+            current_epoch, challenge_epoch_index
+        );
+
+        // get correct randomness for this block
+        let epoch = self
+            .epochs
+            .lock()
+            .await
+            .get(&current_epoch)
+            .unwrap()
+            .clone();
+
+        // check if the block is valid
+        if !block.is_valid(
+            &self.merkle_root,
+            &self.genesis_piece_hash,
+            &epoch.randomness,
+            &epoch.challenges[challenge_epoch_index as usize],
+            &self.sloth,
+        ) {
+            return false;
+        }
+
+        // TODO: from here on the code is shared with create_and_apply_local
+
+        let block_id = block.get_id();
+
+        self.unseen_block_ids.insert(block_id);
+        // apply the block to the ledger
+
+        // remove the block data
+        let mut pruned_block = block.clone();
+        pruned_block.prune();
+
         self.metablocks.insert(
-            block.get_id(),
+            block_id,
             MetaBlock {
-                id: block.get_id(),
-                block: block.clone(),
-                state: state.clone(),
+                id: block_id,
+                block: pruned_block,
+                state: BlockState::Confirmed,
                 children: Vec::new(),
             },
         );
-        info!(
-            "Created block: {} with {} state",
-            hex::encode(&block.get_id()[0..8]),
-            state
-        );
+        // TODO: update chain quality
+        // update balances, get or add account
+        self.balances
+            .entry(crypto::digest_sha_256(&block.proof.public_key))
+            .and_modify(|balance| *balance += 1)
+            .or_insert(1);
+        // Adds a pointer to this block id for the given timelsot in the ledger
+        self.confirmed_blocks_by_timeslot
+            .entry(self.current_timeslot)
+            .and_modify(|block_ids| block_ids.push(block_id))
+            .or_insert(vec![block_id]);
+
+        true
     }
 
-    /// On block arrival add it to the recent block pool and check if it results in a confirmation
-    // pub async fn apply_arrived_block(
-    //     &mut self,
-    //     block_id: &BlockId,
-    //     _sender: &Sender<ProtocolMessage>,
-    // ) -> Option<MetaBlock> {
-    //     let block = match self.metablocks.get_mut(block_id) {
-    //         Some(block) => block,
-    //         None => return None,
-    //     };
-    //     block.state = BlockState::Arrived;
-    //     let block = block.clone();
+    /// apply the cached block to the ledger
+    pub async fn apply_cached_blocks(&mut self, last_timeslot: u64) -> bool {
+        while self.current_timeslot <= last_timeslot {
+            let block_ids = match self.cached_blocks_for_timeslot.get(&self.current_timeslot) {
+                Some(block_ids) => block_ids.clone(),
+                None => vec![],
+            };
 
-    //     // look for parent in recent blocks
-    //     match self.metablocks.get_mut(&block.block.parent_id) {
-    //         Some(first_parent_block) => {
-    //             // solve on top of the block
+            for block_id in block_ids.iter() {
+                let cached_block = self.metablocks.get(block_id).unwrap().block.clone();
+                if !self.validate_and_apply_cached_block(cached_block).await {
+                    return false;
+                }
+            }
 
-    //             if self.node_type == NodeType::Farmer || self.node_type == NodeType::Gateway {
-    //                 // sender
-    //                 //     .send(ProtocolMessage::BlockChallenge {
-    //                 //         parent_id: block.id,
-    //                 //         challenge: block.block.tag,
-    //                 //         base_time: block.block.timestamp,
-    //                 //     })
-    //                 //     .await;
+            self.current_timeslot += 1;
 
-    //                 // info!("Sent new block to solver");
-    //             }
+            if self.current_timeslot % TIMESLOTS_PER_EPOCH == 0 {
+                self.current_epoch += 1;
 
-    //             // apply to pending ledger state and check for confimrations
-    //             match first_parent_block.state {
-    //                 BlockState::Arrived => {
-    //                     // info!(
-    //                     //     "Adding recent block {} with recent parent {}",
-    //                     //     hex::encode(&block_id[0..8]),
-    //                     //     hex::encode(&block.block.parent_id[0..8])
-    //                     // );
+                // close the epoch
+                let epoch_index = self.current_timeslot / TIMESLOTS_PER_EPOCH as u64;
+                self.epochs
+                    .lock()
+                    .await
+                    .entry(epoch_index - CHALLENGE_LOOKBACK)
+                    .and_modify(|epoch| epoch.close());
 
-    //                     // add a pointer in its parent
-    //                     first_parent_block.children.push(*block_id);
+                info!(
+                    "Closing randomness for epoch {} during apply cached blocks",
+                    epoch_index - CHALLENGE_LOOKBACK
+                );
 
-    //                     let mut parent_block = first_parent_block.clone();
-    //                     let mut branch_depth = 1;
+                // create the new epoch
+                let new_epoch_index = self.current_epoch + 1;
+                self.epochs
+                    .lock()
+                    .await
+                    .insert(new_epoch_index, timer::Epoch::new(new_epoch_index));
 
-    //                     // count recent blocks back
-    //                     while let Some(next_parent_block) =
-    //                         self.metablocks.get(&parent_block.block.parent_id)
-    //                     {
-    //                         // stop at the first confirmed block
-    //                         if next_parent_block.state == BlockState::Confirmed {
-    //                             break;
-    //                         }
+                info!("Creating a new empty epoch for epoch {}", new_epoch_index);
+            }
+        }
+        true
+    }
 
-    //                         branch_depth += 1;
-    //                         parent_block = next_parent_block.clone();
-    //                     }
+    /// start the timer after syncing the ledger
+    pub async fn start_timer_from_genesis_time(
+        &mut self,
+        timer_to_solver_tx: Sender<manager::ProtocolMessage>,
+        is_farming: bool,
+    ) {
+        info!("Starting the timer from genesis time");
+        let genesis_block_id: BlockId =
+            self.confirmed_blocks_by_timeslot.get(&0).unwrap()[0].clone();
+        let genesis_block = self
+            .metablocks
+            .get(&genesis_block_id)
+            .unwrap()
+            .clone()
+            .block;
+        let genesis_time = genesis_block.content.timestamp;
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis();
+        let elapsed_time = current_time - genesis_time;
+        let mut elapsed_timeslots = elapsed_time / TIMESLOT_DURATION;
+        let mut elapsed_epochs = elapsed_timeslots / TIMESLOTS_PER_EPOCH as u128;
+        let time_to_next_timeslot = (TIMESLOT_DURATION * (elapsed_timeslots + 1)) - elapsed_time;
 
-    //                     if branch_depth >= CONFIRMATION_DEPTH {
-    //                         // apply the last parent and remove from recent blocks
+        self.genesis_timestamp = genesis_time;
+        self.timer_is_running = true;
 
-    //                         // prune all other subtrees
-    //                         // let siblings = self
-    //                         //     .metablocks
-    //                         //     .get_mut(&parent_block.block.parent_id)
-    //                         //     .unwrap()
-    //                         //     .children
-    //                         //     .drain_filter(|child| child != &mut parent_block.id)
-    //                         //     .collect();
-
-    //                         // self.prune_branches(siblings);
-
-    //                         // apply the new confirmed block
-    //                         return self.confirm_block(&parent_block.id);
-    //                     }
-
-    //                     return Some(block);
-    //                 }
-    //                 BlockState::Confirmed => {
-    //                     // special case that only occurs when the second block is applied to the genesis block
-    //                     // as there are no uncofirmed blocks yet
-    //                     // might also occur if a block arrives immediately after the parent is confirmed
-    //                     // no need to check for confirmations since the branch is only length one
-
-    //                     // info!(
-    //                     //     "Adding recent block {} with confirmed parent {}",
-    //                     //     hex::encode(&block_id[0..8]),
-    //                     //     hex::encode(&block.block.parent_id[0..8])
-    //                     // );
-
-    //                     if block.block.parent_id == self.latest_block_hash {
-    //                         first_parent_block.children.push(block.id);
-    //                         return Some(block);
-    //                     } else {
-    //                         warn!("Recent block is late, its parent has already been confirmed!")
-    //                     }
-    //                 }
-    //                 BlockState::New => {}
-    //                 BlockState::Stray => {}
-    //             }
-    //         }
-    //         None => {
-    //             warn!(
-    //                 "Do not have parent {} for recent block {}, dropping!",
-    //                 hex::encode(&block_id[0..8]),
-    //                 hex::encode(&block.block.parent_id[0..8])
-    //             );
-    //         }
-    //     }
-
-    //     // drop the block if it was not applied
-    //     self.metablocks.remove(block_id);
-    //     None
-
-    //     // what about recent gossip for a node who is syncing?
-    // }
-
-    /// Apply a new block to the ledger by id (hash)
-    // pub fn confirm_block(&mut self, block_id: &BlockId) -> Option<MetaBlock> {
-    //     let block = self.metablocks.get_mut(block_id).unwrap();
-    //     block.state = BlockState::Confirmed;
-    //     self.latest_block_hash = *block_id;
-
-    //     // update height
-    //     self.height += 1;
-
-    //     // update quality
-    //     self.quality += block.block.get_quality() as u32;
-
-    //     // update balances, get or add account
-    //     self.balances
-    //         .entry(*block_id)
-    //         .and_modify(|balance| *balance += block.block.reward as usize)
-    //         .or_insert(block.block.reward as usize);
-
-    //     // Adds a pointer to this block id for the given index in the ledger
-    //     self.confirmed_blocks_by_index
-    //         .insert(self.height - 1, *block_id);
-
-    //     info!("Confirmed block: {}", hex::encode(&block_id[0..8]));
-
-    //     Some(block.clone())
-    // }
+        async_std::task::sleep(Duration::from_millis((time_to_next_timeslot) as u64)).await;
+        elapsed_timeslots += 1;
+        if elapsed_timeslots % TIMESLOTS_PER_EPOCH as u128 == 0 {
+            elapsed_epochs += 1;
+        }
+        let epoch_tracker = Arc::clone(&self.epochs);
+        async_std::task::spawn(async move {
+            timer::run(
+                timer_to_solver_tx,
+                epoch_tracker,
+                elapsed_epochs as u64,
+                elapsed_timeslots as u64,
+                is_farming,
+            )
+            .await;
+        });
+    }
 
     /// Retrieve the balance for a given node id
     pub fn get_balance(&self, id: &[u8]) -> Option<usize> {

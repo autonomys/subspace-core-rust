@@ -8,9 +8,10 @@ Given only the genesis block hash and the expected block time:
 * Pieces are erasure coded for redundancy under an m of n scheme
 * Each consensus node (farmer) stores a unique copy the ledger
 * Each piece is assymetrically time delay encoded using the Sloth algorithm, with the farmer_id as the key
-* For each new block, a specific piece of the archival ledger is audited
-* Every node who has an encoding of that piece then measures the quality 
-* The node with the highest quality may add a new block to the ledger
+* For each new block, all encodings from all plots are audited
+* This is made efficient by storing commitments to plots in a binary search tree
+* Each farmer searches for commitments that are below the quality threshold
+* The threshold is tuned s.t. on average, there is one solution per challenge.
  
 ### Sync Phase (manual)
 
@@ -24,7 +25,7 @@ Given only the genesis block hash and the expected block time:
 * Validate and apply the block (minus the encoding)
 * Retain blocks and tx in memory until enough state for an encoding has been obtained
 * Erasure code the block and store pieces to disk
-* After all blocks are
+* After all confirmed blocks have been erasure coded they may be pruned
 
 ### Setup Phase
 
@@ -33,11 +34,16 @@ Given only the genesis block hash and the expected block time:
 * Retrieve 4kb pieces over the network
 * Encode each piece with sloth, using node_id xor piece_index as the initilizaiton vector
 * Store each encoding to disk (HDD or SSD)
-* Retain a mapping of piece index to LBA in RAM
+* Compute a commitment (HMAC) for each encoding using a temorary nonce
+* Store the commitment in a Binary Search Tree -- currently RocksDB on disk
+* Retain a mapping of piece index to LBA in Rocks as well
 * Continue until all available drive space is full, using as many different node ids as possible
 
 ### Challenge / Response Phase
 
+* Challenge recycling
+* Lookback parameter
+* 
 * For each new valid block
 * Compute the challenge as hash(block.tag) -> opportunity for simulation (for each encoding)
 * Compute the parent block for the piece audit as: challenge mod (block_height - encoding_delay_parameter)
@@ -48,10 +54,6 @@ Given only the genesis block hash and the expected block time:
 * Compute the tag as hmac(encoding || challenge)
 * If tag <= quality target -> forge a new block and gossip
 * If tag > quality target, wait with exponential backoff based on distance, and gossip if no solution is yet seen
-
-### Managing Forks
-
-* 
 
 ### Encoding State
 

@@ -172,24 +172,4 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         // listen and farm
         join!(main, net);
     }
-
-    /*
-     * Startup Scenarios
-     *
-     * (1) Start from genesis and farm
-     * (2) Sync from genesis and validate
-     * (3) Sync from genesis and farm
-     *
-     * Sync Process
-     *
-     * (1) Get the first genesis block
-     * (2) Start the timer from genesis time
-     * (3) Continue syncing the ledger
-     * (4) As each epoch is synced, close the epoch to get randomness
-     * (5) Don't start farming (or getting randomness in timer) until the ledger is synced
-     *
-     * Timer has to exist within ledger now
-     * Timer will pass challenges to solver, which will pass solutions to main, and apply to ledger
-     *
-     */
 }

@@ -49,8 +49,9 @@ pub const DEV_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const CONSOLE: bool = false;
 // TODO: build duration object here and only define once
-pub const TIMESLOT_DURATION: u128 = 1000;
-pub const CHALLENGE_LOOKBACK: u64 = 3;
-pub const TIMESLOTS_PER_EPOCH: u64 = 1;
-pub const EPOCH_GRACE_PERIOD: u64 = 1000;
+// TODO: add documentation on allowed parameters for time
+pub const TIMESLOT_DURATION: u128 = 250;
+pub const CHALLENGE_LOOKBACK: u64 = 4;
+pub const TIMESLOTS_PER_EPOCH: u64 = 4;
+pub const EPOCH_GRACE_PERIOD: u64 = TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION as u64;
 pub const SOLUTION_RANGE: u64 = std::u64::MAX / PLOT_SIZE as u64 / 2;

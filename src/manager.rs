@@ -5,7 +5,7 @@ use async_std::sync::{Receiver, Sender};
 use async_std::task;
 use console::AppState;
 use futures::join;
-use ledger::{Block, BlockState};
+use ledger::Block;
 use log::*;
 use network::NodeType;
 use solver::Solution;
@@ -42,13 +42,15 @@ pub enum ProtocolMessage {
     /// peer main forwards response back to Net for tx
     BlocksResponseTo {
         node_addr: SocketAddr,
-        blocks: Vec<Block>,
+        blocks: Option<Vec<Block>>,
         timeslot: u64,
+        current_timeslot: u64,
     },
     /// self receives at Net and forwards response back to Main
     BlocksResponse {
+        blocks: Option<Vec<Block>>,
         timeslot: u64,
-        blocks: Vec<Block>,
+        current_timeslot: u64,
     },
     /// Net receives new full block, validates/applies, sends back to net for re-gossip
     BlockProposalRemote {
@@ -71,7 +73,8 @@ pub enum ProtocolMessage {
         solutions: Vec<Solution>,
     },
     BlockArrived {
-        block_id: [u8; 32],
+        block: Block,
+        peer_addr: SocketAddr,
         cached: bool,
     },
     StartFarming,
@@ -108,59 +111,6 @@ impl Display for ProtocolMessage {
     }
 }
 
-/// Spawns a non-blocking task that will wait for the block arrival based on local time
-pub async fn wait_for_block_arrival(
-    block_id: [u8; 32],
-    cached: bool,
-    timestamp: u128,
-    sender: Sender<ProtocolMessage>,
-) {
-    async_std::task::spawn(async move {
-        let time_now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_millis();
-
-        if time_now < timestamp {
-            async_std::task::sleep(Duration::from_millis((timestamp - time_now) as u64)).await;
-        }
-
-        sender
-            .send(ProtocolMessage::BlockArrived { block_id, cached })
-            .await;
-    });
-}
-
-pub async fn arrive_pending_children(
-    ledger: &ledger::Ledger,
-    children: Vec<[u8; 32]>,
-    sender: &Sender<ProtocolMessage>,
-) {
-    info!("Calling arrive_pending_children");
-    for child_block_id in children.iter() {
-        let child_block = ledger.metablocks.get(child_block_id).unwrap();
-
-        // check if arrival has expired, await if needed
-        // this has to occur in the background
-        // need a different listener to handle arrival
-
-        // when those arrive we see if their children are in pending children for parent
-        // if yes repeat
-        // otherewise call normal wait for arrival
-
-        // wait_for_block_arrival(
-        //     *child_block_id,
-        //     true,
-        //     child_block.block.timestamp,
-        //     sender.clone(),
-        // )
-        // .await;
-
-        // dont want to solve until we are no longer calling cached blocks
-        // once we are done calling cached blocks, we need to clear out the rest of them
-    }
-}
-
 /// Starts the manager process, a broker loop that acts as the central async message hub for the node
 pub async fn run(
     node_type: NodeType,
@@ -185,8 +135,10 @@ pub async fn run(
             // init ledger from genesis
             ledger.init_from_genesis().await;
 
-            // TODO: are we sure this is starting at the exaxt right time?
+            // TODO: are we sure this is starting at the exact right time?
             // start timer loop
+            ledger.timer_is_running = true;
+
             let sender = timer_to_solver_tx.clone();
             let tracker = Arc::clone(&epoch_tracker);
             async_std::task::spawn(async move {
@@ -205,38 +157,63 @@ pub async fn run(
             epoch_tracker.lock().await.insert(0, initial_epoch);
         }
 
-        loop {
+        'outer: loop {
             if let Ok(message) = any_to_main_rx.recv().await {
                 match message {
                     ProtocolMessage::BlocksRequestFrom {
                         node_addr,
                         timeslot,
                     } => {
-                        // TODO: should send a unique message if block has no children to signify that this is the last block
-                        let blocks = ledger.get_blocks_by_timeslot(timeslot);
+                        // TODO: check to make sure that the requested timeslot is not ahead of local timeslot
+                        let blocks: Option<Vec<Block>>;
+                        if timeslot > ledger.current_timeslot {
+                            blocks = None;
+                        } else {
+                            blocks = Some(ledger.get_blocks_by_timeslot(timeslot));
+                        }
+
                         let message = ProtocolMessage::BlocksResponseTo {
                             node_addr,
                             blocks,
                             timeslot,
+                            current_timeslot: ledger.current_timeslot,
                         };
                         main_to_net_tx.send(message).await;
                     }
-                    ProtocolMessage::BlocksResponse { blocks, timeslot } => {
+                    ProtocolMessage::BlocksResponse {
+                        blocks,
+                        timeslot,
+                        current_timeslot,
+                    } => {
                         // TODO: this is mainly for testing, later this will be replaced by state chain sync
-                        // as such there is no need for validating the block or timestamp
-                        // determine if genesis block or normal block
-                        // apply genesis block
-                        // apply normal block
+                        // so there is no need for validating the block or timestamp
 
-                        // TODO: sort the blocks lexicographically
+                        // once we have all blocks, apply cached gossip
+                        if blocks.is_none() {
+                            // call sync and start timer
+                            info!("Applying cached blocks");
+                            if !ledger.apply_cached_blocks(current_timeslot - 1).await {
+                                error!("Unable to sync the ledger, invalid blocks!");
+                                panic!("Unable to sync the ledger, invalid blocks!");
+                            }
+
+                            ledger
+                                .start_timer_from_genesis_time(
+                                    timer_to_solver_tx.clone(),
+                                    is_farming,
+                                )
+                                .await;
+
+                            continue 'outer;
+                        }
+                        // else unwrap the blocks
+                        let blocks = blocks.unwrap();
+
+                        // TODO: sort the blocks lexicographically (on client or server)
 
                         // get the epoch for this round
-                        let mut epoch = epoch_tracker
-                            .lock()
-                            .await
-                            .get(&(timeslot / TIMESLOTS_PER_EPOCH))
-                            .unwrap()
-                            .clone();
+                        let current_epoch = timeslot / TIMESLOTS_PER_EPOCH;
+                        // info!("Getting randomness for epoch {} during sync", current_epoch);
 
                         // apply each block for the timeslot
                         for block in blocks.iter() {
@@ -248,95 +225,45 @@ pub async fn run(
 
                         // increment the epoch on boundary
                         if ledger.current_timeslot % TIMESLOTS_PER_EPOCH == 0 {
+                            info!(
+                                "Closing randomness for epoch {} during sync",
+                                ledger.current_epoch
+                            );
+
                             ledger.current_epoch += 1;
 
                             // close the current epoch here and derive randomness
-                            epoch.close();
+                            epoch_tracker
+                                .lock()
+                                .await
+                                .entry(current_epoch)
+                                .and_modify(|epoch| epoch.close());
 
                             // create the new epoch
-                            let new_epoch_index = timeslot / TIMESLOTS_PER_EPOCH;
+                            let new_epoch_index = ledger.current_epoch;
                             epoch_tracker
                                 .lock()
                                 .await
                                 .insert(new_epoch_index, timer::Epoch::new(new_epoch_index));
+
+                            info!(
+                                "Creating a new empty epoch during sync blocks for index {}",
+                                new_epoch_index
+                            );
                         }
 
-                        // we want to ensure that all blocks in this timeslot have pending children (else we may have only a partial set)
-                        let mut synced = true;
-                        let block_ids: Vec<BlockId> =
-                            blocks.iter().map(|block| block.get_id()).collect();
-
-                        for block_id in block_ids.iter() {
-                            match ledger.pending_children_for_parent.get(block_id) {
-                                Some(_) => {}
-                                None => {
-                                    synced = false;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if synced {
-                            // if so, then recursively apply all gossip, until we run out of cached blocks
-
-                            // then start the timer
-
-                            let sender = timer_to_solver_tx.clone();
-                            let tracker = Arc::clone(&epoch_tracker);
-
-                            // apply the genesis block
-
-                            // WRONG: We can't start the timer until
-
-                            // start the timer at the right epoch and timeslot
-                            let genesis_block = blocks[0].clone();
-                            let genesis_time = genesis_block.content.timestamp;
-
-                            let current_time = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .expect("Time went backwards")
-                                .as_millis();
-
-                            let elapsed_time = current_time - genesis_time;
-                            let mut elapsed_timeslots = elapsed_time / TIMESLOT_DURATION;
-                            let mut elapsed_epochs =
-                                elapsed_timeslots / TIMESLOTS_PER_EPOCH as u128;
-                            let time_to_next_timeslot =
-                                elapsed_time - (TIMESLOT_DURATION * elapsed_timeslots);
-
-                            // TODO: if time_to_next_timeslot is very small (say less than 10 ms) wait one more timeslot to ensure computation completes
-
-                            async_std::task::sleep(Duration::from_millis(
-                                (time_to_next_timeslot) as u64,
-                            ))
+                        // request the next timeslot
+                        main_to_net_tx
+                            .send(ProtocolMessage::BlocksRequest {
+                                timeslot: timeslot + 1,
+                            })
                             .await;
-
-                            elapsed_timeslots += 1;
-
-                            if elapsed_timeslots % TIMESLOTS_PER_EPOCH as u128 == 0 {
-                                elapsed_epochs += 1;
-                            }
-                            async_std::task::spawn(async move {
-                                timer::run(
-                                    sender,
-                                    tracker,
-                                    elapsed_epochs as u64,
-                                    elapsed_timeslots as u64,
-                                    is_farming,
-                                )
-                                .await;
-                            });
-
-                        // then start farming
-                        } else {
-                            main_to_net_tx
-                                .send(ProtocolMessage::BlocksRequest {
-                                    timeslot: timeslot + 1,
-                                })
-                                .await;
-                        }
                     }
                     ProtocolMessage::BlockProposalRemote { block, peer_addr } => {
+                        info!(
+                            "Received a block via gossip, with {} parents",
+                            block.content.parent_ids.len()
+                        );
                         let block_id = block.get_id();
 
                         if ledger.metablocks.contains_key(&block_id) {
@@ -344,45 +271,67 @@ pub async fn run(
                             continue;
                         }
 
-                        // only apply if we have the parent, else cache
-                        // apply if we have one or all of the parents
-
-                        for parent_id in block.content.parent_ids.iter() {
-                            if !ledger.metablocks.contains_key(parent_id) {
-                                // cache the block
-                                // ledger.metablocks.insert();
-                                // add to pending children
-                            }
+                        if !ledger.timer_is_running {
+                            info!(
+                                "Caching a block received via gossip before the ledger is synced"
+                            );
+                            ledger.cache_remote_block(block);
+                            continue;
                         }
 
-                        // TODO: if the timeslot is beyond the grace period, ignore the block
-                        // TODO: important -- this may lead to forks if nodes are malicous
-                        // TODO: this means we need to support forks in some fashion
+                        let block_arrival_time = (block.proof.timeslot as u128 * TIMESLOT_DURATION)
+                            + ledger.genesis_timestamp;
 
-                        // has the timeslot arrived? -> case where a node gossips early intentionally or clocks are out of sync
                         let time_now = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .expect("Time went backwards")
                             .as_millis();
 
-                        let arrival_time = ledger.genesis_timestamp
-                            + (TIMESLOT_DURATION * block.proof.timeslot as u128);
+                        let lower_bound = time_now - EPOCH_GRACE_PERIOD as u128;
+                        let upper_bound = time_now + EPOCH_GRACE_PERIOD as u128;
 
-                        if arrival_time < time_now {
+                        if block_arrival_time < lower_bound {
+                            let wait_time = (time_now - block_arrival_time) as u64;
+                            warn!("Received an early block via gossip, waiting {} ms for block arrival!", wait_time);
+
                             let sender = main_to_main_tx.clone();
                             async_std::task::spawn(async move {
-                                async_std::task::sleep(Duration::from_millis(
-                                    (arrival_time - time_now) as u64,
-                                ))
-                                .await;
+                                async_std::task::sleep(Duration::from_millis(wait_time)).await;
                                 sender
                                     .send(ProtocolMessage::BlockArrived {
-                                        block_id,
+                                        block,
+                                        peer_addr,
                                         cached: false,
                                     })
                                     .await;
                             });
+
+                            continue;
                         }
+
+                        if block_arrival_time > upper_bound {
+                            // block is too late, ignore
+                            warn!("Received a late block via gossip, ignoring");
+                            continue;
+                        }
+
+                        // check that we have the randomness for the desired epoch
+                        // then apply the block
+
+                        let randomness_epoch = epoch_tracker
+                            .lock()
+                            .await
+                            .get(&(block.proof.epoch - CHALLENGE_LOOKBACK))
+                            .unwrap()
+                            .clone();
+
+                        if !randomness_epoch.is_closed {
+                            warn!("Unable to apply block received via gossip, the randomness epoch is still open!");
+                        }
+
+                        // TODO: if the timeslot is beyond the grace period, ignore the block
+                        // TODO: important -- this may lead to forks if nodes are malicous
+                        // TODO: this means we need to support forks in some fashion
 
                         // how do we know if we have to cache the block (if received during sync?)
 
@@ -396,29 +345,37 @@ pub async fn run(
                                 .await;
                         }
                     }
-                    ProtocolMessage::BlockArrived { block_id, cached } => {
+                    ProtocolMessage::BlockArrived {
+                        block,
+                        peer_addr,
+                        cached: _,
+                    } => {
                         info!(
                             "A new block has arrived with id: {}",
-                            hex::encode(&block_id[0..8])
+                            hex::encode(&block.get_id()[0..8])
                         );
 
-                        // ledger.apply_arrived_block(&block_id, &main_to_sol_tx).await;
+                        if ledger.validate_and_apply_remote_block(block.clone()).await {
+                            main_to_net_tx
+                                .send(ProtocolMessage::BlockProposalRemote {
+                                    block: block,
+                                    peer_addr,
+                                })
+                                .await;
+                        }
 
                         // ToDo: Have to wipe cached blocks at some point to prevent memory leak
 
-                        if cached {
-                            // block was cached and has arrived on sync
-                            // check for more cached pending children
-                            if let Some(children) =
-                                ledger.pending_children_for_parent.get(&block_id)
-                            {
-                                arrive_pending_children(ledger, children.clone(), &main_to_main_tx)
-                                    .await;
-                            }
-                        }
-
-                        // have to tell it the node type
-                        // and whether to solve or not
+                        // if cached {
+                        //     // block was cached and has arrived on sync
+                        //     // check for more cached pending children
+                        //     if let Some(children) =
+                        //         ledger.pending_children_for_parent.get(&block_id)
+                        //     {
+                        //         arrive_pending_children(ledger, children.clone(), &main_to_main_tx)
+                        //             .await;
+                        //     }
+                        // }
                     }
                     ProtocolMessage::BlockSolutions { solutions } => {
                         // TODO: split into two functions

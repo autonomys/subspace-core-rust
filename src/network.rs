@@ -71,10 +71,20 @@ pub enum Message {
     Ping,
     Pong,
     PeersRequest,
-    PeersResponse { contacts: Vec<SocketAddr> },
-    BlocksRequest { timeslot: u64 },
-    BlocksResponse { timeslot: u64, blocks: Vec<Block> },
-    BlockProposal { block: Block },
+    PeersResponse {
+        contacts: Vec<SocketAddr>,
+    },
+    BlocksRequest {
+        timeslot: u64,
+    },
+    BlocksResponse {
+        timeslot: u64,
+        blocks: Option<Vec<Block>>,
+        current_timeslot: u64,
+    },
+    BlockProposal {
+        block: Block,
+    },
 }
 
 impl Display for Message {
@@ -456,12 +466,20 @@ pub async fn run(
                                 net_to_main_tx.send(message).await;
                             });
                         }
-                        Message::BlocksResponse { timeslot, blocks } => {
+                        Message::BlocksResponse {
+                            timeslot,
+                            blocks,
+                            current_timeslot,
+                        } => {
                             // TODO: Handle the case where peer does not have the block
                             let net_to_main_tx = net_to_main_tx.clone();
                             async_std::task::spawn(async move {
                                 net_to_main_tx
-                                    .send(ProtocolMessage::BlocksResponse { timeslot, blocks })
+                                    .send(ProtocolMessage::BlocksResponse {
+                                        timeslot,
+                                        blocks,
+                                        current_timeslot,
+                                    })
                                     .await;
                             });
 
@@ -520,10 +538,18 @@ pub async fn run(
                             node_addr,
                             blocks,
                             timeslot,
+                            current_timeslot,
                         } => {
                             // send a block back to a peer that has requested it from you
 
-                            router.send(&node_addr, Message::BlocksResponse { timeslot, blocks });
+                            router.send(
+                                &node_addr,
+                                Message::BlocksResponse {
+                                    timeslot,
+                                    blocks,
+                                    current_timeslot,
+                                },
+                            );
                         }
                         ProtocolMessage::BlockProposalRemote { block, peer_addr } => {
                             // propagating a block received over the network that was valid

@@ -41,6 +41,10 @@ Benches single block encode/decode time and full piece encode/decode time for ea
 ### Environment variables
 * `SUBSPACE_DIR` can be used to specify alternative default location for plot to be created in
 
+Each node needs a different directory for testing -- example
+
+`export SUBSPACE_DIR=~/Desktop/plots/subspace/peer0`
+
 ### Cleanup
 Remove `config.json`, `plot.bin`, `plot-map` and `plot-tags` at the location where client stores filed (printed during startup).
 
