@@ -42,7 +42,7 @@ pub async fn run(
     // this should be a closed epoch so we just clone
 
     // advance through timeslot on set interval
-    let mut interval = stream::interval(Duration::from_millis(TIMESLOT_DURATION as u64));
+    let mut interval = stream::interval(Duration::from_millis(TIMESLOT_DURATION));
     while interval.next().await.is_some() {
         info!("Timer has arrived on timeslot: {}", current_timeslot_index);
         let epoch = epoch_tracker.get_loopback_epoch(current_epoch_index).await;
@@ -100,7 +100,7 @@ pub async fn run(
             let epoch_tracker = epoch_tracker.clone();
             async_std::task::spawn(async move {
                 // wait for grace period
-                async_std::task::sleep(Duration::from_millis(EPOCH_GRACE_PERIOD)).await;
+                async_std::task::sleep(EPOCH_GRACE_PERIOD).await;
 
                 // get epoch from tracker and close
                 epoch_tracker.close_epoch(old_epoch_index).await;

@@ -262,24 +262,25 @@ pub async fn run(
                             continue;
                         }
 
-                        let block_arrival_time = (block.proof.timeslot as u128 * TIMESLOT_DURATION)
-                            + ledger.genesis_timestamp;
+                        let block_arrival_time = Duration::from_millis(
+                            (block.proof.timeslot * TIMESLOT_DURATION)
+                                + ledger.genesis_timestamp as u64,
+                        );
 
                         let time_now = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
-                            .expect("Time went backwards")
-                            .as_millis();
+                            .expect("Time went backwards");
 
-                        let lower_bound = time_now - EPOCH_GRACE_PERIOD as u128;
-                        let upper_bound = time_now + EPOCH_GRACE_PERIOD as u128;
+                        let lower_bound = time_now - EPOCH_GRACE_PERIOD;
+                        let upper_bound = time_now + EPOCH_GRACE_PERIOD;
 
                         if block_arrival_time < lower_bound {
-                            let wait_time = (time_now - block_arrival_time) as u64;
-                            warn!("Received an early block via gossip, waiting {} ms for block arrival!", wait_time);
+                            let wait_time = time_now - block_arrival_time;
+                            warn!("Received an early block via gossip, waiting {} ms for block arrival!", wait_time.as_millis());
 
                             let sender = main_to_main_tx.clone();
                             async_std::task::spawn(async move {
-                                async_std::task::sleep(Duration::from_millis(wait_time)).await;
+                                async_std::task::sleep(wait_time).await;
                                 sender
                                     .send(ProtocolMessage::BlockArrived {
                                         block,

@@ -225,7 +225,7 @@ pub struct Content {
     pub parent_ids: Vec<ContentId>, // ids of all parent blocks not yet seen
     pub proof_id: ProofId,          // id of matching proof
     pub proof_signature: Vec<u8>,   // signature of the proof with same public key
-    pub timestamp: u128,            // when this block was created (from Nodes local view)
+    pub timestamp: u64,             // when this block was created (from Nodes local view)
     // TODO: Should be a vec of TX IDs
     pub tx_ids: Vec<u8>, // ids of all unseen transactions seen by this block
     // TODO: account for farmers who sign the same proof with two different contents
@@ -317,7 +317,7 @@ pub struct Ledger {
     pub cached_blocks_for_timeslot: HashMap<u64, Vec<BlockId>>,
     balances: HashMap<[u8; 32], usize>, // the current balance of all accounts
     pub unseen_block_ids: HashSet<BlockId>,
-    pub genesis_timestamp: u128,
+    pub genesis_timestamp: u64,
     pub timer_is_running: bool,
 
     pub node_type: NodeType,
@@ -390,9 +390,9 @@ impl Ledger {
         self.genesis_timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
-            .as_millis();
+            .as_millis() as u64;
 
-        let mut timestamp = self.genesis_timestamp;
+        let mut timestamp = self.genesis_timestamp as u64;
         let mut parent_id: BlockId = [0u8; 32];
 
         for epoch_index in 0..CHALLENGE_LOOKBACK {
@@ -413,7 +413,7 @@ impl Ledger {
                     parent_ids: vec![parent_id],
                     proof_id: proof.get_id(),
                     proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
-                    timestamp: timestamp,
+                    timestamp,
                     tx_ids: Vec::new(),
                     signature: Vec::new(),
                 };
@@ -449,7 +449,7 @@ impl Ledger {
                     .as_millis();
 
                 timestamp += TIMESLOT_DURATION;
-                async_std::task::sleep(Duration::from_millis((timestamp - time_now) as u64)).await;
+                async_std::task::sleep(Duration::from_millis(timestamp - time_now as u64)).await;
             }
 
             self.epoch_tracker.close_epoch(epoch_index).await;
@@ -515,7 +515,7 @@ impl Ledger {
                 let timestamp = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .expect("Time went backwards")
-                    .as_millis();
+                    .as_millis() as u64;
                 // must get parents from the chain
                 // TODO: only get parents that are not at the same level
                 // TODO: create an empty vec then do memswap between unseen parent and unseen block ids
@@ -524,7 +524,7 @@ impl Ledger {
                     parent_ids: unseen_parents,
                     proof_id: proof.get_id(),
                     proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
-                    timestamp: timestamp,
+                    timestamp,
                     tx_ids: self.tx_payload.clone(),
                     signature: Vec::new(),
                 };
@@ -869,22 +869,22 @@ impl Ledger {
             .unwrap()
             .clone()
             .block;
-        let genesis_time = genesis_block.content.timestamp;
+        let genesis_time = genesis_block.content.timestamp as u64;
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
-            .as_millis();
+            .as_millis() as u64;
         let elapsed_time = current_time - genesis_time;
         let mut elapsed_timeslots = elapsed_time / TIMESLOT_DURATION;
-        let mut elapsed_epochs = elapsed_timeslots / TIMESLOTS_PER_EPOCH as u128;
+        let mut elapsed_epochs = elapsed_timeslots / TIMESLOTS_PER_EPOCH;
         let time_to_next_timeslot = (TIMESLOT_DURATION * (elapsed_timeslots + 1)) - elapsed_time;
 
         self.genesis_timestamp = genesis_time;
         self.timer_is_running = true;
 
-        async_std::task::sleep(Duration::from_millis((time_to_next_timeslot) as u64)).await;
+        async_std::task::sleep(Duration::from_millis(time_to_next_timeslot)).await;
         elapsed_timeslots += 1;
-        if elapsed_timeslots % TIMESLOTS_PER_EPOCH as u128 == 0 {
+        if elapsed_timeslots % TIMESLOTS_PER_EPOCH == 0 {
             elapsed_epochs += 1;
         }
         let epoch_tracker = self.epoch_tracker.clone();
