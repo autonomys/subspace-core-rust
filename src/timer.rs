@@ -22,12 +22,12 @@ use std::time::Duration;
 pub async fn run(
     timer_to_solver_tx: Sender<SolverMessage>,
     epoch_tracker: EpochTracker,
-    initial_timeslot_index: u64,
+    initial_timeslot: u64,
     is_farming: bool,
 ) {
     // set initial values
     let mut current_epoch_index = epoch_tracker.get_current_epoch().await;
-    let mut current_timeslot_index = initial_timeslot_index;
+    let mut current_timeslot_index = initial_timeslot;
 
     // info! {"Initial epoch index is: {}", current_epoch_index};
     // info!("Inital timeslot index is: {}", current_timeslot_index);
@@ -54,11 +54,11 @@ pub async fn run(
         }
 
         if is_farming {
-            let timeslot_index = current_timeslot_index % TIMESLOTS_PER_EPOCH;
+            let timeslot_index = current_timeslot_index as usize % TIMESLOTS_PER_EPOCH;
 
             // derive slot challenge and send to solver
 
-            let slot_challenge = epoch.get_challenge_for_timeslot(timeslot_index as usize);
+            let slot_challenge = epoch.get_challenge_for_timeslot(timeslot_index);
 
             timer_to_solver_tx
                 .send(SolverMessage::SlotChallenge {
@@ -73,7 +73,7 @@ pub async fn run(
         current_timeslot_index += 1;
 
         // update epoch on boundaries
-        if current_timeslot_index % TIMESLOTS_PER_EPOCH == 0 {
+        if current_timeslot_index as usize % TIMESLOTS_PER_EPOCH == 0 {
             // create the next epoch
             current_epoch_index = epoch_tracker.advance_epoch().await;
 

@@ -26,7 +26,7 @@ impl Epoch {
         Epoch {
             is_closed: false,
             slots: HashMap::new(),
-            challenges: Vec::new(),
+            challenges: Vec::with_capacity(TIMESLOTS_PER_EPOCH),
             randomness,
         }
     }
@@ -61,8 +61,8 @@ impl Epoch {
                 });
         self.randomness = crypto::digest_sha_256(&xor_result);
 
-        for timeslot in 0..TIMESLOTS_PER_EPOCH {
-            let slot_seed = [&self.randomness[..], &timeslot.to_le_bytes()[..]].concat();
+        for timeslot_index in 0..TIMESLOTS_PER_EPOCH {
+            let slot_seed = [&self.randomness[..], &timeslot_index.to_le_bytes()[..]].concat();
             self.challenges.push(crypto::digest_sha_256(&slot_seed));
         }
 

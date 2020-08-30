@@ -185,13 +185,20 @@ impl Block {
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct Proof {
-    pub randomness: ProofId,  // epoch challenge
-    pub epoch: u64,           // epoch index
-    pub timeslot: u64,        // time slot
-    pub public_key: [u8; 32], // farmers public key
-    pub tag: Tag,             // hmac of encoding with a nonce
-    pub nonce: u128,          // nonce for salting the tag
-    pub piece_index: u64,     // index of piece for encoding
+    /// epoch challenge
+    pub randomness: ProofId,
+    /// epoch index
+    pub epoch: u64,
+    /// time slot
+    pub timeslot: u64,
+    /// farmers public key
+    pub public_key: [u8; 32],
+    /// hmac of encoding with a nonce
+    pub tag: Tag,
+    /// nonce for salting the tag
+    pub nonce: u128,
+    /// index of piece for encoding
+    pub piece_index: u64,
 }
 
 impl Proof {
@@ -602,7 +609,7 @@ impl Ledger {
     /// validate and apply a block received via gossip
     pub async fn validate_and_apply_remote_block(&mut self, block: Block) -> bool {
         let randomness_epoch = block.proof.epoch - CHALLENGE_LOOKBACK;
-        let challenge_index = block.proof.timeslot % TIMESLOTS_PER_EPOCH;
+        let challenge_index = block.proof.timeslot % TIMESLOTS_PER_EPOCH as u64;
         info!(
             "Validating and applying block for epoch: {} at timeslot {}",
             randomness_epoch, challenge_index
@@ -737,7 +744,7 @@ impl Ledger {
         //TODO: must handle the case where the epoch is still open
 
         let current_epoch = block.proof.epoch - CHALLENGE_LOOKBACK;
-        let challenge_epoch_index = block.proof.timeslot % TIMESLOTS_PER_EPOCH;
+        let challenge_epoch_index = block.proof.timeslot % TIMESLOTS_PER_EPOCH as u64;
         info!(
             "Validating and applying cached block for epoch: {} at timeslot {}",
             current_epoch, challenge_epoch_index
@@ -809,7 +816,7 @@ impl Ledger {
 
             self.current_timeslot += 1;
 
-            if self.current_timeslot % TIMESLOTS_PER_EPOCH == 0 {
+            if self.current_timeslot % TIMESLOTS_PER_EPOCH as u64 == 0 {
                 // create the new epoch
                 let current_epoch = self.epoch_tracker.advance_epoch().await;
 

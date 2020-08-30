@@ -136,7 +136,7 @@ pub async fn run(
                 timer::run(
                     timer_to_solver_tx,
                     epoch_tracker,
-                    CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH,
+                    CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH as u64,
                     true,
                 )
                 .await;
@@ -208,7 +208,7 @@ pub async fn run(
                         ledger.current_timeslot += 1;
 
                         // increment the epoch on boundary
-                        if ledger.current_timeslot % TIMESLOTS_PER_EPOCH == 0 {
+                        if ledger.current_timeslot % TIMESLOTS_PER_EPOCH as u64 == 0 {
                             // create new epoch
                             let current_epoch = epoch_tracker.advance_epoch().await;
 
