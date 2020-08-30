@@ -453,7 +453,7 @@ impl Ledger {
                     .as_millis();
 
                 timestamp += TIMESLOT_DURATION;
-                // TODO: This will drift, needs to be fixed
+
                 async_std::task::sleep(Duration::from_millis(timestamp - time_now as u64)).await;
             }
         }
