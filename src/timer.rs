@@ -101,11 +101,10 @@ pub async fn run(
         info!("Timer has arrived on timeslot: {}", current_timeslot_index);
 
         if !epoch.is_closed {
-            error!(
+            panic!(
                 "Epoch {} being used for randomness is still open!",
                 current_epoch_index - CHALLENGE_LOOKBACK
             );
-            panic!("Epoch being used for randomness is still open!");
         }
 
         let timeslot_index = current_timeslot_index % TIMESLOTS_PER_EPOCH;
