@@ -45,7 +45,6 @@ pub async fn run(
     let mut interval = stream::interval(Duration::from_millis(TIMESLOT_DURATION as u64));
     while interval.next().await.is_some() {
         info!("Timer has arrived on timeslot: {}", current_timeslot_index);
-        // TODO: Make this into a method on epoch_tracker
         let epoch = epoch_tracker.get_loopback_epoch(current_epoch_index).await;
 
         if !epoch.is_closed {
@@ -60,7 +59,6 @@ pub async fn run(
 
             // derive slot challenge and send to solver
 
-            // TODO: make this into a method on epoch
             let slot_challenge = epoch.get_challenge_for_timeslot(timeslot_index as usize);
 
             timer_to_solver_tx
