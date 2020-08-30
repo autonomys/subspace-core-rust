@@ -87,18 +87,17 @@ pub async fn run(
     // get initial epoch for source of randomness
     // this should be a closed epoch so we just clone
 
-    // TODO: Make this into a method on epoch_tracker
-    let mut epoch = epoch_tracker
-        .lock()
-        .await
-        .get(&(current_epoch_index - CHALLENGE_LOOKBACK))
-        .unwrap()
-        .clone();
-
     // advance through timeslot on set interval
     let mut interval = stream::interval(Duration::from_millis(TIMESLOT_DURATION as u64));
     while let Some(_) = interval.next().await {
         info!("Timer has arrived on timeslot: {}", current_timeslot_index);
+        // TODO: Make this into a method on epoch_tracker
+        let epoch = epoch_tracker
+            .lock()
+            .await
+            .get(&(current_epoch_index - CHALLENGE_LOOKBACK))
+            .unwrap()
+            .clone();
 
         if !epoch.is_closed {
             panic!(
@@ -107,9 +106,9 @@ pub async fn run(
             );
         }
 
-        let timeslot_index = current_timeslot_index % TIMESLOTS_PER_EPOCH;
-
         if is_farming {
+            let timeslot_index = current_timeslot_index % TIMESLOTS_PER_EPOCH;
+
             // derive slot challenge and send to solver
 
             // TODO: make this into a method on epoch
@@ -136,12 +135,8 @@ pub async fn run(
                     current_epoch_index - CHALLENGE_LOOKBACK
                 );
                 // TODO: Handle edge case where messages are delayed
-                epoch = epoch_tracker
-                    .lock()
-                    .await
-                    .get(&(current_epoch_index - CHALLENGE_LOOKBACK))
-                    .unwrap()
-                    .clone();
+                // NOTE: Code for getting epoch was already moved to the beginning on while loop,
+                // so above TODO may be irrelevant
             }
 
             let old_epoch = current_epoch_index;
