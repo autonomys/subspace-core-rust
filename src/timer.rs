@@ -105,7 +105,6 @@ pub async fn run(
                 async_std::task::sleep(Duration::from_millis(EPOCH_GRACE_PERIOD)).await;
 
                 // get epoch from tracker and close
-                // TODO: turn into method on epoch_tracker: close_epoch(epoch_index)
                 epoch_tracker.close_epoch(old_epoch_index).await;
 
                 info!("Timer is closing randomness for epoch: {}", old_epoch_index);
