@@ -435,7 +435,7 @@ impl Ledger {
                 parent_id = block.get_id();
 
                 self.current_timeslot += 1;
-                epoch.slots.insert(self.current_timeslot, vec![parent_id]);
+                epoch.add_block_to_timeslot(self.current_timeslot, parent_id);
 
                 info!(
                     "Applied a genesis block to ledger with id {}",
@@ -577,14 +577,7 @@ impl Ledger {
                     .await
                     .entry(block.proof.epoch)
                     .and_modify(|epoch| {
-                        epoch
-                            .slots
-                            .entry(block.proof.timeslot)
-                            .and_modify(|timeslot| {
-                                timeslot.push(block_id);
-                                new_timeslot = false;
-                            })
-                            .or_insert(vec![block_id]);
+                        new_timeslot = epoch.add_block_to_timeslot(block.proof.timeslot, block_id);
                     });
 
                 // if we are on the last timeslot, advance the epoch
@@ -659,7 +652,7 @@ impl Ledger {
             &self.merkle_root,
             &self.genesis_piece_hash,
             &epoch.randomness,
-            &epoch.challenges[challenge_index as usize],
+            &epoch.get_challenge_for_timeslot(challenge_index as usize),
             &self.sloth,
         ) {
             return false;
@@ -707,14 +700,7 @@ impl Ledger {
             .await
             .entry(block.proof.epoch)
             .and_modify(|epoch| {
-                epoch
-                    .slots
-                    .entry(block.proof.timeslot)
-                    .and_modify(|timeslot| {
-                        timeslot.push(block_id);
-                        new_timeslot = false;
-                    })
-                    .or_insert(vec![block_id]);
+                new_timeslot = epoch.add_block_to_timeslot(block.proof.timeslot, block_id);
             });
 
         // if we are on the last timeslot, close the epoch
@@ -787,13 +773,7 @@ impl Ledger {
             .await
             .entry(block.proof.epoch)
             .and_modify(|epoch| {
-                epoch
-                    .slots
-                    .entry(block.proof.timeslot)
-                    .and_modify(|timeslot| {
-                        timeslot.push(block_id);
-                    })
-                    .or_insert(vec![block_id]);
+                epoch.add_block_to_timeslot(block.proof.timeslot, block_id);
             });
     }
 
@@ -822,7 +802,7 @@ impl Ledger {
             &self.merkle_root,
             &self.genesis_piece_hash,
             &epoch.randomness,
-            &epoch.challenges[challenge_epoch_index as usize],
+            &epoch.get_challenge_for_timeslot(challenge_epoch_index as usize),
             &self.sloth,
         ) {
             return false;

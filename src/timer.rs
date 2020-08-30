@@ -1,7 +1,10 @@
 #![allow(dead_code)]
 
+mod epoch;
+
 use super::*;
 use crate::solver::SolverMessage;
+pub use crate::timer::epoch::Epoch;
 use async_std::prelude::*;
 use async_std::stream;
 use async_std::sync::Sender;
@@ -23,47 +26,6 @@ pub type EpochTracker = Arc<Mutex<HashMap<u64, Epoch>>>;
 
 //     }
 // }
-
-#[derive(Debug, Clone)]
-pub struct Epoch {
-    pub is_closed: bool, // has the randomness been derived and the epoch closed?
-    pub slots: HashMap<u64, Vec<BlockId>>, // slot indices and vec of block ids, some will be empty, some one, some many
-    pub challenges: Vec<SlotChallenge>, // challenges derived from randomness at closure, one per slot
-    pub randomness: EpochChallenge,     // overall randomness for this epoch
-}
-
-// TODO: Make into an enum for a cleaner implementation, seperate into active and closed epoch
-impl Epoch {
-    pub fn new(index: u64) -> Epoch {
-        let randomness = crypto::digest_sha_256(&index.to_le_bytes());
-
-        Epoch {
-            is_closed: false,
-            slots: HashMap::new(),
-            challenges: Vec::new(),
-            randomness,
-        }
-    }
-
-    pub fn close(&mut self) {
-        let xor_result =
-            self.slots
-                .values()
-                .flatten()
-                .fold([0u8; 32], |mut randomness, block_id| {
-                    utils::xor_bytes(&mut randomness, &block_id[..]);
-                    randomness
-                });
-        self.randomness = crypto::digest_sha_256(&xor_result);
-
-        for timeslot in 0..TIMESLOTS_PER_EPOCH {
-            let slot_seed = [&self.randomness[..], &timeslot.to_le_bytes()[..]].concat();
-            self.challenges.push(crypto::digest_sha_256(&slot_seed));
-        }
-
-        self.is_closed = true;
-    }
-}
 
 pub async fn run(
     timer_to_solver_tx: Sender<SolverMessage>,
@@ -112,7 +74,7 @@ pub async fn run(
             // derive slot challenge and send to solver
 
             // TODO: make this into a method on epoch
-            let slot_challenge = epoch.challenges[timeslot_index as usize];
+            let slot_challenge = epoch.get_challenge_for_timeslot(timeslot_index as usize);
 
             timer_to_solver_tx
                 .send(SolverMessage::SlotChallenge {
