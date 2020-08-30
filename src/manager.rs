@@ -143,7 +143,7 @@ pub async fn run(
             });
         } else {
             // create the initial epoch
-            ledger.current_epoch = epoch_tracker.advance_epoch().await;
+            epoch_tracker.advance_epoch().await;
         }
 
         'outer: loop {

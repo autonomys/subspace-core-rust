@@ -310,7 +310,6 @@ pub struct MetaBlock {
 pub struct Ledger {
     pub metablocks: HashMap<BlockId, MetaBlock>,
     pub epoch_tracker: EpochTracker,
-    pub current_epoch: u64,
     pub current_timeslot: u64,
     pub confirmed_blocks_by_timeslot: HashMap<u64, Vec<BlockId>>,
     // TODO: add ordered confirmed_blocks_by_block_height
@@ -350,7 +349,6 @@ impl Ledger {
         Ledger {
             metablocks: HashMap::new(),
             epoch_tracker,
-            current_epoch: 0,
             current_timeslot: 0,
             confirmed_blocks_by_timeslot: HashMap::new(),
             cached_blocks_for_timeslot: HashMap::new(),
