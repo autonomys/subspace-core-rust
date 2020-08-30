@@ -462,11 +462,7 @@ impl Ledger {
         }
 
         // init the first epoch
-        let first_random_epoch = Epoch::new(self.current_epoch);
-        self.epoch_tracker
-            .lock()
-            .await
-            .insert(self.current_epoch, first_random_epoch);
+        self.epoch_tracker.create_epoch(self.current_epoch).await;
 
         self.unseen_block_ids.insert(parent_id);
     }
@@ -638,13 +634,7 @@ impl Ledger {
         );
 
         // get correct randomness for this block
-        let epoch = self
-            .epoch_tracker
-            .lock()
-            .await
-            .get(&randomness_epoch)
-            .unwrap()
-            .clone();
+        let epoch = self.epoch_tracker.get_epoch(randomness_epoch).await;
 
         if !epoch.is_closed {
             error!("Epoch being used for randomness is still open!");
@@ -793,13 +783,7 @@ impl Ledger {
         );
 
         // get correct randomness for this block
-        let epoch = self
-            .epoch_tracker
-            .lock()
-            .await
-            .get(&current_epoch)
-            .unwrap()
-            .clone();
+        let epoch = self.epoch_tracker.get_epoch(current_epoch).await;
 
         // check if the block is valid
         if !block.is_valid(
@@ -870,10 +854,8 @@ impl Ledger {
                 // close the epoch
                 let epoch_index = self.current_timeslot / TIMESLOTS_PER_EPOCH as u64;
                 self.epoch_tracker
-                    .lock()
-                    .await
-                    .entry(epoch_index - CHALLENGE_LOOKBACK)
-                    .and_modify(|epoch| epoch.close());
+                    .close_epoch(epoch_index - CHALLENGE_LOOKBACK)
+                    .await;
 
                 info!(
                     "Closing randomness for epoch {} during apply cached blocks",
@@ -882,10 +864,7 @@ impl Ledger {
 
                 // create the new epoch
                 let new_epoch_index = self.current_epoch + 1;
-                self.epoch_tracker
-                    .lock()
-                    .await
-                    .insert(new_epoch_index, Epoch::new(new_epoch_index));
+                self.epoch_tracker.create_epoch(new_epoch_index).await;
 
                 info!("Creating a new empty epoch for epoch {}", new_epoch_index);
             }

@@ -46,12 +46,7 @@ pub async fn run(
     while interval.next().await.is_some() {
         info!("Timer has arrived on timeslot: {}", current_timeslot_index);
         // TODO: Make this into a method on epoch_tracker
-        let epoch = epoch_tracker
-            .lock()
-            .await
-            .get(&(current_epoch_index - CHALLENGE_LOOKBACK))
-            .unwrap()
-            .clone();
+        let epoch = epoch_tracker.get_loopback_epoch(current_epoch_index).await;
 
         if !epoch.is_closed {
             panic!(
@@ -93,36 +88,27 @@ pub async fn run(
                 // so above TODO may be irrelevant
             }
 
-            let old_epoch = current_epoch_index;
+            let old_epoch_index = current_epoch_index;
             current_epoch_index += 1;
 
             // create the next epoch
-            // TODO: create method extend on epoch_tracker
-            let next_epoch = Epoch::new(current_epoch_index);
-            epoch_tracker
-                .lock()
-                .await
-                .insert(current_epoch_index, next_epoch);
+            epoch_tracker.create_epoch(current_epoch_index).await;
 
             info!(
                 "Timer is creating a new empty epoch at epoch index {}",
                 current_epoch_index
             );
 
-            let epoch_tracker_clone = Arc::clone(&epoch_tracker);
+            let epoch_tracker = epoch_tracker.clone();
             async_std::task::spawn(async move {
                 // wait for grace period
                 async_std::task::sleep(Duration::from_millis(EPOCH_GRACE_PERIOD)).await;
 
                 // get epoch from tracker and close
                 // TODO: turn into method on epoch_tracker: close_epoch(epoch_index)
-                epoch_tracker_clone
-                    .lock()
-                    .await
-                    .entry(old_epoch)
-                    .and_modify(|epoch| epoch.close());
+                epoch_tracker.close_epoch(old_epoch_index).await;
 
-                info!("Timer is closing randomness for epoch: {}", old_epoch);
+                info!("Timer is closing randomness for epoch: {}", old_epoch_index);
 
                 // TODO: remove the expired epoch so that tracker does not grow unbounded
             });

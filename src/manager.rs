@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::solver::SolverMessage;
+use crate::timer::EpochTracker;
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
 use console::AppState;
@@ -114,7 +115,7 @@ pub async fn run(
     main_to_main_tx: Sender<ProtocolMessage>,
     state_sender: crossbeam_channel::Sender<AppState>,
     timer_to_solver_tx: Sender<SolverMessage>,
-    epoch_tracker: timer::EpochTracker,
+    epoch_tracker: EpochTracker,
 ) {
     let protocol_listener = async {
         info!("Main protocol loop is running...");
@@ -146,8 +147,7 @@ pub async fn run(
             });
         } else {
             // create the initial epoch
-            let initial_epoch = timer::Epoch::new(0);
-            epoch_tracker.lock().await.insert(0, initial_epoch);
+            epoch_tracker.create_epoch(0).await;
         }
 
         'outer: loop {
@@ -226,18 +226,11 @@ pub async fn run(
                             ledger.current_epoch += 1;
 
                             // close the current epoch here and derive randomness
-                            epoch_tracker
-                                .lock()
-                                .await
-                                .entry(current_epoch)
-                                .and_modify(|epoch| epoch.close());
+                            epoch_tracker.close_epoch(current_epoch).await;
 
                             // create the new epoch
                             let new_epoch_index = ledger.current_epoch;
-                            epoch_tracker
-                                .lock()
-                                .await
-                                .insert(new_epoch_index, timer::Epoch::new(new_epoch_index));
+                            epoch_tracker.create_epoch(new_epoch_index).await;
 
                             info!(
                                 "Creating a new empty epoch during sync blocks for index {}",
@@ -311,12 +304,8 @@ pub async fn run(
                         // check that we have the randomness for the desired epoch
                         // then apply the block
 
-                        let randomness_epoch = epoch_tracker
-                            .lock()
-                            .await
-                            .get(&(block.proof.epoch - CHALLENGE_LOOKBACK))
-                            .unwrap()
-                            .clone();
+                        let randomness_epoch =
+                            epoch_tracker.get_loopback_epoch(block.proof.epoch).await;
 
                         if !randomness_epoch.is_closed {
                             warn!("Unable to apply block received via gossip, the randomness epoch is still open!");
