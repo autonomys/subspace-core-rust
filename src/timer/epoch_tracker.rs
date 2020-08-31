@@ -1,6 +1,7 @@
 use crate::timer::Epoch;
 use crate::BlockId;
 use crate::CHALLENGE_LOOKBACK;
+use crate::EPOCH_CLOSE_WAIT_TIME;
 use async_std::sync::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,7 +30,7 @@ impl EpochTracker {
             .clone()
     }
 
-    pub async fn get_loopback_epoch(&self, epoch_index: u64) -> Epoch {
+    pub async fn get_lookback_epoch(&self, epoch_index: u64) -> Epoch {
         self.get_epoch(epoch_index - CHALLENGE_LOOKBACK).await
     }
 
@@ -51,10 +52,10 @@ impl EpochTracker {
             .insert(current_epoch, Epoch::new(current_epoch));
 
         // Close epoch at lookback offset if it exists
-        if current_epoch >= CHALLENGE_LOOKBACK {
+        if current_epoch >= EPOCH_CLOSE_WAIT_TIME {
             inner
                 .epochs
-                .get_mut(&(current_epoch - CHALLENGE_LOOKBACK))
+                .get_mut(&(current_epoch - EPOCH_CLOSE_WAIT_TIME))
                 .unwrap()
                 .close();
         }

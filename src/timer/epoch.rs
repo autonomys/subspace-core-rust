@@ -10,9 +10,9 @@ use std::collections::HashMap;
 pub struct Epoch {
     /// has the randomness been derived and the epoch closed?
     pub is_closed: bool,
-    /// slot indices and vec of block ids, some will be empty, some one, some many
+    /// timeslot indices and vec of block ids, some will be empty, some one, some many
     timeslots: HashMap<u64, Vec<BlockId>>,
-    /// challenges derived from randomness at closure, one per slot
+    /// challenges derived from randomness at closure, one per timeslot
     challenges: Vec<SlotChallenge>,
     /// overall randomness for this epoch
     pub randomness: EpochChallenge,
@@ -47,6 +47,7 @@ impl Epoch {
     }
 
     pub fn get_challenge_for_timeslot(&self, timeslot: u64) -> SlotChallenge {
+        // TODO: this should panic if the epoch is still open
         let timeslot_index = timeslot % TIMESLOTS_PER_EPOCH;
         // TODO: No guarantee index exists
         self.challenges[timeslot_index as usize]
@@ -57,7 +58,7 @@ impl Epoch {
             self.timeslots
                 .values()
                 .flatten()
-                .fold([0u8; 32], |mut randomness, block_id| {
+                .fold(self.randomness, |mut randomness, block_id| {
                     utils::xor_bytes(&mut randomness, &block_id[..]);
                     randomness
                 });

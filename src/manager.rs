@@ -1,16 +1,16 @@
 #![allow(dead_code)]
 
 use super::*;
-use crate::solver::SolverMessage;
+use crate::farmer::FarmerMessage;
 use crate::timer::EpochTracker;
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
 use console::AppState;
+use farmer::Solution;
 use futures::join;
 use ledger::Block;
 use log::*;
 use network::NodeType;
-use solver::Solution;
 use std::fmt;
 use std::fmt::Display;
 use std::net::SocketAddr;
@@ -33,9 +33,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // TODO: Split this into multiple enums
 pub enum ProtocolMessage {
     /// On sync, main forwards block request to Net for tx from self to peer
-    BlocksRequest {
-        timeslot: u64,
-    },
+    BlocksRequest { timeslot: u64 },
     /// peer receives at Net and forwards request to main for fetch
     BlocksRequestFrom {
         node_addr: SocketAddr,
@@ -48,36 +46,22 @@ pub enum ProtocolMessage {
         timeslot: u64,
     },
     /// self receives at Net and forwards response back to Main
-    BlocksResponse {
-        blocks: Vec<Block>,
-        timeslot: u64,
-    },
+    BlocksResponse { blocks: Vec<Block>, timeslot: u64 },
     /// Net receives new full block, validates/applies, sends back to net for re-gossip
-    BlockProposalRemote {
-        block: Block,
-        peer_addr: SocketAddr,
-    },
+    BlockProposalRemote { block: Block, peer_addr: SocketAddr },
     /// A valid full block has been produced locally and needs to be gossiped
-    BlockProposalLocal {
-        block: Block,
-    },
+    BlockProposalLocal { block: Block },
     /// Solver sends a set of solutions back to main for application
-    BlockSolutions {
-        solutions: Vec<Solution>,
-    },
+    BlockSolutions { solutions: Vec<Solution> },
     BlockArrived {
         block: Block,
         peer_addr: SocketAddr,
         cached: bool,
     },
-    StartFarming,
-    StopFarming,
     /// Main sends a state update request to manager for console state
     StateUpdateRequest,
     /// Manager sends a state update response to main for console state
-    StateUpdateResponse {
-        state: AppState,
-    },
+    StateUpdateResponse { state: AppState },
 }
 
 impl Display for ProtocolMessage {
@@ -94,8 +78,6 @@ impl Display for ProtocolMessage {
                 Self::BlockProposalLocal { .. } => "BlockProposalLocal",
                 Self::BlockSolutions { .. } => "BlockSolutions",
                 Self::BlockArrived { .. } => "BlockArrived",
-                Self::StartFarming => "StartFarming",
-                Self::StopFarming => "StopFarming",
                 Self::StateUpdateRequest { .. } => "StateUpdateRequest",
                 Self::StateUpdateResponse { .. } => "StateUpdateResponse",
             }
@@ -110,9 +92,10 @@ pub async fn run(
     ledger: &mut ledger::Ledger,
     any_to_main_rx: Receiver<ProtocolMessage>,
     main_to_net_tx: Sender<ProtocolMessage>,
-    main_to_main_tx: Sender<ProtocolMessage>,
+    _main_to_main_tx: Sender<ProtocolMessage>,
+    main_to_farmer_Tx: Sender<FarmerMessage>,
     state_sender: crossbeam_channel::Sender<AppState>,
-    timer_to_solver_tx: Sender<SolverMessage>,
+    timer_to_solver_tx: Sender<FarmerMessage>,
     epoch_tracker: EpochTracker,
 ) {
     let protocol_listener = async {
@@ -136,6 +119,7 @@ pub async fn run(
                     epoch_tracker,
                     CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH as u64,
                     true,
+                    ledger.genesis_timestamp,
                 )
                 .await;
             });
@@ -239,58 +223,54 @@ pub async fn run(
                             continue;
                         }
 
-                        let block_arrival_time = Duration::from_millis(
-                            (block.proof.timeslot * TIMESLOT_DURATION)
-                                + ledger.genesis_timestamp as u64,
-                        );
+                        // let block_arrival_time = Duration::from_millis(
+                        //     (block.proof.timeslot * TIMESLOT_DURATION)
+                        //         + ledger.genesis_timestamp as u64,
+                        // );
 
-                        let time_now = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .expect("Time went backwards");
+                        // let time_now = SystemTime::now()
+                        //     .duration_since(UNIX_EPOCH)
+                        //     .expect("Time went backwards");
 
-                        let lower_bound = time_now - EPOCH_GRACE_PERIOD;
-                        let upper_bound = time_now + EPOCH_GRACE_PERIOD;
+                        // let lower_bound = time_now - EPOCH_GRACE_PERIOD;
+                        // let upper_bound = time_now + EPOCH_GRACE_PERIOD;
 
-                        if block_arrival_time < lower_bound {
-                            let wait_time = time_now - block_arrival_time;
-                            warn!("Received an early block via gossip, waiting {} ms for block arrival!", wait_time.as_millis());
+                        // if block_arrival_time < lower_bound {
+                        //     let wait_time = time_now - block_arrival_time;
+                        //     warn!("Received an early block via gossip, waiting {} ms for block arrival!", wait_time.as_millis());
 
-                            let sender = main_to_main_tx.clone();
-                            async_std::task::spawn(async move {
-                                async_std::task::sleep(wait_time).await;
-                                sender
-                                    .send(ProtocolMessage::BlockArrived {
-                                        block,
-                                        peer_addr,
-                                        cached: false,
-                                    })
-                                    .await;
-                            });
+                        //     let sender = main_to_main_tx.clone();
+                        //     async_std::task::spawn(async move {
+                        //         async_std::task::sleep(wait_time).await;
+                        //         sender
+                        //             .send(ProtocolMessage::BlockArrived {
+                        //                 block,
+                        //                 peer_addr,
+                        //                 cached: false,
+                        //             })
+                        //             .await;
+                        //     });
 
-                            continue;
-                        }
+                        //     continue;
+                        // }
 
-                        if block_arrival_time > upper_bound {
-                            // block is too late, ignore
-                            warn!("Received a late block via gossip, ignoring");
-                            continue;
-                        }
+                        // if block_arrival_time > upper_bound {
+                        //     // block is too late, ignore
+                        //     warn!("Received a late block via gossip, ignoring");
+                        //     continue;
+                        // }
 
                         // check that we have the randomness for the desired epoch
                         // then apply the block
 
                         let randomness_epoch =
-                            epoch_tracker.get_loopback_epoch(block.proof.epoch).await;
+                            epoch_tracker.get_lookback_epoch(block.proof.epoch).await;
 
                         if !randomness_epoch.is_closed {
                             warn!("Unable to apply block received via gossip, the randomness epoch is still open!");
                         }
 
-                        // TODO: if the timeslot is beyond the grace period, ignore the block
                         // TODO: important -- this may lead to forks if nodes are malicous
-                        // TODO: this means we need to support forks in some fashion
-
-                        // how do we know if we have to cache the block (if received during sync?)
 
                         // check if the block is valid and apply
                         if ledger.validate_and_apply_remote_block(block.clone()).await {

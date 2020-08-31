@@ -14,8 +14,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::thread;
 use std::{env, fs};
+use subspace_core_rust::farmer::FarmerMessage;
 use subspace_core_rust::pseudo_wallet::Wallet;
-use subspace_core_rust::solver::SolverMessage;
 use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::*;
 use tui_logger::{init_logger, set_default_level};
@@ -130,9 +130,10 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     // create channels between background tasks
     let (main_to_net_tx, main_to_net_rx) = channel::<ProtocolMessage>(32);
     let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(32);
-    let (timer_to_solver_tx, timer_to_solver_rx) = channel::<SolverMessage>(32);
+    let (timer_to_farmer_tx, timer_to_farmer_rx) = channel::<FarmerMessage>(32);
     let solver_to_main_tx = any_to_main_tx.clone();
     let main_to_main_tx = any_to_main_tx.clone();
+    let main_to_farmer_tx = timer_to_farmer_tx.clone();
 
     // manager loop
     let main = manager::run(
@@ -142,8 +143,9 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         any_to_main_rx,
         main_to_net_tx,
         main_to_main_tx,
+        main_to_farmer_tx,
         state_sender,
-        timer_to_solver_tx,
+        timer_to_farmer_tx,
         epoch_tracker,
     );
 
@@ -160,9 +162,9 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         // plot, slow...
         let plot = plotter::plot(path.into(), node_id, genesis_piece).await;
         // start solve loop
-        let solver = solver::run(timer_to_solver_rx, solver_to_main_tx, &plot);
+        let farmer = farmer::run(timer_to_farmer_rx, solver_to_main_tx, &plot);
 
-        join!(main, net, solver);
+        join!(main, net, farmer);
     } else {
         // listen and farm
         join!(main, net);

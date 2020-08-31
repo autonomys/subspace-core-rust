@@ -3,14 +3,14 @@
 use super::*;
 use ed25519_dalek::PublicKey;
 use ed25519_dalek::Signature;
+use farmer::Solution;
 use log::*;
 use network::NodeType;
 use serde::{Deserialize, Serialize};
-use solver::Solution;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 // use std::convert::TryInto;
-use crate::solver::SolverMessage;
+use crate::farmer::FarmerMessage;
 use crate::timer::EpochTracker;
 use async_std::sync::Sender;
 use std::fmt;
@@ -20,7 +20,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /* ToDo
  * ----
  *
- * Sync and apply blocks
  * Sync and farm blocks
  *
  * Make difficulty self-adjusting
@@ -229,14 +228,20 @@ impl Proof {
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct Content {
-    pub parent_ids: Vec<ContentId>, // ids of all parent blocks not yet seen
-    pub proof_id: ProofId,          // id of matching proof
-    pub proof_signature: Vec<u8>,   // signature of the proof with same public key
-    pub timestamp: u64,             // when this block was created (from Nodes local view)
+    /// ids of all parent blocks not yet seen
+    pub parent_ids: Vec<ContentId>,
+    /// id of matching proof
+    pub proof_id: ProofId,
+    /// signature of the proof with same public key        
+    pub proof_signature: Vec<u8>,
+    /// when this block was created (from Nodes local view)
+    pub timestamp: u64,
     // TODO: Should be a vec of TX IDs
-    pub tx_ids: Vec<u8>, // ids of all unseen transactions seen by this block
+    /// ids of all unseen transactions seen by this block
+    pub tx_ids: Vec<u8>,
     // TODO: account for farmers who sign the same proof with two different contents
-    pub signature: Vec<u8>, // signature of the content with same public key
+    /// signature of the content with same public key
+    pub signature: Vec<u8>,
 }
 
 impl Content {
@@ -265,8 +270,10 @@ impl Content {
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct Data {
-    pub encoding: Vec<u8>,     // the encoding of the piece with public key
-    pub merkle_proof: Vec<u8>, // merkle proof showing piece is in the ledger
+    /// the encoding of the piece with public key
+    pub encoding: Vec<u8>,
+    /// merkle proof showing piece is in the ledger
+    pub merkle_proof: Vec<u8>,
 }
 
 impl Data {
@@ -320,19 +327,25 @@ pub struct Ledger {
     pub confirmed_blocks_by_timeslot: HashMap<u64, Vec<BlockId>>,
     // TODO: add ordered confirmed_blocks_by_block_height
     pub cached_blocks_for_timeslot: BTreeMap<u64, Vec<BlockId>>,
-    balances: HashMap<[u8; 32], usize>, // the current balance of all accounts
+    /// the current balance of all accounts
+    balances: HashMap<[u8; 32], usize>,
     pub unseen_block_ids: HashSet<BlockId>,
     pub genesis_timestamp: u64,
     pub timer_is_running: bool,
 
     pub node_type: NodeType,
-    pub height: u32,          // current block height
-    pub quality: u32,         // aggregate quality for this chain
-    pub merkle_root: Vec<u8>, // only inlcuded for test ledger
+    /// current block height
+    pub height: u32,
+    /// aggregate quality for this chain         
+    pub quality: u32,
+    /// only inlcuded for test ledger      
+    pub merkle_root: Vec<u8>,
     pub genesis_piece_hash: [u8; 32],
     pub latest_block_hash: BlockId,
-    pub quality_threshold: u8, // current quality target
-    pub sloth: sloth::Sloth,   // a sloth instance for decoding (verifying) blocks
+    /// current quality target
+    pub quality_threshold: u8,
+    /// a sloth instance for decoding (verifying) blocks
+    pub sloth: sloth::Sloth,
     pub keys: ed25519_dalek::Keypair,
     pub tx_payload: Vec<u8>,
     pub merkle_proofs: Vec<Vec<u8>>,
@@ -833,7 +846,7 @@ impl Ledger {
     /// start the timer after syncing the ledger
     pub async fn start_timer_from_genesis_time(
         &mut self,
-        timer_to_solver_tx: Sender<SolverMessage>,
+        timer_to_farmer_tx: Sender<FarmerMessage>,
         is_farming: bool,
     ) {
         info!("Starting the timer from genesis time");
@@ -860,10 +873,11 @@ impl Ledger {
         let epoch_tracker = self.epoch_tracker.clone();
         async_std::task::spawn(async move {
             timer::run(
-                timer_to_solver_tx,
+                timer_to_farmer_tx,
                 epoch_tracker,
                 elapsed_timeslots as u64,
                 is_farming,
+                self.genesis_timestamp,
             )
             .await;
         });
