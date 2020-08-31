@@ -113,13 +113,14 @@ pub async fn run(
 
             let timer_to_solver_tx = timer_to_solver_tx.clone();
             let epoch_tracker = epoch_tracker.clone();
+            let genesis_timestamp = ledger.genesis_timestamp;
             async_std::task::spawn(async move {
                 timer::run(
                     timer_to_solver_tx,
                     epoch_tracker,
                     CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH as u64,
                     true,
-                    ledger.genesis_timestamp,
+                    genesis_timestamp,
                 )
                 .await;
             });

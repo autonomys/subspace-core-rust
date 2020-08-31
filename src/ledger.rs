@@ -232,7 +232,7 @@ pub struct Content {
     pub parent_ids: Vec<ContentId>,
     /// id of matching proof
     pub proof_id: ProofId,
-    /// signature of the proof with same public key        
+    /// signature of the proof with same public key
     pub proof_signature: Vec<u8>,
     /// when this block was created (from Nodes local view)
     pub timestamp: u64,
@@ -336,9 +336,9 @@ pub struct Ledger {
     pub node_type: NodeType,
     /// current block height
     pub height: u32,
-    /// aggregate quality for this chain         
+    /// aggregate quality for this chain
     pub quality: u32,
-    /// only inlcuded for test ledger      
+    /// only inlcuded for test ledger
     pub merkle_root: Vec<u8>,
     pub genesis_piece_hash: [u8; 32],
     pub latest_block_hash: BlockId,
@@ -871,13 +871,14 @@ impl Ledger {
         async_std::task::sleep(Duration::from_millis(time_to_next_timeslot)).await;
         elapsed_timeslots += 1;
         let epoch_tracker = self.epoch_tracker.clone();
+        let genesis_timestamp = self.genesis_timestamp;
         async_std::task::spawn(async move {
             timer::run(
                 timer_to_farmer_tx,
                 epoch_tracker,
                 elapsed_timeslots as u64,
                 is_farming,
-                self.genesis_timestamp,
+                genesis_timestamp,
             )
             .await;
         });

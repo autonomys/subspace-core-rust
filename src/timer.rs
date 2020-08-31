@@ -28,13 +28,19 @@ pub async fn run(
     let mut current_epoch_index = epoch_tracker.get_current_epoch().await;
     let mut current_timeslot = initial_timeslot;
 
-    // marker = Instant::now
-    // Determine elapsed time between now and genesis_timestamp -> marker -= Duration::since(genesis_timestamp)
-    // call marker.elapsed()
+    let genesis_instant =
+        Instant::now() - (UNIX_EPOCH.elapsed().unwrap() - Duration::from_millis(genesis_timestamp));
 
     // advance through timeslot on set interval
     let mut interval = stream::interval(Duration::from_millis(TIMESLOT_DURATION));
-    while interval.next().await.is_some() {
+    loop {
+        async_std::task::sleep(
+            (current_epoch_index as u32 * EPOCH_DURATION)
+                .checked_sub(genesis_instant.elapsed())
+                .unwrap_or_default(),
+        )
+        .await;
+
         warn!("Timer has arrived on timeslot: {}", current_timeslot);
         let epoch = epoch_tracker.get_lookback_epoch(current_epoch_index).await;
 
