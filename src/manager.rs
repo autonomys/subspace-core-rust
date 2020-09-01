@@ -5,10 +5,10 @@ use crate::farmer::FarmerMessage;
 use crate::timer::EpochTracker;
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
+use block::Block;
 use console::AppState;
 use farmer::Solution;
 use futures::join;
-use ledger::Block;
 use log::*;
 use network::NodeType;
 use std::fmt;
@@ -211,7 +211,7 @@ pub async fn run(
                         );
                         let block_id = block.get_id();
 
-                        if ledger.metablocks.contains_key(&block_id) {
+                        if ledger.blocks.contains_key(&block_id) {
                             info!("Received a block proposal via gossip for known block, ignoring");
                             continue;
                         }

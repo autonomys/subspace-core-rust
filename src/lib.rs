@@ -5,6 +5,7 @@ use async_std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::time::Duration;
 
+pub mod block;
 pub mod console;
 pub mod crypto;
 pub mod farmer;
@@ -44,7 +45,6 @@ pub const ENCODING_LAYERS_TEST: usize = 1;
 pub const ENCODING_LAYERS_PROD: usize = BLOCKS_PER_ENCODING;
 pub const PLOT_UPDATE_INTERVAL: usize = 10000;
 pub const MAX_PEERS: usize = 8;
-pub const INITIAL_QUALITY_THRESHOLD: u8 = 0;
 pub const CONFIRMATION_DEPTH: usize = 6;
 pub const DEV_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";

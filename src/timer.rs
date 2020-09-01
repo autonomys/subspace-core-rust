@@ -65,10 +65,10 @@ pub async fn run(
         if current_timeslot % TIMESLOTS_PER_EPOCH == 0 {
             current_epoch_index = epoch_tracker.advance_epoch().await;
 
-            // info!(
-            //     "Timer is creating a new empty epoch at index {}",
-            //     current_epoch_index
-            // );
+            debug!(
+                "Timer is creating a new empty epoch at index {}",
+                current_epoch_index
+            );
         }
     }
 }

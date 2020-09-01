@@ -1,32 +1,22 @@
 #![allow(dead_code)]
 
 use super::*;
-use ed25519_dalek::PublicKey;
-use ed25519_dalek::Signature;
-use farmer::Solution;
-use log::*;
-use network::NodeType;
-use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
-// use std::convert::TryInto;
 use crate::farmer::FarmerMessage;
 use crate::timer::EpochTracker;
 use async_std::sync::Sender;
-use std::fmt;
-use std::fmt::Display;
+use block::{Block, Content, Data, Proof};
+use farmer::Solution;
+use log::*;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /* ToDo
  * ----
  *
- * Sync and farm blocks
- *
  * Make difficulty self-adjusting
  * Track chain quality
  * Track parent links to order blocks and transactions
  *
- * Node should not gossip blocks that are too far into the future
  * Commits to the ledger should be atmoic (if we fail part way through)
  *
  * TESTING
@@ -39,323 +29,30 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
  *
 */
 
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
-pub struct Block {
-    pub proof: Proof,
-    pub content: Content,
-    pub data: Option<Data>,
-}
-
-impl Block {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap()
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
-        bincode::deserialize(bytes).map_err(|error| {
-            warn!("Failed to deserialize Block: {}", error);
-        })
-    }
-
-    pub fn get_id(&self) -> BlockId {
-        let mut pruned_block = self.clone();
-        pruned_block.prune();
-        crypto::digest_sha_256(&pruned_block.to_bytes())
-    }
-
-    pub fn is_valid(
-        &self,
-        merkle_root: &[u8],
-        genesis_piece_hash: &[u8; 32],
-        _epoch_randomness: &[u8; 32],
-        _slot_challenge: &[u8; 32],
-        sloth: &sloth::Sloth,
-    ) -> bool {
-        // ensure we have the auxillary data
-        if self.data.is_none() {
-            warn!("Invalid block, missing auxillary data!");
-            return false;
-        }
-
-        // does the content reference the correct proof?
-        if self.content.proof_id != self.proof.get_id() {
-            warn!("Invalid block, content and proof do not match!");
-            return false;
-        }
-
-        let public_key = PublicKey::from_bytes(&self.proof.public_key).unwrap();
-        let proof_signature = Signature::from_bytes(&self.content.proof_signature).unwrap();
-
-        // is the proof signature valid?
-        if public_key
-            .verify_strict(&self.proof.get_id(), &proof_signature)
-            .is_err()
-        {
-            warn!("Invalid block, proof signature is invalid!");
-            return false;
-        }
-
-        let content_signature = Signature::from_bytes(&self.content.signature).unwrap();
-        let mut content = self.content.clone();
-        content.signature.clear();
-
-        // is the content signature valid?
-        if public_key
-            .verify_strict(&content.get_id(), &content_signature)
-            .is_err()
-        {
-            warn!("Invalid block, content signature is invalid!");
-            return false;
-        }
-
-        // TODO: fix this
-        // // is the epoch challenge correct?
-        // if epoch_randomness != &self.proof.randomness {
-        //     warn!("Invalid block, epoch randomness is incorrect!");
-        //     return false;
-        // }
-
-        // is the tag within range of the slot challenge?
-        // let slot_seed = [
-        //     &epoch_randomness[..],
-        //     &self.proof.timeslot.to_le_bytes()[..],
-        // ]
-        // .concat();
-        // let slot_challenge = crypto::digest_sha_256_simple(&slot_seed);
-        // let target = u64::from_be_bytes(slot_challenge[0..8].try_into().unwrap());
-        // let (distance, _) = target.overflowing_sub(self.proof.tag);
-
-        // if distance > SOLUTION_RANGE {
-        //     warn!("Invalid block, solution does not meet the difficulty target!");
-        //     return false;
-        // }
-
-        // is the tag valid for the encoding and salt?
-        // let tag_hash = crypto::create_hmac(
-        //     &self.data.as_ref().unwrap().encoding,
-        //     &self.proof.nonce.to_le_bytes(),
-        // );
-        // let derived_tag = u64::from_le_bytes(tag_hash[0..8].try_into().unwrap());
-        // if derived_tag.cmp(&self.proof.tag) != Ordering::Equal {
-        //     warn!("Invalid block, tag is invalid");
-        //     return false;
-        // }
-
-        // TODO: is the timestamp within drift?
-
-        // is the merkle proof correct?
-        if !crypto::validate_merkle_proof(
-            self.proof.piece_index as usize,
-            &self.data.as_ref().unwrap().merkle_proof,
-            merkle_root,
-        ) {
-            warn!("Invalid block, merkle proof is invalid!");
-            return false;
-        }
-
-        // is the encoding valid for the public key and index?
-        let id = crypto::digest_sha_256(&self.proof.public_key);
-        let expanded_iv = crypto::expand_iv(id);
-        let layers = ENCODING_LAYERS_TEST;
-        let mut decoding = self.data.as_ref().unwrap().encoding.clone();
-
-        sloth.decode(decoding.as_mut(), expanded_iv, layers);
-
-        // subtract out the index when comparing to the genesis piece
-        let index_bytes = utils::usize_to_bytes(self.proof.piece_index as usize);
-        for i in 0..16 {
-            decoding[i] ^= index_bytes[i];
-        }
-
-        let decoding_hash = crypto::digest_sha_256(&decoding);
-        if genesis_piece_hash.cmp(&decoding_hash) != Ordering::Equal {
-            warn!("Invalid block, encoding is invalid");
-            // utils::compare_bytes(&proof.encoding, &proof.encoding, &decoding);
-            return false;
-        }
-
-        true
-    }
-
-    pub fn prune(&mut self) {
-        self.data = None;
-    }
-}
-
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
-pub struct Proof {
-    /// epoch challenge
-    pub randomness: ProofId,
-    /// epoch index
-    pub epoch: u64,
-    /// time slot
-    pub timeslot: u64,
-    /// farmers public key
-    pub public_key: [u8; 32],
-    /// hmac of encoding with a nonce
-    pub tag: Tag,
-    /// nonce for salting the tag
-    pub nonce: u128,
-    /// index of piece for encoding
-    pub piece_index: u64,
-}
-
-impl Proof {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap()
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
-        bincode::deserialize(bytes).map_err(|error| {
-            warn!("Failed to deserialize Proof: {}", error);
-        })
-    }
-
-    pub fn get_id(&self) -> ProofId {
-        crypto::digest_sha_256(&self.to_bytes())
-    }
-
-    pub fn is_valid() {
-        // is epoch challenge correct
-
-        // is the slot challenge correct (from epoch challenge)
-
-        // is the encoding correct
-
-        // is the tag correct
-    }
-}
-
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
-pub struct Content {
-    /// ids of all parent blocks not yet seen
-    pub parent_ids: Vec<ContentId>,
-    /// id of matching proof
-    pub proof_id: ProofId,
-    /// signature of the proof with same public key
-    pub proof_signature: Vec<u8>,
-    /// when this block was created (from Nodes local view)
-    pub timestamp: u64,
-    // TODO: Should be a vec of TX IDs
-    /// ids of all unseen transactions seen by this block
-    pub tx_ids: Vec<u8>,
-    // TODO: account for farmers who sign the same proof with two different contents
-    /// signature of the content with same public key
-    pub signature: Vec<u8>,
-}
-
-impl Content {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap()
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
-        bincode::deserialize(bytes).map_err(|error| {
-            warn!("Failed to deserialize Content: {}", error);
-        })
-    }
-
-    pub fn get_id(&self) -> ContentId {
-        crypto::digest_sha_256(&self.to_bytes())
-    }
-
-    pub fn is_valid() {
-        // is proof signature valid (requires public key)
-
-        // is timestamp valid
-
-        // is signature valid (requires public key)
-    }
-}
-
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
-pub struct Data {
-    /// the encoding of the piece with public key
-    pub encoding: Vec<u8>,
-    /// merkle proof showing piece is in the ledger
-    pub merkle_proof: Vec<u8>,
-}
-
-impl Data {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap()
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
-        bincode::deserialize(bytes).map_err(|error| {
-            warn!("Failed to deserialize Data: {}", error);
-        })
-    }
-}
-
-#[derive(PartialEq, Clone, Debug)]
-pub enum BlockState {
-    New,       // brand new block, generated locally or received via gossip
-    Arrived,   // deadline has arrived
-    Confirmed, // applied to the ledger w.h.p.
-    Stray,     // received over the network, cannot find parent
-}
-
-impl Display for BlockState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::New => "New",
-                Self::Arrived => "Arrived",
-                Self::Confirmed => "Confirmed",
-                Self::Stray => "Stray",
-            }
-        )
-    }
-}
-
-#[derive(PartialEq, Clone, Debug)]
-pub struct MetaBlock {
-    pub id: BlockId,            // hash of the block
-    pub block: Block,           // the block itself
-    pub state: BlockState,      // the state of the block
-    pub children: Vec<BlockId>, // child blocks, will grow quickly then be pruned down to one as confirmed
-}
-
-// TODO: Make some type of epoch tracker structure
-
 pub struct Ledger {
-    pub metablocks: HashMap<BlockId, MetaBlock>,
-    pub epoch_tracker: EpochTracker,
-    pub confirmed_blocks_by_timeslot: HashMap<u64, Vec<BlockId>>,
-    // TODO: add ordered confirmed_blocks_by_block_height
-    pub cached_blocks_for_timeslot: BTreeMap<u64, Vec<BlockId>>,
-    /// the current balance of all accounts
     balances: HashMap<[u8; 32], usize>,
-    pub unseen_block_ids: HashSet<BlockId>,
     pub genesis_timestamp: u64,
-    pub timer_is_running: bool,
-
-    pub node_type: NodeType,
-    /// current block height
-    pub height: u32,
-    /// aggregate quality for this chain
-    pub quality: u32,
-    /// only inlcuded for test ledger
-    pub merkle_root: Vec<u8>,
     pub genesis_piece_hash: [u8; 32],
-    pub latest_block_hash: BlockId,
-    /// current quality target
-    pub quality_threshold: u8,
-    /// a sloth instance for decoding (verifying) blocks
-    pub sloth: sloth::Sloth,
+    pub blocks: HashMap<BlockId, Block>,
+    pub unseen_block_ids: HashSet<BlockId>,
+    // TODO: add ordered confirmed_blocks_by_block_height
+    pub confirmed_blocks_by_timeslot: HashMap<u64, Vec<BlockId>>,
+    pub cached_blocks_for_timeslot: BTreeMap<u64, Vec<BlockId>>,
+    pub epoch_tracker: EpochTracker,
+    pub timer_is_running: bool,
+    pub height: u32,
+    pub quality: u32,
     pub keys: ed25519_dalek::Keypair,
-    pub tx_payload: Vec<u8>,
+    pub sloth: sloth::Sloth,
+    pub merkle_root: Vec<u8>,
     pub merkle_proofs: Vec<Vec<u8>>,
+    pub tx_payload: Vec<u8>,
 }
 
 impl Ledger {
     pub fn new(
         merkle_root: Vec<u8>,
         genesis_piece_hash: [u8; 32],
-        node_type: NodeType,
         keys: ed25519_dalek::Keypair,
         tx_payload: Vec<u8>,
         merkle_proofs: Vec<Vec<u8>>,
@@ -366,7 +63,7 @@ impl Ledger {
         let sloth = sloth::Sloth::init(prime_size);
 
         Ledger {
-            metablocks: HashMap::new(),
+            blocks: HashMap::new(),
             epoch_tracker,
             confirmed_blocks_by_timeslot: HashMap::new(),
             cached_blocks_for_timeslot: BTreeMap::new(),
@@ -374,13 +71,10 @@ impl Ledger {
             genesis_timestamp: 0,
             timer_is_running: false,
             balances: HashMap::new(),
-            node_type,
             height: 0,
             quality: 0,
             merkle_root,
             genesis_piece_hash,
-            latest_block_hash: genesis_piece_hash,
-            quality_threshold: INITIAL_QUALITY_THRESHOLD,
             sloth,
             keys,
             tx_payload,
@@ -395,7 +89,7 @@ impl Ledger {
             .map(|blocks| {
                 blocks
                     .iter()
-                    .map(|block_id| self.metablocks.get(block_id).unwrap().block.clone())
+                    .map(|block_id| self.blocks.get(block_id).unwrap().clone())
                     .collect()
             })
             .unwrap_or_default()
@@ -481,15 +175,7 @@ impl Ledger {
         let block_id = block.get_id();
         let mut pruned_block = block.clone();
         pruned_block.prune();
-        self.metablocks.insert(
-            block_id,
-            MetaBlock {
-                id: block_id,
-                block: pruned_block,
-                state: BlockState::Confirmed,
-                children: Vec::new(),
-            },
-        );
+        self.blocks.insert(block_id, pruned_block);
 
         // update height
         self.height += 1;
@@ -555,15 +241,7 @@ impl Ledger {
 
                 let mut pruned_block = block.clone();
                 pruned_block.prune();
-                self.metablocks.insert(
-                    block_id,
-                    MetaBlock {
-                        id: block_id,
-                        block: pruned_block,
-                        state: BlockState::Confirmed,
-                        children: Vec::new(),
-                    },
-                );
+                self.blocks.insert(block_id, pruned_block);
                 // TODO: update chain quality
                 // update balances, get or add account
                 self.balances
@@ -596,15 +274,7 @@ impl Ledger {
     pub fn cache_remote_block(&mut self, block: Block) {
         // cache the block
         let block_id = block.get_id();
-        self.metablocks.insert(
-            block_id,
-            MetaBlock {
-                id: block_id,
-                block: block.clone(),
-                state: BlockState::Stray,
-                children: Vec::new(),
-            },
-        );
+        self.blocks.insert(block_id, block.clone());
 
         // add to cached blocks tracker
         self.cached_blocks_for_timeslot
@@ -616,7 +286,7 @@ impl Ledger {
     /// validate and apply a block received via gossip
     pub async fn validate_and_apply_remote_block(&mut self, block: Block) -> bool {
         let randomness_epoch_index = block.proof.epoch - CHALLENGE_LOOKBACK;
-        let challenge_timeslot = block.proof.timeslot;
+        let challenge_timeslot = block.proof.timeslot - CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH;
         info!(
             "Validating and applying block for epoch: {} at timeslot {}",
             randomness_epoch_index, challenge_timeslot
@@ -651,15 +321,7 @@ impl Ledger {
         let mut pruned_block = block.clone();
         pruned_block.prune();
 
-        self.metablocks.insert(
-            block_id,
-            MetaBlock {
-                id: block_id,
-                block: pruned_block,
-                state: BlockState::Confirmed,
-                children: Vec::new(),
-            },
-        );
+        self.blocks.insert(block_id, pruned_block);
         // TODO: update chain quality
         // update balances, get or add account
         self.balances
@@ -690,15 +352,7 @@ impl Ledger {
             self.genesis_timestamp = block.content.timestamp;
         }
         let block_id = block.get_id();
-        self.metablocks.insert(
-            block_id,
-            MetaBlock {
-                id: block_id,
-                block: block.clone(),
-                state: BlockState::Confirmed,
-                children: Vec::new(),
-            },
-        );
+        self.blocks.insert(block_id, block.clone());
 
         // check if the block is in pending gossip and remove
         {
@@ -787,15 +441,7 @@ impl Ledger {
         let mut pruned_block = block.clone();
         pruned_block.prune();
 
-        self.metablocks.insert(
-            block_id,
-            MetaBlock {
-                id: block_id,
-                block: pruned_block,
-                state: BlockState::Confirmed,
-                children: Vec::new(),
-            },
-        );
+        self.blocks.insert(block_id, pruned_block);
         // TODO: update chain quality
         // update balances, get or add account
         self.balances
@@ -816,7 +462,7 @@ impl Ledger {
         for current_timeslot in timeslot.. {
             if let Some(block_ids) = self.cached_blocks_for_timeslot.remove(&current_timeslot) {
                 for block_id in block_ids.iter() {
-                    let cached_block = self.metablocks.get(block_id).unwrap().block.clone();
+                    let cached_block = self.blocks.get(block_id).unwrap().clone();
                     if !self.validate_and_apply_cached_block(cached_block).await {
                         return false;
                     }
@@ -851,12 +497,7 @@ impl Ledger {
     ) {
         info!("Starting the timer from genesis time");
         let genesis_block_id: BlockId = self.confirmed_blocks_by_timeslot.get(&0).unwrap()[0];
-        let genesis_block = self
-            .metablocks
-            .get(&genesis_block_id)
-            .unwrap()
-            .clone()
-            .block;
+        let genesis_block = self.blocks.get(&genesis_block_id).unwrap().clone();
         let genesis_time = genesis_block.content.timestamp as u64;
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)

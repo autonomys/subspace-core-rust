@@ -14,7 +14,7 @@ use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
 use futures::SinkExt;
 use futures::StreamExt;
-// use log::*;
+use log::*;
 use rocksdb::IteratorMode;
 use rocksdb::DB;
 use std::convert::TryInto;
@@ -215,10 +215,10 @@ impl Plot {
                                     let (upper, is_upper_overflowed) =
                                         target.overflowing_add(range);
 
-                                    // info!(
-                                    //     "Lower overflow: {} -- Upper overflow: {}",
-                                    //     is_lower_overflowed, is_upper_overflowed
-                                    // );
+                                    debug!(
+                                        "Lower overflow: {} -- Upper overflow: {}",
+                                        is_lower_overflowed, is_upper_overflowed
+                                    );
 
                                     if is_lower_overflowed || is_upper_overflowed {
                                         iter.seek_to_first();

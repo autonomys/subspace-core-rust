@@ -118,7 +118,6 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     let mut ledger = ledger::Ledger::new(
         merkle_root,
         genesis_piece_hash,
-        node_type,
         keys,
         tx_payload,
         merkle_proofs,
