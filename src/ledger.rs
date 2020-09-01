@@ -235,6 +235,25 @@ impl Ledger {
 
                 // from here, code is shared with validate_and_apply block
 
+                // get correct randomness for this block
+                let randomness_epoch_index = block.proof.epoch - CHALLENGE_LOOKBACK;
+                let epoch = self.epoch_tracker.get_epoch(randomness_epoch_index).await;
+                let challenge_timeslot =
+                    block.proof.timeslot - CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH;
+
+                if !epoch.is_closed {
+                    panic!("Epoch being used for randomness is still open!");
+                }
+
+                // check if the block is valid
+                block.is_valid(
+                    &self.merkle_root,
+                    &self.genesis_piece_hash,
+                    &epoch.randomness,
+                    &epoch.get_challenge_for_timeslot(challenge_timeslot),
+                    &self.sloth,
+                );
+
                 let block_id = block.get_id();
                 self.unseen_block_ids.insert(block_id);
                 // apply the block to the ledger

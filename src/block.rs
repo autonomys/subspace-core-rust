@@ -36,19 +36,19 @@ impl Block {
         &self,
         merkle_root: &[u8],
         genesis_piece_hash: &[u8; 32],
-        _epoch_randomness: &[u8; 32],
+        epoch_randomness: &[u8; 32],
         slot_challenge: &[u8; 32],
         sloth: &sloth::Sloth,
     ) -> bool {
         // ensure we have the auxillary data
         if self.data.is_none() {
-            warn!("Invalid block, missing auxillary data!");
+            error!("Invalid block, missing auxillary data!");
             return false;
         }
 
         // does the content reference the correct proof?
         if self.content.proof_id != self.proof.get_id() {
-            warn!("Invalid block, content and proof do not match!");
+            error!("Invalid block, content and proof do not match!");
             return false;
         }
 
@@ -60,7 +60,7 @@ impl Block {
             .verify_strict(&self.proof.get_id(), &proof_signature)
             .is_err()
         {
-            warn!("Invalid block, proof signature is invalid!");
+            error!("Invalid block, proof signature is invalid!");
             return false;
         }
 
@@ -73,15 +73,15 @@ impl Block {
             .verify_strict(&content.get_id(), &content_signature)
             .is_err()
         {
-            warn!("Invalid block, content signature is invalid!");
+            error!("Invalid block, content signature is invalid!");
             return false;
         }
 
-        // // is the epoch challenge correct?
-        // if epoch_randomness != &self.proof.randomness {
-        //     warn!("Invalid block, epoch randomness is incorrect!");
-        //     return false;
-        // }
+        // is the epoch challenge correct?
+        if epoch_randomness != &self.proof.randomness {
+            error!("Invalid block, epoch randomness is incorrect!");
+            return false;
+        }
 
         // is the tag within range of the slot challenge?
         // let slot_seed = [
@@ -92,23 +92,23 @@ impl Block {
         // let slot_challenge = crypto::digest_sha_256_simple(&slot_seed);
 
         let target = u64::from_be_bytes(slot_challenge[0..8].try_into().unwrap());
-        let (_distance, _) = target.overflowing_sub(self.proof.tag);
+        let (distance, _) = target.overflowing_sub(self.proof.tag);
 
-        // if distance > SOLUTION_RANGE {
-        //     warn!("Invalid block, solution does not meet the difficulty target!");
-        //     return false;
-        // }
+        if distance > SOLUTION_RANGE {
+            error!("Invalid block, solution does not meet the difficulty target!");
+            return false;
+        }
 
-        // // is the tag valid for the encoding and salt?
-        // let tag_hash = crypto::create_hmac(
-        //     &self.data.as_ref().unwrap().encoding,
-        //     &self.proof.nonce.to_le_bytes(),
-        // );
-        // let derived_tag = u64::from_be_bytes(tag_hash[0..8].try_into().unwrap());
-        // if derived_tag.cmp(&self.proof.tag) != Ordering::Equal {
-        //     warn!("Invalid block, tag is invalid");
-        //     return false;
-        // }
+        // is the tag valid for the encoding and salt?
+        let tag_hash = crypto::create_hmac(
+            &self.data.as_ref().unwrap().encoding,
+            &self.proof.nonce.to_le_bytes(),
+        );
+        let derived_tag = u64::from_be_bytes(tag_hash[0..8].try_into().unwrap());
+        if derived_tag.cmp(&self.proof.tag) != Ordering::Equal {
+            error!("Invalid block, tag is invalid");
+            return false;
+        }
 
         // is the merkle proof correct?
         if !crypto::validate_merkle_proof(
@@ -116,7 +116,7 @@ impl Block {
             &self.data.as_ref().unwrap().merkle_proof,
             merkle_root,
         ) {
-            warn!("Invalid block, merkle proof is invalid!");
+            error!("Invalid block, merkle proof is invalid!");
             return false;
         }
 
@@ -151,6 +151,7 @@ impl Block {
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct Proof {
+    // TODO: should include parent proof id
     /// epoch challenge
     pub randomness: ProofId,
     /// epoch index
@@ -180,16 +181,6 @@ impl Proof {
 
     pub fn get_id(&self) -> ProofId {
         crypto::digest_sha_256(&self.to_bytes())
-    }
-
-    pub fn is_valid() {
-        // is epoch challenge correct
-
-        // is the slot challenge correct (from epoch challenge)
-
-        // is the encoding correct
-
-        // is the tag correct
     }
 }
 
@@ -224,14 +215,6 @@ impl Content {
 
     pub fn get_id(&self) -> ContentId {
         crypto::digest_sha_256(&self.to_bytes())
-    }
-
-    pub fn is_valid() {
-        // is proof signature valid (requires public key)
-
-        // is timestamp valid
-
-        // is signature valid (requires public key)
     }
 }
 
