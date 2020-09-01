@@ -14,7 +14,7 @@ use network::NodeType;
 use std::fmt;
 use std::fmt::Display;
 use std::net::SocketAddr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /*
  * Sync Workflow
@@ -92,8 +92,8 @@ pub async fn run(
     ledger: &mut ledger::Ledger,
     any_to_main_rx: Receiver<ProtocolMessage>,
     main_to_net_tx: Sender<ProtocolMessage>,
-    _main_to_main_tx: Sender<ProtocolMessage>,
-    main_to_farmer_Tx: Sender<FarmerMessage>,
+    main_to_main_tx: Sender<ProtocolMessage>,
+    _main_to_farmer_tx: Sender<FarmerMessage>,
     state_sender: crossbeam_channel::Sender<AppState>,
     timer_to_solver_tx: Sender<FarmerMessage>,
     epoch_tracker: EpochTracker,
@@ -224,42 +224,55 @@ pub async fn run(
                             continue;
                         }
 
-                        // let block_arrival_time = Duration::from_millis(
-                        //     (block.proof.timeslot * TIMESLOT_DURATION)
-                        //         + ledger.genesis_timestamp as u64,
-                        // );
+                        // TODO: this should be set once as a constant on ledger
+                        let genesis_instant = Instant::now()
+                            - (UNIX_EPOCH.elapsed().unwrap()
+                                - Duration::from_millis(ledger.genesis_timestamp));
 
-                        // let time_now = SystemTime::now()
-                        //     .duration_since(UNIX_EPOCH)
-                        //     .expect("Time went backwards");
+                        let block_arrival_time = Duration::from_millis(
+                            (block.proof.timeslot * TIMESLOT_DURATION) as u64,
+                        );
 
-                        // let lower_bound = time_now - EPOCH_GRACE_PERIOD;
-                        // let upper_bound = time_now + EPOCH_GRACE_PERIOD;
+                        let earliest_arrival_time = block_arrival_time - EPOCH_GRACE_PERIOD;
+                        let latest_arrival_time = block_arrival_time + EPOCH_GRACE_PERIOD;
 
-                        // if block_arrival_time < lower_bound {
-                        //     let wait_time = time_now - block_arrival_time;
-                        //     warn!("Received an early block via gossip, waiting {} ms for block arrival!", wait_time.as_millis());
+                        if genesis_instant.elapsed() < earliest_arrival_time {
+                            error!(
+                                "genesis instant {}, earliest arrival time {}",
+                                genesis_instant.elapsed().as_millis(),
+                                earliest_arrival_time.as_millis()
+                            );
 
-                        //     let sender = main_to_main_tx.clone();
-                        //     async_std::task::spawn(async move {
-                        //         async_std::task::sleep(wait_time).await;
-                        //         sender
-                        //             .send(ProtocolMessage::BlockArrived {
-                        //                 block,
-                        //                 peer_addr,
-                        //                 cached: false,
-                        //             })
-                        //             .await;
-                        //     });
+                            let wait_time = earliest_arrival_time - genesis_instant.elapsed();
+                            error!("Received an early block via gossip, waiting {} ms for block arrival!", wait_time.as_millis());
 
-                        //     continue;
-                        // }
+                            let sender = main_to_main_tx.clone();
+                            async_std::task::spawn(async move {
+                                async_std::task::sleep(
+                                    earliest_arrival_time
+                                        .checked_sub(genesis_instant.elapsed())
+                                        .unwrap_or_default(),
+                                )
+                                .await;
 
-                        // if block_arrival_time > upper_bound {
-                        //     // block is too late, ignore
-                        //     warn!("Received a late block via gossip, ignoring");
-                        //     continue;
-                        // }
+                                sender
+                                    .send(ProtocolMessage::BlockArrived {
+                                        block,
+                                        peer_addr,
+                                        cached: false,
+                                    })
+                                    .await;
+                            })
+                            .await;
+
+                            continue;
+                        }
+
+                        if block_arrival_time > latest_arrival_time {
+                            // block is too late, ignore
+                            error!("Received a late block via gossip, ignoring");
+                            continue;
+                        }
 
                         // check that we have the randomness for the desired epoch
                         // then apply the block
@@ -268,7 +281,7 @@ pub async fn run(
                             epoch_tracker.get_lookback_epoch(block.proof.epoch).await;
 
                         if !randomness_epoch.is_closed {
-                            warn!("Unable to apply block received via gossip, the randomness epoch is still open!");
+                            panic!("Unable to apply block received via gossip, the randomness epoch is still open!");
                         }
 
                         // TODO: important -- this may lead to forks if nodes are malicous

@@ -7,11 +7,9 @@ use super::*;
 use crate::farmer::FarmerMessage;
 pub use crate::timer::epoch::Epoch;
 pub use crate::timer::epoch_tracker::EpochTracker;
-use async_std::prelude::*;
-use async_std::stream;
 use async_std::sync::Sender;
 use log::*;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /* ToDo
  *
@@ -31,11 +29,10 @@ pub async fn run(
     let genesis_instant =
         Instant::now() - (UNIX_EPOCH.elapsed().unwrap() - Duration::from_millis(genesis_timestamp));
 
-    // advance through timeslot on set interval
-    let mut interval = stream::interval(Duration::from_millis(TIMESLOT_DURATION));
+    // advance through timeslots on set interval
     loop {
         async_std::task::sleep(
-            (current_epoch_index as u32 * EPOCH_DURATION)
+            (current_timeslot as u32 * Duration::from_millis(TIMESLOT_DURATION))
                 .checked_sub(genesis_instant.elapsed())
                 .unwrap_or_default(),
         )

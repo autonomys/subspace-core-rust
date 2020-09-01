@@ -26,7 +26,7 @@ impl Display for FarmerMessage {
             f,
             "{}",
             match self {
-                Self::SlotChallenge { .. } => "BlockChallenge",
+                Self::SlotChallenge { .. } => "SlotChallenge",
                 Self::StartFarming => "StartFarming",
                 Self::StopFarming => "StopFarming",
             }

@@ -51,10 +51,10 @@ pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const CONSOLE: bool = false;
 // TODO: build duration object here and only define once
 // TODO: add documentation on allowed parameters for time
-pub const TIMESLOT_DURATION: u64 = 1000;
+pub const TIMESLOT_DURATION: u64 = 100;
 pub const CHALLENGE_LOOKBACK: u64 = 10;
 pub const EPOCH_CLOSE_WAIT_TIME: u64 = 1;
-pub const TIMESLOTS_PER_EPOCH: u64 = 1;
+pub const TIMESLOTS_PER_EPOCH: u64 = 10;
 pub const EPOCH_GRACE_PERIOD: Duration =
     Duration::from_millis(TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION);
 pub const EPOCH_DURATION: Duration = Duration::from_millis(TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION);
