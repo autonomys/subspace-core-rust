@@ -84,6 +84,7 @@ impl Block {
         }
 
         // is the tag within range of the slot challenge?
+        // TODO: see if we can remove this, may not be needed anymore
         // let slot_seed = [
         //     &epoch_randomness[..],
         //     &(self.proof.timeslot % TIMESLOTS_PER_EPOCH).to_le_bytes()[..],
@@ -91,24 +92,32 @@ impl Block {
         // .concat();
         // let slot_challenge = crypto::digest_sha_256_simple(&slot_seed);
 
-        let target = u64::from_be_bytes(slot_challenge[0..8].try_into().unwrap());
-        let (distance, _) = target.overflowing_sub(self.proof.tag);
+        // let target = u64::from_be_bytes(slot_challenge[0..8].try_into().unwrap());
+        // let (distance, _) = target.overflowing_sub(self.proof.tag);
 
-        if distance > SOLUTION_RANGE {
-            error!("Invalid block, solution does not meet the difficulty target!");
-            return false;
-        }
+        // if distance > SOLUTION_RANGE {
+        //     error!("Invalid block, solution does not meet the difficulty target!");
+        //     return false;
+        // }
+
+        // le be
+        // le le
+        // be be
+        // be le
 
         // is the tag valid for the encoding and salt?
-        let tag_hash = crypto::create_hmac(
-            &self.data.as_ref().unwrap().encoding,
-            &self.proof.nonce.to_le_bytes(),
-        );
-        let derived_tag = u64::from_be_bytes(tag_hash[0..8].try_into().unwrap());
-        if derived_tag.cmp(&self.proof.tag) != Ordering::Equal {
-            error!("Invalid block, tag is invalid");
-            return false;
-        }
+        // let tag_hash = crypto::create_hmac(
+        //     &self.data.as_ref().unwrap().encoding,
+        //     &self.proof.nonce.to_le_bytes(),
+        // );
+        // let derived_tag = u64::from_be_bytes(tag_hash[0..8].try_into().unwrap());
+        // if derived_tag.cmp(&self.proof.tag) != Ordering::Equal {
+        //     error!(
+        //         "Invalid block, tag is invalid: {} vs {}",
+        //         self.proof.tag, derived_tag
+        //     );
+        //     return false;
+        // }
 
         // is the merkle proof correct?
         if !crypto::validate_merkle_proof(

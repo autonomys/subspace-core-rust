@@ -54,9 +54,22 @@ pub const CONSOLE: bool = false;
 // TODO: add documentation on allowed parameters for time
 pub const TIMESLOT_DURATION: u64 = 1000;
 pub const CHALLENGE_LOOKBACK: u64 = 4;
+// pub const EPOCH_CLOSE_WAIT_TIME: u64 = CHALLENGE_LOOKBACK - 2;
 pub const EPOCH_CLOSE_WAIT_TIME: u64 = 1;
+
 pub const TIMESLOTS_PER_EPOCH: u64 = 1;
 pub const EPOCH_GRACE_PERIOD: Duration =
     Duration::from_millis(TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION);
 pub const EPOCH_DURATION: Duration = Duration::from_millis(TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION);
-pub const SOLUTION_RANGE: u64 = std::u64::MAX / PLOT_SIZE as u64 / (2);
+pub const SOLUTION_RANGE: u64 = std::u64::MAX / PLOT_SIZE as u64 * 2 / 2;
+
+// range = +/- 2^64 / number of encodings / 2
+// this will lead to one block per timeslot o.a.
+// if the number of blocks increases the range should get smaller
+// for each doubling of the space pledged the number of blocks will double
+// if the number of blocks decreases the range should get wider
+// for each halving of the psace pledged, the number of blocks will halve
+// an eon is 2048 blocks
+// we count the number of blocks for each eon
+// if the number of blocks is too high we decrease the range
+// if the number of blocks is too low we increase the range

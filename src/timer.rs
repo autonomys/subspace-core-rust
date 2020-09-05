@@ -22,6 +22,8 @@ pub async fn run(
     is_farming: bool,
     genesis_timestamp: u64,
 ) {
+    info!("Starting timer...");
+
     // set initial values
     let mut current_epoch_index = epoch_tracker.get_current_epoch().await;
     let mut current_timeslot = initial_timeslot;

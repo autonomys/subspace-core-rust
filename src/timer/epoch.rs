@@ -4,6 +4,7 @@ use crate::BlockId;
 use crate::EpochChallenge;
 use crate::SlotChallenge;
 use crate::TIMESLOTS_PER_EPOCH;
+use log::*;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -32,18 +33,16 @@ impl Epoch {
     }
 
     /// Returns `true` in case no blocks for this timeslot existed before
-    pub(super) fn add_block_to_timeslot(&mut self, timeslot: u64, block_id: BlockId) -> bool {
+    pub(super) fn add_block_to_timeslot(&mut self, timeslot: u64, block_id: BlockId) {
         let timeslot_index = timeslot % TIMESLOTS_PER_EPOCH;
-        let mut new_timeslot = true;
         self.timeslots
             .entry(timeslot_index)
             .and_modify(|list| {
                 list.push(block_id);
-                new_timeslot = false;
             })
             .or_insert_with(|| vec![block_id]);
 
-        new_timeslot
+        // warn!("{:?}", self);
     }
 
     pub fn get_challenge_for_timeslot(&self, timeslot: u64) -> SlotChallenge {

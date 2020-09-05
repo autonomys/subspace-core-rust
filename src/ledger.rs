@@ -107,6 +107,7 @@ impl Ledger {
 
         for _ in 0..CHALLENGE_LOOKBACK {
             let current_epoch = self.epoch_tracker.advance_epoch().await;
+            info!("Advanced to epoch {} during genesis init", current_epoch);
 
             for current_timeslot in (0..TIMESLOTS_PER_EPOCH)
                 .map(|timeslot_index| timeslot_index + current_epoch * TIMESLOTS_PER_EPOCH)
@@ -236,10 +237,13 @@ impl Ledger {
                 // from here, code is shared with validate_and_apply block
 
                 // get correct randomness for this block
-                let randomness_epoch_index = block.proof.epoch - CHALLENGE_LOOKBACK;
-                let epoch = self.epoch_tracker.get_epoch(randomness_epoch_index).await;
-                let challenge_timeslot =
-                    block.proof.timeslot - CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH;
+                let epoch = self
+                    .epoch_tracker
+                    .get_lookback_epoch(block.proof.epoch)
+                    .await;
+
+                // let challenge_timeslot =
+                //     block.proof.timeslot - CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH;
 
                 if !epoch.is_closed {
                     panic!("Epoch being used for randomness is still open!");
@@ -250,7 +254,7 @@ impl Ledger {
                     &self.merkle_root,
                     &self.genesis_piece_hash,
                     &epoch.randomness,
-                    &epoch.get_challenge_for_timeslot(challenge_timeslot),
+                    &epoch.get_challenge_for_timeslot(block.proof.timeslot),
                     &self.sloth,
                 );
 
@@ -274,6 +278,8 @@ impl Ledger {
                     .or_insert(vec![block_id]);
 
                 // TODO: collect all blocks for a slot, then order blocks, then order tx
+
+                warn!("Adding block to epoch during create and apply local block");
 
                 // update the epoch for this block
                 self.epoch_tracker
@@ -304,15 +310,16 @@ impl Ledger {
 
     /// validate and apply a block received via gossip
     pub async fn validate_and_apply_remote_block(&mut self, block: Block) -> bool {
-        let randomness_epoch_index = block.proof.epoch - CHALLENGE_LOOKBACK;
-        let challenge_timeslot = block.proof.timeslot - CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH;
         info!(
             "Validating and applying block for epoch: {} at timeslot {}",
-            randomness_epoch_index, challenge_timeslot
+            block.proof.epoch, block.proof.timeslot
         );
 
         // get correct randomness for this block
-        let epoch = self.epoch_tracker.get_epoch(randomness_epoch_index).await;
+        let epoch = self
+            .epoch_tracker
+            .get_lookback_epoch(block.proof.epoch)
+            .await;
 
         if !epoch.is_closed {
             panic!("Epoch being used for randomness is still open!");
@@ -323,7 +330,7 @@ impl Ledger {
             &self.merkle_root,
             &self.genesis_piece_hash,
             &epoch.randomness,
-            &epoch.get_challenge_for_timeslot(challenge_timeslot),
+            &epoch.get_challenge_for_timeslot(block.proof.timeslot),
             &self.sloth,
         ) {
             return false;
