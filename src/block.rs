@@ -91,24 +91,20 @@ impl Block {
             return false;
         }
 
-        // le be
-        // le le
-        // be be
-        // be le
-
         // is the tag valid for the encoding and salt?
-        // let tag_hash = crypto::create_hmac(
-        //     &self.data.as_ref().unwrap().encoding,
-        //     &self.proof.nonce.to_le_bytes(),
-        // );
-        // let derived_tag = u64::from_be_bytes(tag_hash[0..8].try_into().unwrap());
-        // if derived_tag.cmp(&self.proof.tag) != Ordering::Equal {
-        //     error!(
-        //         "Invalid block, tag is invalid: {} vs {}",
-        //         self.proof.tag, derived_tag
-        //     );
-        //     return false;
-        // }
+        let derived_tag = crypto::create_hmac(
+            &self.data.as_ref().unwrap().encoding,
+            &self.proof.nonce.to_le_bytes(),
+        );
+        let derived_tag: Tag = derived_tag[0..8].try_into().unwrap();
+        if derived_tag != self.proof.tag {
+            error!(
+                "Invalid block, tag is invalid: {} vs {}",
+                hex::encode(&self.proof.tag),
+                hex::encode(&derived_tag)
+            );
+            return false;
+        }
 
         // is the merkle proof correct?
         if !crypto::validate_merkle_proof(
@@ -163,7 +159,7 @@ pub struct Proof {
     /// hmac of encoding with a nonce
     pub tag: Tag,
     /// nonce for salting the tag
-    pub nonce: u128,
+    pub nonce: u64,
     /// index of piece for encoding
     pub piece_index: u64,
 }

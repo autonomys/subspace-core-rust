@@ -8,6 +8,7 @@ use crate::{
 use async_std::sync::Sender;
 use log::{debug, info};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::convert::TryInto;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /* ToDo
@@ -118,7 +119,12 @@ impl Ledger {
                     timeslot: current_timeslot,
                     public_key: self.keys.public.to_bytes(),
                     tag: Tag::default(),
-                    nonce: 0,
+                    // TODO: Fix this
+                    nonce: u64::from_le_bytes(
+                        crypto::create_hmac(&[], b"subspace")[0..8]
+                            .try_into()
+                            .unwrap(),
+                    ),
                     piece_index: 0,
                 };
 
@@ -199,7 +205,12 @@ impl Ledger {
                     timeslot: solution.timeslot,
                     public_key: self.keys.public.to_bytes(),
                     tag: solution.tag,
-                    nonce: 0,
+                    // TODO: Fix this
+                    nonce: u64::from_le_bytes(
+                        crypto::create_hmac(&solution.encoding, b"subspace")[0..8]
+                            .try_into()
+                            .unwrap(),
+                    ),
                     piece_index: solution.piece_index,
                 };
                 let data = Data {
