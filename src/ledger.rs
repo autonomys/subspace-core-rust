@@ -265,13 +265,14 @@ impl Ledger {
         }
 
         // check if the block is valid
-        block.is_valid(
+        let is_valid = block.is_valid(
             &self.merkle_root,
             &self.genesis_piece_hash,
             &epoch.randomness,
             &epoch.get_challenge_for_timeslot(block.proof.timeslot),
             &self.sloth,
         );
+        assert!(is_valid, "Local block must always be valid");
 
         // apply the block to the ledger
         self.apply_block(&block).await;
