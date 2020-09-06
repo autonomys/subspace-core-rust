@@ -299,7 +299,8 @@ fn read_messages(mut stream: TcpStream) -> Receiver<Result<Message, ()>> {
                     // Copy unprocessed remainder from `buffer` to `aux_buffer`
                     aux_buffer
                         .as_mut()
-                        .write_all(&buffer[offset..buffer_contents_bytes]);
+                        .write_all(&buffer[offset..buffer_contents_bytes])
+                        .unwrap();
                     // Decrease useful contents length by processed amount
                     buffer_contents_bytes -= offset;
                     // Swap buffers to avoid additional copying
