@@ -41,7 +41,6 @@ pub struct Ledger {
     pub cached_blocks_for_timeslot: BTreeMap<u64, Vec<BlockId>>,
     pub epoch_tracker: EpochTracker,
     pub timer_is_running: bool,
-    pub height: u32,
     pub quality: u32,
     pub keys: ed25519_dalek::Keypair,
     pub sloth: sloth::Sloth,
@@ -72,7 +71,6 @@ impl Ledger {
             genesis_timestamp: 0,
             timer_is_running: false,
             balances: HashMap::new(),
-            height: 0,
             quality: 0,
             merkle_root,
             genesis_piece_hash,
@@ -178,18 +176,20 @@ impl Ledger {
     /// apply each genesis block to the ledger
     pub fn apply_genesis_block(&mut self, block: &Block, timeslot: u64) {
         let block_id = block.get_id();
-        let mut pruned_block = block.clone();
-        pruned_block.prune();
-        self.blocks.insert(block_id, pruned_block);
-
-        // update height
-        self.height += 1;
+        self.apply_block(block);
 
         // Adds a pointer to this block id for the given timeslot in the ledger
         self.confirmed_blocks_by_timeslot
             .entry(timeslot)
             .and_modify(|block_ids| block_ids.push(block_id))
             .or_insert(vec![block_id]);
+    }
+
+    fn apply_block(&mut self, block: &Block) {
+        let block_id = block.get_id();
+        let mut pruned_block = block.clone();
+        pruned_block.prune();
+        self.blocks.insert(block_id, pruned_block);
     }
 
     /// create a new block locally from a valid farming solution
@@ -271,9 +271,7 @@ impl Ledger {
                 self.unseen_block_ids.insert(block_id);
                 // apply the block to the ledger
 
-                let mut pruned_block = block.clone();
-                pruned_block.prune();
-                self.blocks.insert(block_id, pruned_block);
+                self.apply_block(&block);
                 // TODO: update chain quality
                 // update balances, get or add account
                 self.balances
@@ -352,11 +350,8 @@ impl Ledger {
         self.unseen_block_ids.insert(block_id);
         // apply the block to the ledger
 
-        // remove the block data
-        let mut pruned_block = block.clone();
-        pruned_block.prune();
+        self.apply_block(&block);
 
-        self.blocks.insert(block_id, pruned_block);
         // TODO: update chain quality
         // update balances, get or add account
         self.balances
@@ -472,11 +467,7 @@ impl Ledger {
         self.unseen_block_ids.insert(block_id);
         // apply the block to the ledger
 
-        // remove the block data
-        let mut pruned_block = block.clone();
-        pruned_block.prune();
-
-        self.blocks.insert(block_id, pruned_block);
+        self.apply_block(&block);
         // TODO: update chain quality
         // update balances, get or add account
         self.balances
@@ -557,11 +548,6 @@ impl Ledger {
         for (id, balance) in self.balances.iter() {
             info!("Account: {} \t {} \t credits", hex::encode(id), balance);
         }
-    }
-
-    pub fn get_block_height(&self) -> u32 {
-        // TODO: maybe this should be cached locally?
-        self.height
     }
 }
 

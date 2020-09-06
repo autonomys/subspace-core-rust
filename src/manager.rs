@@ -353,7 +353,7 @@ pub async fn run(
                         ProtocolMessage::StateUpdateResponse { mut state } => {
                             state.node_type = node_type.to_string();
                             state.peers = state.peers + "/" + &MAX_PEERS.to_string()[..];
-                            state.blocks = ledger.get_block_height().to_string();
+                            state.blocks = "TODO".to_string();
                             state.pieces = match node_type {
                                 NodeType::Gateway => PLOT_SIZE.to_string(),
                                 NodeType::Farmer => PLOT_SIZE.to_string(),
