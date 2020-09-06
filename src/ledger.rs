@@ -180,6 +180,8 @@ impl Ledger {
         pruned_block.prune();
         self.blocks.insert(block_id, pruned_block);
 
+        self.unseen_block_ids.insert(block_id);
+
         // Adds a pointer to this block id for the given timeslot in the ledger
         self.confirmed_blocks_by_timeslot
             .entry(block.proof.timeslot)
@@ -263,10 +265,9 @@ impl Ledger {
                 );
 
                 let block_id = block.get_id();
-                self.unseen_block_ids.insert(block_id);
                 // apply the block to the ledger
-
                 self.apply_block(&block);
+
                 // TODO: update chain quality
                 // update balances, get or add account
                 self.balances
@@ -337,9 +338,7 @@ impl Ledger {
 
         let block_id = block.get_id();
 
-        self.unseen_block_ids.insert(block_id);
         // apply the block to the ledger
-
         self.apply_block(&block);
 
         // TODO: update chain quality
@@ -361,13 +360,14 @@ impl Ledger {
         true
     }
 
+    // TODO: Where is validation???
     /// validate a block received via sync from another node
     pub async fn apply_block_from_sync(&mut self, block: Block) {
         if self.genesis_timestamp == 0 {
             self.genesis_timestamp = block.content.timestamp;
         }
         let block_id = block.get_id();
-        self.blocks.insert(block_id, block.clone());
+        self.apply_block(&block);
 
         // check if the block is in pending gossip and remove
         {
@@ -393,8 +393,6 @@ impl Ledger {
             self.unseen_block_ids.remove(parent_id);
         });
 
-        self.unseen_block_ids.insert(block_id);
-
         // if not a genesis block, count block reward
         if block.proof.randomness != self.genesis_piece_hash {
             // update balances, get or add account
@@ -403,11 +401,6 @@ impl Ledger {
                 .and_modify(|balance| *balance += 1)
                 .or_insert(1);
         }
-        // Adds a pointer to this block id for the given timelsot in the ledger
-        self.confirmed_blocks_by_timeslot
-            .entry(block.proof.timeslot)
-            .and_modify(|block_ids| block_ids.push(block_id))
-            .or_insert(vec![block_id]);
 
         info!(
             "Applied new block during sync at timeslot: {}",
@@ -447,12 +440,9 @@ impl Ledger {
 
         // TODO: from here on the code is shared with create_and_apply_local
 
-        let block_id = block.get_id();
-
-        self.unseen_block_ids.insert(block_id);
         // apply the block to the ledger
-
         self.apply_block(&block);
+
         // TODO: update chain quality
         // update balances, get or add account
         self.balances
