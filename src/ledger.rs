@@ -6,7 +6,7 @@ use crate::{
     TIMESLOT_DURATION,
 };
 use async_std::sync::Sender;
-use log::{debug, info};
+use log::info;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
