@@ -284,6 +284,7 @@ impl Ledger {
     pub fn cache_remote_block(&mut self, block: Block) {
         // cache the block
         let block_id = block.get_id();
+        // TODO: Does this need to be inserted here at all?
         self.blocks.insert(block_id, block.clone());
 
         // add to cached blocks tracker
