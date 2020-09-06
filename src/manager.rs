@@ -333,19 +333,11 @@ pub async fn run(
                             // }
                         }
                         ProtocolMessage::BlockSolutions { solutions } => {
-                            // TODO: split into two functions
-                            if solutions.is_empty() {
-                                ledger.create_and_apply_local_block(None).await;
-                            } else {
+                            if !solutions.is_empty() {
                                 for solution in solutions.into_iter() {
-                                    let block = ledger
-                                        .create_and_apply_local_block(Some(solution))
-                                        .await
-                                        .unwrap();
+                                    let block = ledger.create_and_apply_local_block(solution).await;
                                     main_to_net_tx
-                                        .send(ProtocolMessage::BlockProposalLocal {
-                                            block: block.clone(),
-                                        })
+                                        .send(ProtocolMessage::BlockProposalLocal { block })
                                         .await;
                                 }
                             }

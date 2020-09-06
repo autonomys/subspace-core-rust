@@ -190,107 +190,94 @@ impl Ledger {
     }
 
     /// create a new block locally from a valid farming solution
-    pub async fn create_and_apply_local_block(
-        &mut self,
-        solution: Option<Solution>,
-    ) -> Option<Block> {
-        match solution {
-            Some(solution) => {
-                let proof = Proof {
-                    randomness: solution.randomness,
-                    epoch: solution.epoch,
-                    timeslot: solution.timeslot,
-                    public_key: self.keys.public.to_bytes(),
-                    tag: solution.tag,
-                    // TODO: Fix this
-                    nonce: u64::from_le_bytes(
-                        crypto::create_hmac(&solution.encoding, b"subspace")[0..8]
-                            .try_into()
-                            .unwrap(),
-                    ),
-                    piece_index: solution.piece_index,
-                };
-                let data = Data {
-                    encoding: solution.encoding.to_vec(),
-                    merkle_proof: crypto::get_merkle_proof(
-                        solution.proof_index,
-                        &self.merkle_proofs,
-                    ),
-                };
-                let timestamp = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("Time went backwards")
-                    .as_millis() as u64;
-                // must get parents from the chain
-                // TODO: only get parents that are not at the same level
-                // TODO: create an empty vec then do memswap between unseen parent and unseen block ids
-                let unseen_parents: Vec<BlockId> = self.unseen_block_ids.drain().collect();
-                let mut content = Content {
-                    parent_ids: unseen_parents,
-                    proof_id: proof.get_id(),
-                    proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
-                    timestamp,
-                    tx_ids: self.tx_payload.clone(),
-                    signature: Vec::new(),
-                };
-                content.signature = self.keys.sign(&content.get_id()).to_bytes().to_vec();
-                let block = Block {
-                    proof,
-                    content,
-                    data: Some(data),
-                };
-
-                // from here, code is shared with validate_and_apply block
-
-                // get correct randomness for this block
-                let epoch = self
-                    .epoch_tracker
-                    .get_lookback_epoch(block.proof.epoch)
-                    .await;
-
-                // let challenge_timeslot =
-                //     block.proof.timeslot - CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH;
-
-                if !epoch.is_closed {
-                    panic!("Epoch being used for randomness is still open!");
-                }
-
-                // check if the block is valid
-                block.is_valid(
-                    &self.merkle_root,
-                    &self.genesis_piece_hash,
-                    &epoch.randomness,
-                    &epoch.get_challenge_for_timeslot(block.proof.timeslot),
-                    &self.sloth,
-                );
-
-                let block_id = block.get_id();
-                // apply the block to the ledger
-                self.apply_block(&block);
-
-                // TODO: update chain quality
-                // update balances, get or add account
-                self.balances
-                    .entry(crypto::digest_sha_256(&block.proof.public_key))
-                    .and_modify(|balance| *balance += 1)
-                    .or_insert(1);
-
-                // TODO: collect all blocks for a slot, then order blocks, then order tx
-
-                debug!("Adding block to epoch during create and apply local block");
-
-                // update the epoch for this block
-                self.epoch_tracker
-                    .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
-                    .await;
-
-                // info!("Applied block to ledger at timeslot: {}", solution.timeslot);
-                return Some(block);
-            }
-            None => {
-                return None;
-            }
+    pub async fn create_and_apply_local_block(&mut self, solution: Solution) -> Block {
+        let proof = Proof {
+            randomness: solution.randomness,
+            epoch: solution.epoch,
+            timeslot: solution.timeslot,
+            public_key: self.keys.public.to_bytes(),
+            tag: solution.tag,
+            // TODO: Fix this
+            nonce: u64::from_le_bytes(
+                crypto::create_hmac(&solution.encoding, b"subspace")[0..8]
+                    .try_into()
+                    .unwrap(),
+            ),
+            piece_index: solution.piece_index,
         };
+        let data = Data {
+            encoding: solution.encoding.to_vec(),
+            merkle_proof: crypto::get_merkle_proof(solution.proof_index, &self.merkle_proofs),
+        };
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as u64;
+        // must get parents from the chain
+        // TODO: only get parents that are not at the same level
+        // TODO: create an empty vec then do memswap between unseen parent and unseen block ids
+        let unseen_parents: Vec<BlockId> = self.unseen_block_ids.drain().collect();
+        let mut content = Content {
+            parent_ids: unseen_parents,
+            proof_id: proof.get_id(),
+            proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
+            timestamp,
+            tx_ids: self.tx_payload.clone(),
+            signature: Vec::new(),
+        };
+        content.signature = self.keys.sign(&content.get_id()).to_bytes().to_vec();
+        let block = Block {
+            proof,
+            content,
+            data: Some(data),
+        };
+
+        // from here, code is shared with validate_and_apply block
+
+        // get correct randomness for this block
+        let epoch = self
+            .epoch_tracker
+            .get_lookback_epoch(block.proof.epoch)
+            .await;
+
+        // let challenge_timeslot =
+        //     block.proof.timeslot - CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH;
+
+        if !epoch.is_closed {
+            panic!("Epoch being used for randomness is still open!");
+        }
+
+        // check if the block is valid
+        block.is_valid(
+            &self.merkle_root,
+            &self.genesis_piece_hash,
+            &epoch.randomness,
+            &epoch.get_challenge_for_timeslot(block.proof.timeslot),
+            &self.sloth,
+        );
+
+        let block_id = block.get_id();
+        // apply the block to the ledger
+        self.apply_block(&block);
+
+        // TODO: update chain quality
+        // update balances, get or add account
+        self.balances
+            .entry(crypto::digest_sha_256(&block.proof.public_key))
+            .and_modify(|balance| *balance += 1)
+            .or_insert(1);
+
+        // TODO: collect all blocks for a slot, then order blocks, then order tx
+
+        debug!("Adding block to epoch during create and apply local block");
+
+        // update the epoch for this block
+        self.epoch_tracker
+            .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
+            .await;
+
+        // info!("Applied block to ledger at timeslot: {}", solution.timeslot);
+        block
     }
 
     /// cache a block received via gossip ahead of the current epoch
