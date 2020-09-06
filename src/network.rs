@@ -1,15 +1,14 @@
-#![allow(dead_code)]
-
-use super::*;
+use crate::block::Block;
+use crate::manager::ProtocolMessage;
+use crate::{console, MAX_PEERS};
+use crate::{crypto, DEV_GATEWAY_ADDR};
 use async_std::net::{TcpListener, TcpStream};
 use async_std::prelude::*;
 use async_std::sync::{channel, Receiver, Sender};
-use block::Block;
 use bytes::buf::BufMutExt;
 use bytes::{Bytes, BytesMut};
 use futures::join;
 use log::*;
-use manager::ProtocolMessage;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -132,7 +131,6 @@ enum NetworkEvent {
 
 pub struct Router {
     node_id: NodeID,
-    node_type: NodeType,
     node_addr: SocketAddr,
     connections: HashMap<SocketAddr, Sender<Bytes>>,
     peers: HashSet<SocketAddr>,
@@ -140,10 +138,9 @@ pub struct Router {
 
 impl Router {
     /// create a new empty router
-    pub fn new(node_id: NodeID, node_type: NodeType, node_addr: SocketAddr) -> Router {
+    pub fn new(node_id: NodeID, node_addr: SocketAddr) -> Router {
         Router {
             node_id,
-            node_type,
             node_addr,
             connections: HashMap::new(),
             peers: HashSet::new(),
@@ -399,7 +396,7 @@ pub async fn run(
     // receives network messages from peers and protocol messages from manager
     // maintains an async channel between each open socket and sender half
     let broker_loop = async {
-        let mut router = Router::new(node_id, node_type, socket.local_addr().unwrap());
+        let mut router = Router::new(node_id, socket.local_addr().unwrap());
 
         while let Some(event) = broker_receiver.next().await {
             match event {

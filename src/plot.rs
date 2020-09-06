@@ -1,9 +1,4 @@
-#![allow(dead_code)]
-
-use super::*;
-
-use crate::Piece;
-use crate::PIECE_SIZE;
+use crate::{crypto, Piece, PIECE_SIZE};
 use async_std::fs::OpenOptions;
 use async_std::io::prelude::*;
 use async_std::path::PathBuf;
@@ -14,18 +9,14 @@ use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
 use futures::SinkExt;
 use futures::StreamExt;
-use log::*;
+use log::debug;
 use rocksdb::IteratorMode;
 use rocksdb::DB;
 use std::convert::TryInto;
 use std::io;
 use std::io::SeekFrom;
-use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
-
-const INDEX_LENGTH: usize = mem::size_of::<usize>();
-const OFFSET_LENGTH: usize = mem::size_of::<u64>();
 
 #[derive(Debug)]
 pub enum PlotCreationError {
@@ -76,7 +67,6 @@ pub struct Inner {
     any_requests_sender: Sender<()>,
     read_requests_sender: UnboundedSender<ReadRequests>,
     write_requests_sender: UnboundedSender<WriteRequests>,
-    update_interval: usize,
 }
 
 /* ToDo
@@ -373,13 +363,10 @@ impl Plot {
             }
         });
 
-        let update_interval = crate::PLOT_UPDATE_INTERVAL;
-
         let inner = Inner {
             any_requests_sender,
             read_requests_sender,
             write_requests_sender,
-            update_interval,
         };
 
         Ok(Plot {

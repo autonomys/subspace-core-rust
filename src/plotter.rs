@@ -1,7 +1,8 @@
-#![allow(dead_code)]
-
-use super::*;
 use crate::plot::Plot;
+use crate::{
+    crypto, sloth, utils, NodeID, Piece, CONSOLE, ENCODING_LAYERS_TEST, PIECE_SIZE, PLOT_SIZE,
+    PRIME_SIZE_BITS,
+};
 use async_std::path::PathBuf;
 use async_std::task;
 use indicatif::ProgressBar;

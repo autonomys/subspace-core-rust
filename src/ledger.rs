@@ -1,12 +1,12 @@
-#![allow(dead_code)]
-
-use super::*;
-use crate::farmer::FarmerMessage;
+use crate::block::{Block, Content, Data, Proof};
+use crate::farmer::{FarmerMessage, Solution};
 use crate::timer::EpochTracker;
+use crate::{
+    crypto, sloth, timer, BlockId, CHALLENGE_LOOKBACK, PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH,
+    TIMESLOT_DURATION,
+};
 use async_std::sync::Sender;
-use block::{Block, Content, Data, Proof};
-use farmer::Solution;
-use log::*;
+use log::{info, warn};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

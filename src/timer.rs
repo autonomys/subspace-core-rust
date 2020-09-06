@@ -1,19 +1,13 @@
-#![allow(dead_code)]
-
 mod epoch;
 mod epoch_tracker;
 
-use super::*;
 use crate::farmer::FarmerMessage;
 pub use crate::timer::epoch::Epoch;
 pub use crate::timer::epoch_tracker::EpochTracker;
+use crate::{CHALLENGE_LOOKBACK, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION};
 use async_std::sync::Sender;
 use log::*;
 use std::time::{Duration, Instant, UNIX_EPOCH};
-
-/* ToDo
- *
-*/
 
 pub async fn run(
     timer_to_farmer_tx: Sender<FarmerMessage>,

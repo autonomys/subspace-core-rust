@@ -1,12 +1,8 @@
-#![allow(dead_code)]
-
-use super::*;
-use ed25519_dalek::PublicKey;
-use ed25519_dalek::Signature;
-use log::*;
+use crate::{crypto, sloth, utils, BlockId, ContentId, ProofId, Tag, ENCODING_LAYERS_TEST};
+use ed25519_dalek::{PublicKey, Signature};
+use log::error;
+use log::warn;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
-use std::convert::TryInto;
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct Block {
@@ -144,7 +140,7 @@ impl Block {
         }
 
         let decoding_hash = crypto::digest_sha_256(&decoding);
-        if genesis_piece_hash.cmp(&decoding_hash) != Ordering::Equal {
+        if genesis_piece_hash != &decoding_hash {
             warn!("Invalid block, encoding is invalid");
             // utils::compare_bytes(&proof.encoding, &proof.encoding, &decoding);
             return false;

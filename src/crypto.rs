@@ -1,7 +1,4 @@
-#![allow(dead_code)]
-
-use super::*;
-use crate::{Piece, IV};
+use crate::{ExpandedIV, Piece, IV, IV_SIZE, PRIME_SIZE_BYTES};
 use ed25519_dalek::Keypair;
 use merkle_tree_binary::Tree;
 use rand::rngs::{OsRng, StdRng};

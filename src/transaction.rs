@@ -1,7 +1,5 @@
-#![allow(dead_code)]
-
-use super::*;
-use log::*;
+use crate::crypto;
+use log::error;
 use serde::{Deserialize, Serialize};
 
 pub type TxId = [u8; 32];

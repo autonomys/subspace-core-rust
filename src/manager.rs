@@ -1,16 +1,16 @@
-#![allow(dead_code)]
-
-use super::*;
-use crate::farmer::FarmerMessage;
+use crate::block::Block;
+use crate::console::AppState;
+use crate::farmer::{FarmerMessage, Solution};
+use crate::network::NodeType;
 use crate::timer::EpochTracker;
+use crate::{
+    ledger, timer, CHALLENGE_LOOKBACK, CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE,
+    TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+};
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
-use block::Block;
-use console::AppState;
-use farmer::Solution;
 use futures::join;
 use log::*;
-use network::NodeType;
 use std::fmt;
 use std::fmt::Display;
 use std::net::SocketAddr;
@@ -93,7 +93,6 @@ pub async fn run(
     any_to_main_rx: Receiver<ProtocolMessage>,
     main_to_net_tx: Sender<ProtocolMessage>,
     main_to_main_tx: Sender<ProtocolMessage>,
-    _main_to_farmer_tx: Sender<FarmerMessage>,
     state_sender: crossbeam_channel::Sender<AppState>,
     timer_to_solver_tx: Sender<FarmerMessage>,
     epoch_tracker: EpochTracker,
@@ -284,7 +283,7 @@ pub async fn run(
                             panic!("Unable to apply block received via gossip, the randomness epoch is still open!");
                         }
 
-                        // TODO: important -- this may lead to forks if nodes are malicous
+                        // TODO: important -- this may lead to forks if nodes are malicious
 
                         // check if the block is valid and apply
                         if ledger.validate_and_apply_remote_block(block.clone()).await {

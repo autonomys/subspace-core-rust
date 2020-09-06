@@ -4,7 +4,6 @@ use crate::BlockId;
 use crate::EpochChallenge;
 use crate::SlotChallenge;
 use crate::TIMESLOTS_PER_EPOCH;
-use log::*;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -41,8 +40,6 @@ impl Epoch {
                 list.push(block_id);
             })
             .or_insert_with(|| vec![block_id]);
-
-        // warn!("{:?}", self);
     }
 
     pub fn get_challenge_for_timeslot(&self, timeslot: u64) -> SlotChallenge {

@@ -1,10 +1,8 @@
-#![allow(dead_code)]
-
-use super::*;
+use crate::manager::ProtocolMessage;
 use crate::plot::Plot;
+use crate::{Piece, PIECE_COUNT, SOLUTION_RANGE};
 use async_std::sync::{Receiver, Sender};
-use log::*;
-use manager::ProtocolMessage;
+use log::info;
 use std::fmt;
 use std::fmt::Display;
 

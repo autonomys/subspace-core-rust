@@ -1,6 +1,4 @@
 #![feature(try_blocks)]
-#![allow(dead_code)]
-
 use async_std::sync::channel;
 use async_std::task;
 use console::AppState;
@@ -61,7 +59,7 @@ async fn main() {
         // run the console app in the foreground, passing the receiver
         console::run(state_receiver).unwrap();
     } else {
-        // TODO: fix default log level and occasinally print state to the console
+        // TODO: fix default log level and occasionally print state to the console
         env_logger::init();
         run(state_sender).await;
     }
@@ -132,7 +130,6 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     let (timer_to_farmer_tx, timer_to_farmer_rx) = channel::<FarmerMessage>(32);
     let solver_to_main_tx = any_to_main_tx.clone();
     let main_to_main_tx = any_to_main_tx.clone();
-    let main_to_farmer_tx = timer_to_farmer_tx.clone();
 
     // manager loop
     let main = manager::run(
@@ -142,7 +139,6 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         any_to_main_rx,
         main_to_net_tx,
         main_to_main_tx,
-        main_to_farmer_tx,
         state_sender,
         timer_to_farmer_tx,
         epoch_tracker,

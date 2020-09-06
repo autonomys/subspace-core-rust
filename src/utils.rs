@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use bitintr::Lzcnt;
 use num_bigint::{BigUint, ToBigUint};
 use num_traits::cast::ToPrimitive;
