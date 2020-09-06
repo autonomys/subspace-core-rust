@@ -191,6 +191,16 @@ impl Ledger {
             .or_insert(vec![block_id]);
 
         // TODO: update chain quality
+
+        // TODO: Why not genesis block is different?
+        // if not a genesis block, count block reward
+        if block.proof.randomness != self.genesis_piece_hash {
+            // update balances, get or add account
+            self.balances
+                .entry(crypto::digest_sha_256(&block.proof.public_key))
+                .and_modify(|balance| *balance += 1)
+                .or_insert(1);
+        }
     }
 
     /// create a new block locally from a valid farming solution
@@ -264,12 +274,6 @@ impl Ledger {
         // apply the block to the ledger
         self.apply_block(&block);
 
-        // update balances, get or add account
-        self.balances
-            .entry(crypto::digest_sha_256(&block.proof.public_key))
-            .and_modify(|balance| *balance += 1)
-            .or_insert(1);
-
         // TODO: collect all blocks for a slot, then order blocks, then order tx
 
         debug!("Adding block to epoch during create and apply local block");
@@ -332,12 +336,6 @@ impl Ledger {
         // apply the block to the ledger
         self.apply_block(&block);
 
-        // update balances, get or add account
-        self.balances
-            .entry(crypto::digest_sha_256(&block.proof.public_key))
-            .and_modify(|balance| *balance += 1)
-            .or_insert(1);
-
         // TODO: collect all blocks for a slot, then order blocks, then order tx
 
         // update the epoch for this block
@@ -382,15 +380,6 @@ impl Ledger {
             self.unseen_block_ids.remove(parent_id);
         });
 
-        // if not a genesis block, count block reward
-        if block.proof.randomness != self.genesis_piece_hash {
-            // update balances, get or add account
-            self.balances
-                .entry(crypto::digest_sha_256(&block.proof.public_key))
-                .and_modify(|balance| *balance += 1)
-                .or_insert(1);
-        }
-
         info!(
             "Applied new block during sync at timeslot: {}",
             block.proof.timeslot
@@ -431,12 +420,6 @@ impl Ledger {
 
         // apply the block to the ledger
         self.apply_block(&block);
-
-        // update balances, get or add account
-        self.balances
-            .entry(crypto::digest_sha_256(&block.proof.public_key))
-            .and_modify(|balance| *balance += 1)
-            .or_insert(1);
 
         true
     }
