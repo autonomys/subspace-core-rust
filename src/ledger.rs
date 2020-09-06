@@ -149,13 +149,9 @@ impl Ledger {
                 };
 
                 // apply the block to the ledger
-                self.apply_block(&block);
+                self.apply_block(&block).await;
 
                 parent_id = block.get_id();
-
-                self.epoch_tracker
-                    .add_block_to_epoch(current_epoch, current_timeslot, parent_id)
-                    .await;
 
                 info!(
                     "Applied a genesis block to ledger with id {}",
@@ -176,7 +172,7 @@ impl Ledger {
     }
 
     /// Apply block to the ledger
-    fn apply_block(&mut self, block: &Block) {
+    async fn apply_block(&mut self, block: &Block) {
         let block_id = block.get_id();
         let mut pruned_block = block.clone();
         pruned_block.prune();
@@ -201,6 +197,11 @@ impl Ledger {
                 .and_modify(|balance| *balance += 1)
                 .or_insert(1);
         }
+
+        // update the epoch for this block
+        self.epoch_tracker
+            .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
+            .await;
     }
 
     /// create a new block locally from a valid farming solution
@@ -270,18 +271,12 @@ impl Ledger {
             &self.sloth,
         );
 
-        let block_id = block.get_id();
         // apply the block to the ledger
-        self.apply_block(&block);
+        self.apply_block(&block).await;
 
         // TODO: collect all blocks for a slot, then order blocks, then order tx
 
         debug!("Adding block to epoch during create and apply local block");
-
-        // update the epoch for this block
-        self.epoch_tracker
-            .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
-            .await;
 
         // info!("Applied block to ledger at timeslot: {}", solution.timeslot);
         block
@@ -329,19 +324,10 @@ impl Ledger {
             return false;
         }
 
-        // TODO: from here on the code is shared with create_and_apply_local
-
-        let block_id = block.get_id();
-
         // apply the block to the ledger
-        self.apply_block(&block);
+        self.apply_block(&block).await;
 
         // TODO: collect all blocks for a slot, then order blocks, then order tx
-
-        // update the epoch for this block
-        self.epoch_tracker
-            .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
-            .await;
 
         // TODO: apply children of this block that were depending on it
 
@@ -356,7 +342,7 @@ impl Ledger {
         }
         let block_id = block.get_id();
         // apply the block to the ledger
-        self.apply_block(&block);
+        self.apply_block(&block).await;
 
         // check if the block is in pending gossip and remove
         {
@@ -384,11 +370,6 @@ impl Ledger {
             "Applied new block during sync at timeslot: {}",
             block.proof.timeslot
         );
-
-        // have to update the epoch and close on boundaries
-        self.epoch_tracker
-            .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
-            .await;
     }
 
     /// validate and apply a cached block from gossip after sycing the ledger
@@ -416,10 +397,8 @@ impl Ledger {
             return false;
         }
 
-        // TODO: from here on the code is shared with create_and_apply_local
-
         // apply the block to the ledger
-        self.apply_block(&block);
+        self.apply_block(&block).await;
 
         true
     }
