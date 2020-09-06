@@ -266,7 +266,7 @@ fn read_messages(mut stream: TcpStream) -> Receiver<Result<Message, ()>> {
 
     async_std::task::spawn(async move {
         let header_length = 2;
-        let max_message_length = 16 * 1024;
+        let max_message_length = 65 * 1024 - 1;
         // We support up to 16 kiB message + 2 byte header, so since we may have message across 2
         // read buffers, allocate enough space to contain up to 2 such messages
         let mut buffer = BytesMut::with_capacity((header_length + max_message_length) * 2);
