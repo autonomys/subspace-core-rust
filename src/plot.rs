@@ -1,4 +1,4 @@
-use crate::{crypto, Piece, PIECE_SIZE};
+use crate::{crypto, Piece, Tag, PIECE_SIZE};
 use async_std::fs::OpenOptions;
 use async_std::io::prelude::*;
 use async_std::path::PathBuf;
@@ -40,9 +40,9 @@ enum ReadRequests {
         result_sender: oneshot::Sender<io::Result<(u64, usize)>>,
     },
     FindByRange {
-        target: u64,
+        target: Tag,
         range: u64,
-        result_sender: oneshot::Sender<io::Result<Vec<(u64, usize)>>>,
+        result_sender: oneshot::Sender<io::Result<Vec<(Tag, usize)>>>,
     },
     GetKeys {
         result_sender: oneshot::Sender<io::Result<Vec<u64>>>,
@@ -198,12 +198,12 @@ impl Plot {
                                 move || {
                                     let mut iter = tags_db.raw_iterator();
 
-                                    let mut solutions: Vec<(u64, usize)> = Vec::new();
+                                    let mut solutions: Vec<(Tag, usize)> = Vec::new();
 
                                     let (lower, is_lower_overflowed) =
-                                        target.overflowing_sub(range);
+                                        u64::from_be_bytes(target).overflowing_sub(range);
                                     let (upper, is_upper_overflowed) =
-                                        target.overflowing_add(range);
+                                        u64::from_be_bytes(target).overflowing_add(range);
 
                                     debug!(
                                         "Lower overflow: {} -- Upper overflow: {}",
@@ -212,13 +212,10 @@ impl Plot {
 
                                     if is_lower_overflowed || is_upper_overflowed {
                                         iter.seek_to_first();
-                                        while iter.key().is_some() {
-                                            let tag = u64::from_be_bytes(
-                                                iter.key().unwrap().try_into().unwrap(),
-                                            );
+                                        while let Some(tag) = iter.key() {
+                                            let tag = tag.try_into().unwrap();
                                             let index = iter.value().unwrap();
-
-                                            if tag < upper {
+                                            if u64::from_be_bytes(tag) < lower {
                                                 solutions.push((
                                                     tag,
                                                     usize::from_le_bytes(index.try_into().unwrap()),
@@ -228,11 +225,9 @@ impl Plot {
                                                 break;
                                             }
                                         }
-                                        iter.seek(lower.to_be_bytes());
-                                        while iter.key().is_some() {
-                                            let tag = u64::from_be_bytes(
-                                                iter.key().unwrap().try_into().unwrap(),
-                                            );
+                                        iter.seek(upper.to_be_bytes());
+                                        while let Some(tag) = iter.key() {
+                                            let tag = tag.try_into().unwrap();
                                             let index = iter.value().unwrap();
 
                                             solutions.push((
@@ -243,12 +238,10 @@ impl Plot {
                                         }
                                     } else {
                                         iter.seek(lower.to_be_bytes());
-                                        while iter.key().is_some() {
-                                            let tag = u64::from_be_bytes(
-                                                iter.key().unwrap().try_into().unwrap(),
-                                            );
+                                        while let Some(tag) = iter.key() {
+                                            let tag = tag.try_into().unwrap();
                                             let index = iter.value().unwrap();
-                                            if tag < upper {
+                                            if u64::from_be_bytes(tag) < upper {
                                                 solutions.push((
                                                     tag,
                                                     usize::from_le_bytes(index.try_into().unwrap()),
@@ -433,10 +426,10 @@ impl Plot {
         &self,
         target_hash: &[u8],
         range: u64,
-    ) -> io::Result<Vec<(u64, usize)>> {
+    ) -> io::Result<Vec<(Tag, usize)>> {
         let (result_sender, result_receiver) = oneshot::channel();
 
-        let target = u64::from_be_bytes(target_hash[0..8].try_into().unwrap());
+        let target = target_hash[0..8].try_into().unwrap();
 
         self.read_requests_sender
             .clone()

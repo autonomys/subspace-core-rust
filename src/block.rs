@@ -1,8 +1,11 @@
-use crate::{crypto, sloth, utils, BlockId, ContentId, ProofId, Tag, ENCODING_LAYERS_TEST};
+use crate::{
+    crypto, sloth, utils, BlockId, ContentId, ProofId, Tag, ENCODING_LAYERS_TEST, SOLUTION_RANGE,
+};
 use ed25519_dalek::{PublicKey, Signature};
 use log::error;
 use log::warn;
 use serde::{Deserialize, Serialize};
+use std::convert::TryInto;
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct Block {
@@ -79,22 +82,14 @@ impl Block {
             return false;
         }
 
-        // is the tag within range of the slot challenge?
-        // TODO: see if we can remove this, may not be needed anymore
-        // let slot_seed = [
-        //     &epoch_randomness[..],
-        //     &(self.proof.timeslot % TIMESLOTS_PER_EPOCH).to_le_bytes()[..],
-        // ]
-        // .concat();
-        // let slot_challenge = crypto::digest_sha_256_simple(&slot_seed);
+        let target = u64::from_be_bytes(slot_challenge[0..8].try_into().unwrap());
+        let tag = u64::from_be_bytes(self.proof.tag);
+        let distance = target.checked_sub(tag).unwrap_or_else(|| tag - target);
 
-        // let target = u64::from_be_bytes(slot_challenge[0..8].try_into().unwrap());
-        // let (distance, _) = target.overflowing_sub(self.proof.tag);
-
-        // if distance > SOLUTION_RANGE {
-        //     error!("Invalid block, solution does not meet the difficulty target!");
-        //     return false;
-        // }
+        if distance > SOLUTION_RANGE {
+            error!("Invalid block, solution does not meet the difficulty target!");
+            return false;
+        }
 
         // le be
         // le le

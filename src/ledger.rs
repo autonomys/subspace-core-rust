@@ -2,7 +2,7 @@ use crate::block::{Block, Content, Data, Proof};
 use crate::farmer::{FarmerMessage, Solution};
 use crate::timer::EpochTracker;
 use crate::{
-    crypto, sloth, timer, BlockId, CHALLENGE_LOOKBACK, PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH,
+    crypto, sloth, timer, BlockId, Tag, CHALLENGE_LOOKBACK, PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH,
     TIMESLOT_DURATION,
 };
 use async_std::sync::Sender;
@@ -117,7 +117,7 @@ impl Ledger {
                     epoch: current_epoch,
                     timeslot: current_timeslot,
                     public_key: self.keys.public.to_bytes(),
-                    tag: 0,
+                    tag: Tag::default(),
                     nonce: 0,
                     piece_index: 0,
                 };

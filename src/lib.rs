@@ -24,7 +24,7 @@ pub mod utils;
 pub type Piece = [u8; PIECE_SIZE];
 pub type IV = [u8; IV_SIZE];
 pub type NodeID = IV;
-pub type Tag = u64;
+pub type Tag = [u8; 8];
 pub type BlockId = [u8; 32];
 pub type ProofId = [u8; 32];
 pub type ContentId = [u8; 32];
