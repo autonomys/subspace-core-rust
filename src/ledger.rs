@@ -148,7 +148,9 @@ impl Ledger {
                     data: Some(data),
                 };
 
+                // apply the block to the ledger
                 self.apply_block(&block);
+
                 parent_id = block.get_id();
 
                 self.epoch_tracker
@@ -187,6 +189,8 @@ impl Ledger {
             .entry(block.proof.timeslot)
             .and_modify(|block_ids| block_ids.push(block_id))
             .or_insert(vec![block_id]);
+
+        // TODO: update chain quality
     }
 
     /// create a new block locally from a valid farming solution
@@ -260,7 +264,6 @@ impl Ledger {
         // apply the block to the ledger
         self.apply_block(&block);
 
-        // TODO: update chain quality
         // update balances, get or add account
         self.balances
             .entry(crypto::digest_sha_256(&block.proof.public_key))
@@ -329,7 +332,6 @@ impl Ledger {
         // apply the block to the ledger
         self.apply_block(&block);
 
-        // TODO: update chain quality
         // update balances, get or add account
         self.balances
             .entry(crypto::digest_sha_256(&block.proof.public_key))
@@ -355,6 +357,7 @@ impl Ledger {
             self.genesis_timestamp = block.content.timestamp;
         }
         let block_id = block.get_id();
+        // apply the block to the ledger
         self.apply_block(&block);
 
         // check if the block is in pending gossip and remove
@@ -374,8 +377,6 @@ impl Ledger {
                     .remove(&block.proof.timeslot);
             }
         }
-
-        // TODO: update chain quality
 
         block.content.parent_ids.iter().for_each(|parent_id| {
             self.unseen_block_ids.remove(parent_id);
@@ -431,7 +432,6 @@ impl Ledger {
         // apply the block to the ledger
         self.apply_block(&block);
 
-        // TODO: update chain quality
         // update balances, get or add account
         self.balances
             .entry(crypto::digest_sha_256(&block.proof.public_key))
