@@ -6,7 +6,7 @@ use crate::{
     TIMESLOT_DURATION,
 };
 use async_std::sync::Sender;
-use log::{info, warn};
+use log::{debug, info};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -166,8 +166,6 @@ impl Ledger {
             }
         }
 
-        self.epoch_tracker.advance_epoch().await;
-
         self.unseen_block_ids.insert(parent_id);
     }
 
@@ -279,7 +277,7 @@ impl Ledger {
 
                 // TODO: collect all blocks for a slot, then order blocks, then order tx
 
-                warn!("Adding block to epoch during create and apply local block");
+                debug!("Adding block to epoch during create and apply local block");
 
                 // update the epoch for this block
                 self.epoch_tracker
@@ -484,15 +482,21 @@ impl Ledger {
     }
 
     /// apply the cached block to the ledger
-    pub async fn apply_cached_blocks(&mut self, timeslot: u64) -> bool {
+    ///
+    /// Returns last (potentially unfinished) timeslot
+    pub async fn apply_cached_blocks(&mut self, timeslot: u64) -> Result<u64, ()> {
         for current_timeslot in timeslot.. {
             if let Some(block_ids) = self.cached_blocks_for_timeslot.remove(&current_timeslot) {
                 for block_id in block_ids.iter() {
                     let cached_block = self.blocks.get(block_id).unwrap().clone();
                     if !self.validate_and_apply_cached_block(cached_block).await {
-                        return false;
+                        return Err(());
                     }
                 }
+            }
+
+            if self.cached_blocks_for_timeslot.is_empty() {
+                return Ok(current_timeslot);
             }
 
             if current_timeslot % TIMESLOTS_PER_EPOCH as u64 == 0 {
@@ -506,49 +510,29 @@ impl Ledger {
 
                 info!("Creating a new empty epoch for epoch {}", current_epoch);
             }
-
-            if self.cached_blocks_for_timeslot.is_empty() {
-                break;
-            }
         }
 
-        true
+        Ok(timeslot)
     }
 
     /// start the timer after syncing the ledger
     pub async fn start_timer_from_genesis_time(
         &mut self,
         timer_to_farmer_tx: Sender<FarmerMessage>,
+        elapsed_timeslots: u64,
         is_farming: bool,
     ) {
         info!("Starting the timer from genesis time");
-        let genesis_block_id: BlockId = self.confirmed_blocks_by_timeslot.get(&0).unwrap()[0];
-        let genesis_block = self.blocks.get(&genesis_block_id).unwrap().clone();
-        let genesis_time = genesis_block.content.timestamp as u64;
-        let current_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_millis() as u64;
-        let elapsed_time = current_time - genesis_time;
-        let mut elapsed_timeslots = elapsed_time / TIMESLOT_DURATION;
-        let time_to_next_timeslot = (TIMESLOT_DURATION * (elapsed_timeslots + 1)) - elapsed_time;
 
         self.timer_is_running = true;
 
-        async_std::task::sleep(Duration::from_millis(time_to_next_timeslot)).await;
-        elapsed_timeslots += 1;
-        let epoch_tracker = self.epoch_tracker.clone();
-        let genesis_timestamp = self.genesis_timestamp;
-        async_std::task::spawn(async move {
-            timer::run(
-                timer_to_farmer_tx,
-                epoch_tracker,
-                elapsed_timeslots as u64,
-                is_farming,
-                genesis_timestamp,
-            )
-            .await;
-        });
+        async_std::task::spawn(timer::run(
+            timer_to_farmer_tx,
+            self.epoch_tracker.clone(),
+            elapsed_timeslots,
+            is_farming,
+            self.genesis_timestamp,
+        ));
     }
 
     /// Retrieve the balance for a given node id

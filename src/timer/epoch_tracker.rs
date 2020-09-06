@@ -3,7 +3,7 @@ use crate::BlockId;
 use crate::CHALLENGE_LOOKBACK;
 use crate::EPOCH_CLOSE_WAIT_TIME;
 use async_std::sync::Mutex;
-use log::warn;
+use log::debug;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -78,13 +78,11 @@ impl EpochTracker {
 
             epoch.close();
 
-            warn!(
+            debug!(
                 "Closed epoch with index {}, randomness is {}",
                 current_epoch - EPOCH_CLOSE_WAIT_TIME,
                 &hex::encode(epoch.randomness)[0..8]
             );
-
-            // warn!("{:?}", epoch);
         }
 
         current_epoch

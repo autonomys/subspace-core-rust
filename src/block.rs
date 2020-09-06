@@ -75,7 +75,7 @@ impl Block {
 
         // is the epoch challenge correct?
         if epoch_randomness != &self.proof.randomness {
-            error!("Invalid block, epoch randomness is incorrect!");
+            warn!("Invalid block, epoch randomness is incorrect!");
             return false;
         }
 

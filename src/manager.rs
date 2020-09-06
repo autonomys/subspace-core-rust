@@ -156,22 +156,6 @@ pub async fn run(
                             ledger.apply_block_from_sync(block).await;
                         }
 
-                        // increment the epoch on boundary
-                        if (timeslot + 1) % TIMESLOTS_PER_EPOCH as u64 == 0 {
-                            // create new epoch
-                            let current_epoch = epoch_tracker.advance_epoch().await;
-
-                            info!(
-                                "Closed randomness for epoch {} during sync",
-                                current_epoch - 1
-                            );
-
-                            info!(
-                                "Created a new empty epoch during sync blocks for index {}",
-                                current_epoch
-                            );
-                        }
-
                         let next_timeslot_arrival_time = Duration::from_millis(
                             ((timeslot + 1) * TIMESLOT_DURATION) + ledger.genesis_timestamp as u64,
                         );
@@ -181,6 +165,21 @@ pub async fn run(
                             .expect("Time went backwards");
 
                         if next_timeslot_arrival_time < time_now {
+                            // increment the epoch on boundary
+                            if (timeslot + 1) % TIMESLOTS_PER_EPOCH as u64 == 0 {
+                                // create new epoch
+                                let current_epoch = epoch_tracker.advance_epoch().await;
+
+                                info!(
+                                    "Closed randomness for epoch {} during sync",
+                                    current_epoch - 1
+                                );
+
+                                info!(
+                                    "Created a new empty epoch during sync blocks for index {}",
+                                    current_epoch
+                                );
+                            }
                             // request the next timeslot
                             main_to_net_tx
                                 .send(ProtocolMessage::BlocksRequest {
@@ -191,16 +190,20 @@ pub async fn run(
                             // once we have all blocks, apply cached gossip
                             // call sync and start timer
                             info!("Applying cached blocks");
-                            if !ledger.apply_cached_blocks(timeslot).await {
-                                panic!("Unable to sync the ledger, invalid blocks!");
+                            match ledger.apply_cached_blocks(timeslot).await {
+                                Ok(timeslot) => {
+                                    ledger
+                                        .start_timer_from_genesis_time(
+                                            timer_to_solver_tx.clone(),
+                                            timeslot,
+                                            is_farming,
+                                        )
+                                        .await;
+                                }
+                                Err(_) => {
+                                    panic!("Unable to sync the ledger, invalid blocks!");
+                                }
                             }
-
-                            ledger
-                                .start_timer_from_genesis_time(
-                                    timer_to_solver_tx.clone(),
-                                    is_farming,
-                                )
-                                .await;
                         }
                     }
                     ProtocolMessage::BlockProposalRemote { block, peer_addr } => {
