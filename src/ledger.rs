@@ -148,7 +148,7 @@ impl Ledger {
                     data: Some(data),
                 };
 
-                self.apply_genesis_block(&block, current_timeslot);
+                self.apply_block(&block);
                 parent_id = block.get_id();
 
                 self.epoch_tracker
@@ -173,23 +173,18 @@ impl Ledger {
         self.unseen_block_ids.insert(parent_id);
     }
 
-    /// apply each genesis block to the ledger
-    pub fn apply_genesis_block(&mut self, block: &Block, timeslot: u64) {
-        let block_id = block.get_id();
-        self.apply_block(block);
-
-        // Adds a pointer to this block id for the given timeslot in the ledger
-        self.confirmed_blocks_by_timeslot
-            .entry(timeslot)
-            .and_modify(|block_ids| block_ids.push(block_id))
-            .or_insert(vec![block_id]);
-    }
-
+    /// Apply block to the ledger
     fn apply_block(&mut self, block: &Block) {
         let block_id = block.get_id();
         let mut pruned_block = block.clone();
         pruned_block.prune();
         self.blocks.insert(block_id, pruned_block);
+
+        // Adds a pointer to this block id for the given timeslot in the ledger
+        self.confirmed_blocks_by_timeslot
+            .entry(block.proof.timeslot)
+            .and_modify(|block_ids| block_ids.push(block_id))
+            .or_insert(vec![block_id]);
     }
 
     /// create a new block locally from a valid farming solution
@@ -278,11 +273,6 @@ impl Ledger {
                     .entry(crypto::digest_sha_256(&block.proof.public_key))
                     .and_modify(|balance| *balance += 1)
                     .or_insert(1);
-                // Adds a pointer to this block id for the given timeslot in the ledger
-                self.confirmed_blocks_by_timeslot
-                    .entry(solution.timeslot)
-                    .and_modify(|block_ids| block_ids.push(block_id))
-                    .or_insert(vec![block_id]);
 
                 // TODO: collect all blocks for a slot, then order blocks, then order tx
 
@@ -358,11 +348,6 @@ impl Ledger {
             .entry(crypto::digest_sha_256(&block.proof.public_key))
             .and_modify(|balance| *balance += 1)
             .or_insert(1);
-        // Adds a pointer to this block id for the given timeslots in the ledger
-        self.confirmed_blocks_by_timeslot
-            .entry(block.proof.timeslot)
-            .and_modify(|block_ids| block_ids.push(block_id))
-            .or_insert(vec![block_id]);
 
         // TODO: collect all blocks for a slot, then order blocks, then order tx
 
@@ -474,11 +459,6 @@ impl Ledger {
             .entry(crypto::digest_sha_256(&block.proof.public_key))
             .and_modify(|balance| *balance += 1)
             .or_insert(1);
-        // Adds a pointer to this block id for the given timelsot in the ledger
-        self.confirmed_blocks_by_timeslot
-            .entry(block.proof.timeslot)
-            .and_modify(|block_ids| block_ids.push(block_id))
-            .or_insert(vec![block_id]);
 
         true
     }
