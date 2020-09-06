@@ -65,14 +65,6 @@ impl Epoch {
                     randomness
                 });
         self.randomness = crypto::digest_sha_256(&xor_result);
-        println!(
-            "{:?}",
-            self.timeslots
-                .values()
-                .flatten()
-                .map(|x| hex::encode(&x))
-                .collect::<Vec<_>>()
-        );
 
         for timeslot_index in 0..TIMESLOTS_PER_EPOCH {
             let slot_seed = [&self.randomness[..], &timeslot_index.to_le_bytes()[..]].concat();
