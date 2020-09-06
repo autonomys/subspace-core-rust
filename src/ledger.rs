@@ -167,8 +167,6 @@ impl Ledger {
                 async_std::task::sleep(Duration::from_millis(timestamp - time_now as u64)).await;
             }
         }
-
-        self.unseen_block_ids.insert(parent_id);
     }
 
     /// Apply block to the ledger
@@ -179,6 +177,10 @@ impl Ledger {
         self.blocks.insert(block_id, pruned_block);
 
         self.unseen_block_ids.insert(block_id);
+
+        block.content.parent_ids.iter().for_each(|parent_id| {
+            self.unseen_block_ids.remove(parent_id);
+        });
 
         // Adds a pointer to this block id for the given timeslot in the ledger
         self.confirmed_blocks_by_timeslot
@@ -276,9 +278,6 @@ impl Ledger {
 
         // TODO: collect all blocks for a slot, then order blocks, then order tx
 
-        debug!("Adding block to epoch during create and apply local block");
-
-        // info!("Applied block to ledger at timeslot: {}", solution.timeslot);
         block
     }
 
@@ -362,17 +361,13 @@ impl Ledger {
             }
         }
 
-        block.content.parent_ids.iter().for_each(|parent_id| {
-            self.unseen_block_ids.remove(parent_id);
-        });
-
         info!(
             "Applied new block during sync at timeslot: {}",
             block.proof.timeslot
         );
     }
 
-    /// validate and apply a cached block from gossip after sycing the ledger
+    /// validate and apply a cached block from gossip after syncing the ledger
     pub async fn validate_and_apply_cached_block(&mut self, block: Block) -> bool {
         //TODO: must handle the case where the epoch is still open
 
