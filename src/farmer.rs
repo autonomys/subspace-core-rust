@@ -1,10 +1,8 @@
-#![allow(dead_code)]
-
-use super::*;
+use crate::manager::ProtocolMessage;
 use crate::plot::Plot;
+use crate::{Piece, Tag, PIECE_COUNT, SOLUTION_RANGE};
 use async_std::sync::{Receiver, Sender};
-use log::*;
-use manager::ProtocolMessage;
+use log::info;
 use std::fmt;
 use std::fmt::Display;
 
@@ -41,7 +39,7 @@ pub struct Solution {
     pub randomness: [u8; 32], // the randomness (from past epoch) for this block
     pub piece_index: u64,     // derived piece_index
     pub proof_index: u64,     // index for audits and merkle proof
-    pub tag: u64,             // tag for hmac(encoding||nonce) -> commitment
+    pub tag: Tag,             // tag for hmac(encoding||nonce) -> commitment
     pub encoding: Piece,      // the full encoding
 }
 
@@ -63,7 +61,7 @@ pub async fn run(
             } => {
                 if is_farming {
                     // TODO: make range dynamic based on difficulty resets
-                    let tags: Vec<(u64, usize)> = plot
+                    let tags = plot
                         .find_by_range(&slot_challenge, SOLUTION_RANGE)
                         .await
                         .unwrap();

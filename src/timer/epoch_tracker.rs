@@ -3,7 +3,7 @@ use crate::BlockId;
 use crate::CHALLENGE_LOOKBACK;
 use crate::EPOCH_CLOSE_WAIT_TIME;
 use async_std::sync::Mutex;
-use log::*;
+use log::debug;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -70,21 +70,19 @@ impl EpochTracker {
             .insert(current_epoch, Epoch::new(current_epoch));
 
         // Close epoch at lookback offset if it exists
-        if current_epoch >= (EPOCH_CLOSE_WAIT_TIME + 0) {
+        if current_epoch >= EPOCH_CLOSE_WAIT_TIME {
             let epoch = inner
                 .epochs
-                .get_mut(&(current_epoch - (EPOCH_CLOSE_WAIT_TIME + 0)))
+                .get_mut(&(current_epoch - EPOCH_CLOSE_WAIT_TIME))
                 .unwrap();
 
             epoch.close();
 
-            warn!(
+            debug!(
                 "Closed epoch with index {}, randomness is {}",
-                current_epoch - (EPOCH_CLOSE_WAIT_TIME + 0),
+                current_epoch - EPOCH_CLOSE_WAIT_TIME,
                 &hex::encode(epoch.randomness)[0..8]
             );
-
-            // warn!("{:?}", epoch);
         }
 
         current_epoch

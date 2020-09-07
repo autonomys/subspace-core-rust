@@ -1,11 +1,10 @@
-#![allow(dead_code)]
-
-use super::*;
-use ed25519_dalek::PublicKey;
-use ed25519_dalek::Signature;
-use log::*;
+use crate::{
+    crypto, sloth, utils, BlockId, ContentId, ProofId, Tag, ENCODING_LAYERS_TEST, SOLUTION_RANGE,
+};
+use ed25519_dalek::{PublicKey, Signature};
+use log::error;
+use log::warn;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use std::convert::TryInto;
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
@@ -79,45 +78,33 @@ impl Block {
 
         // is the epoch challenge correct?
         if epoch_randomness != &self.proof.randomness {
-            error!("Invalid block, epoch randomness is incorrect!");
+            warn!("Invalid block, epoch randomness is incorrect!");
             return false;
         }
 
-        // is the tag within range of the slot challenge?
-        // TODO: see if we can remove this, may not be needed anymore
-        // let slot_seed = [
-        //     &epoch_randomness[..],
-        //     &(self.proof.timeslot % TIMESLOTS_PER_EPOCH).to_le_bytes()[..],
-        // ]
-        // .concat();
-        // let slot_challenge = crypto::digest_sha_256_simple(&slot_seed);
+        let target = u64::from_be_bytes(slot_challenge[0..8].try_into().unwrap());
+        let tag = u64::from_be_bytes(self.proof.tag);
+        let distance = target.checked_sub(tag).unwrap_or_else(|| tag - target);
 
-        // let target = u64::from_be_bytes(slot_challenge[0..8].try_into().unwrap());
-        // let (distance, _) = target.overflowing_sub(self.proof.tag);
-
-        // if distance > SOLUTION_RANGE {
-        //     error!("Invalid block, solution does not meet the difficulty target!");
-        //     return false;
-        // }
-
-        // le be
-        // le le
-        // be be
-        // be le
+        if distance > SOLUTION_RANGE {
+            error!("Invalid block, solution does not meet the difficulty target!");
+            return false;
+        }
 
         // is the tag valid for the encoding and salt?
-        // let tag_hash = crypto::create_hmac(
-        //     &self.data.as_ref().unwrap().encoding,
-        //     &self.proof.nonce.to_le_bytes(),
-        // );
-        // let derived_tag = u64::from_be_bytes(tag_hash[0..8].try_into().unwrap());
-        // if derived_tag.cmp(&self.proof.tag) != Ordering::Equal {
-        //     error!(
-        //         "Invalid block, tag is invalid: {} vs {}",
-        //         self.proof.tag, derived_tag
-        //     );
-        //     return false;
-        // }
+        let derived_tag = crypto::create_hmac(
+            &self.data.as_ref().unwrap().encoding,
+            &self.proof.nonce.to_le_bytes(),
+        );
+        let derived_tag: Tag = derived_tag[0..8].try_into().unwrap();
+        if derived_tag != self.proof.tag {
+            error!(
+                "Invalid block, tag is invalid: {} vs {}",
+                hex::encode(&self.proof.tag),
+                hex::encode(&derived_tag)
+            );
+            return false;
+        }
 
         // is the merkle proof correct?
         if !crypto::validate_merkle_proof(
@@ -144,7 +131,7 @@ impl Block {
         }
 
         let decoding_hash = crypto::digest_sha_256(&decoding);
-        if genesis_piece_hash.cmp(&decoding_hash) != Ordering::Equal {
+        if genesis_piece_hash != &decoding_hash {
             warn!("Invalid block, encoding is invalid");
             // utils::compare_bytes(&proof.encoding, &proof.encoding, &decoding);
             return false;
@@ -172,7 +159,7 @@ pub struct Proof {
     /// hmac of encoding with a nonce
     pub tag: Tag,
     /// nonce for salting the tag
-    pub nonce: u128,
+    pub nonce: u64,
     /// index of piece for encoding
     pub piece_index: u64,
 }

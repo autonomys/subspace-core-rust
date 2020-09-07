@@ -24,7 +24,7 @@ pub mod utils;
 pub type Piece = [u8; PIECE_SIZE];
 pub type IV = [u8; IV_SIZE];
 pub type NodeID = IV;
-pub type Tag = u64;
+pub type Tag = [u8; 8];
 pub type BlockId = [u8; 32];
 pub type ProofId = [u8; 32];
 pub type ContentId = [u8; 32];
@@ -60,7 +60,6 @@ pub const EPOCH_CLOSE_WAIT_TIME: u64 = 1;
 pub const TIMESLOTS_PER_EPOCH: u64 = 1;
 pub const EPOCH_GRACE_PERIOD: Duration =
     Duration::from_millis(TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION);
-pub const EPOCH_DURATION: Duration = Duration::from_millis(TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION);
 pub const SOLUTION_RANGE: u64 = std::u64::MAX / PLOT_SIZE as u64 * 2 / 2;
 
 // range = +/- 2^64 / number of encodings / 2
