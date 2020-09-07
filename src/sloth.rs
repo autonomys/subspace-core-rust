@@ -1,14 +1,8 @@
-#![allow(dead_code)]
-
-/*
-    A pure rust implementation of Sloth with extensions for a proof-of-replication
-    https://eprint.iacr.org/2015/366
-    based on pysloth C implmentation by Mathias Michno
-    https://github.com/randomchain/pysloth/blob/master/sloth.c
-*/
-
-use super::*;
-use crate::Piece;
+/// A pure rust implementation of Sloth with extensions for a proof-of-replication
+/// https://eprint.iacr.org/2015/366
+/// based on pysloth C implementation by Mathias Michno
+/// https://github.com/randomchain/pysloth/blob/master/sloth.c
+use crate::{ExpandedIV, Piece, PIECE_SIZE};
 use rayon::prelude::*;
 use rug::ops::NegAssign;
 use rug::{integer::IsPrime, integer::Order, ops::BitXorFrom, Integer};

@@ -1,7 +1,8 @@
-#![allow(dead_code)]
-
-use super::*;
 use crate::plot::Plot;
+use crate::{
+    crypto, sloth, utils, NodeID, Piece, CONSOLE, ENCODING_LAYERS_TEST, PIECE_SIZE, PLOT_SIZE,
+    PRIME_SIZE_BITS,
+};
 use async_std::path::PathBuf;
 use async_std::task;
 use indicatif::ProgressBar;
@@ -60,7 +61,7 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
                         .encode(&mut piece, &integer_expanded_iv, ENCODING_LAYERS_TEST)
                         .unwrap();
 
-                    // TODO: Replace challenge
+                    // TODO: Replace challenge here and in other places
                     let tag = u64::from_le_bytes(
                         crypto::create_hmac(&piece, b"subspace")[0..8]
                             .try_into()
