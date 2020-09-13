@@ -61,6 +61,8 @@ pub async fn run(
 
         if is_farming {
             let slot_challenge = epoch.get_challenge_for_timeslot(next_timeslot);
+            // TODO: This doesn't wait until we solve, so in case disk is overloaded, this
+            //  will cause DoS
             timer_to_farmer_tx
                 .send(FarmerMessage::SlotChallenge {
                     epoch_index: current_epoch_index,

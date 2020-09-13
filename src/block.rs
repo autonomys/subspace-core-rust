@@ -82,12 +82,17 @@ impl Block {
 
         let target = u64::from_be_bytes(slot_challenge[0..8].try_into().unwrap());
         let tag = u64::from_be_bytes(self.proof.tag);
-        let distance = target.checked_sub(tag).unwrap_or_else(|| tag - target);
+        let (lower, is_lower_overflowed) = target.overflowing_sub(self.proof.solution_range / 2);
+        let (upper, is_upper_overflowed) = target.overflowing_add(self.proof.solution_range / 2);
+        let within_solution_range = if is_lower_overflowed || is_upper_overflowed {
+            upper <= tag || tag <= lower
+        } else {
+            lower <= tag && tag <= upper
+        };
 
-        if distance >= self.proof.solution_range {
+        if !within_solution_range {
             error!(
-                "Invalid block, solution distance {} does not meet the solution range ±{} for challenge {}!",
-                distance,
+                "Invalid block, tag does not meet the solution range ±{} for challenge {}!",
                 self.proof.solution_range / 2,
                 hex::encode(&slot_challenge[0..8]),
             );

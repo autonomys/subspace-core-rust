@@ -81,9 +81,11 @@ impl Inner {
                 .expect("No solution range for previous eon, this should never happen");
             // Re-adjust previous solution range based on new block count
             let solution_range = if block_count > 0 {
-                (previous_solution_range as f64 / block_count as f64
+                let solution_range = (previous_solution_range as f64 / block_count as f64
                     * (TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64)
-                    .round() as u64
+                    .round() as u64;
+                // Should divide by 2 without remainder
+                solution_range / 2 * 2
             } else {
                 previous_solution_range
             };

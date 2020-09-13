@@ -179,6 +179,9 @@ impl Ledger {
         let block_id = block.get_id();
         let mut pruned_block = block.clone();
         pruned_block.prune();
+        // TODO: Everything that happens here may need to be reversed if `add_block_to_epoch()` at
+        //  the end fails, which implies that this function should have a lock and not be called
+        //  concurrently
         self.blocks.insert(block_id, pruned_block);
 
         self.unseen_block_ids.insert(block_id);
@@ -198,7 +201,7 @@ impl Ledger {
         // smaller the range the higher the quality
         //
 
-        // TODO: Why not genesis block is different?
+        // TODO: Why not genesis block, why is different?
         // if not a genesis block, count block reward
         if block.proof.randomness != self.genesis_piece_hash {
             // update balances, get or add account

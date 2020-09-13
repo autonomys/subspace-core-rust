@@ -3,6 +3,7 @@ use crate::plot::Plot;
 use crate::{Piece, Tag, PIECE_COUNT};
 use async_std::sync::{Receiver, Sender};
 use log::*;
+use std::convert::TryInto;
 use std::fmt;
 use std::fmt::Display;
 
@@ -71,10 +72,8 @@ pub async fn run(
                 solution_range,
             } => {
                 if is_farming {
-                    let tags = plot
-                        .find_by_range(&slot_challenge, solution_range)
-                        .await
-                        .unwrap();
+                    let target = slot_challenge[0..8].try_into().unwrap();
+                    let tags = plot.find_by_range(target, solution_range).await.unwrap();
                     let mut solutions: Vec<Solution> = Vec::with_capacity(tags.len());
                     for (tag, piece_index) in tags.into_iter() {
                         let proof_index = piece_index % PIECE_COUNT;
@@ -90,12 +89,15 @@ pub async fn run(
                             solution_range,
                         });
                     }
+
                     debug!(
-                        "Found {} solutions for challenge {:?} and solution range ±{}",
+                        "Found {} solutions for challenge {:?} and solution range ±{} at timeslot {}",
                         solutions.len(),
                         hex::encode(&slot_challenge[0..8]),
-                        solution_range / 2
+                        solution_range / 2,
+                        timeslot,
                     );
+
                     solver_to_main_tx
                         .send(ProtocolMessage::BlockSolutions { solutions })
                         .await;
