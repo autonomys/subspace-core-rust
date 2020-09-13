@@ -48,6 +48,12 @@ Each node needs a different directory for testing -- example
 ### Cleanup
 Remove `config.json`, `plot.bin`, `plot-map` and `plot-tags` at the location where client stores filed (printed during startup).
 
+### Building and running Docker image:
+```
+docker build -t subspace-core-rust -f Dockerfile .
+docker run --rm -it --init subspace-core-rust
+```
+
 ### Status
 
 1. ~~Sloth based proof-of-replication~~

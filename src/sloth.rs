@@ -254,6 +254,7 @@ impl Sloth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto;
 
     #[test]
     fn test_random_data_for_all_primes() {
