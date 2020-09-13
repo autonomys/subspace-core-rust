@@ -155,7 +155,7 @@ impl Ledger {
 
                 info!(
                     "Applied a genesis block to ledger with id {}",
-                    hex::encode(&parent_id)
+                    hex::encode(&parent_id[0..8])
                 );
                 let time_now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -189,6 +189,9 @@ impl Ledger {
             .or_insert(vec![block_id]);
 
         // TODO: update chain quality
+        // Weight: actual blocks / expected blocks (eon)
+        // smaller the range the higher the quality
+        //
 
         // TODO: Why not genesis block is different?
         // if not a genesis block, count block reward
@@ -202,7 +205,11 @@ impl Ledger {
 
         // update the epoch for this block
         self.epoch_tracker
-            .add_block_to_epoch(block.proof.epoch, block.proof.timeslot, block_id)
+            .add_block_to_epoch(
+                block.proof.epoch,
+                block.proof.timeslot,
+                block.proof.get_id(),
+            )
             .await;
     }
 

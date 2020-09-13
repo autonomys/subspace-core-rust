@@ -4,7 +4,7 @@ mod epoch_tracker;
 use crate::farmer::FarmerMessage;
 pub use crate::timer::epoch::Epoch;
 pub use crate::timer::epoch_tracker::EpochTracker;
-use crate::{CHALLENGE_LOOKBACK, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION};
+use crate::{CHALLENGE_LOOKBACK, TIMESLOTS_PER_EON, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION};
 use async_std::sync::Sender;
 use log::*;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -71,6 +71,27 @@ pub async fn run(
                 .await;
         }
 
+        // if the eon has ticked
+        // count the number of blocks in the previous eon
+        // adjust the solution range accordingly
+
         next_timeslot += 1;
+
+        if next_timeslot % TIMESLOTS_PER_EON == 0 {
+            let block_count = epoch_tracker.get_blocks_for_eon(next_timeslot).await;
+            let multiplier = block_count / TIMESLOTS_PER_EON;
+
+            // make sure to account for the lookback parameter
+
+            // for each new eon we compute the multiplier
+            // this is passed to farmer who solves on the new multiplier (after the lookback)
+            // we then add the multiplier to the block so validation can be correct
+            // but how do we know the multiplier is accurate in block?
+            // ledger/manager also needs acces to the difficulty
+
+            // where is this checked?
+            // when validating the block
+            // when solving the block challenge
+        }
     }
 }

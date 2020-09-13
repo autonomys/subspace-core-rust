@@ -1,7 +1,7 @@
 use crate::timer::Epoch;
-use crate::BlockId;
-use crate::CHALLENGE_LOOKBACK;
-use crate::EPOCH_CLOSE_WAIT_TIME;
+use crate::{
+    BlockId, CHALLENGE_LOOKBACK, EPOCH_CLOSE_WAIT_TIME, TIMESLOTS_PER_EON, TIMESLOTS_PER_EPOCH,
+};
 use async_std::sync::Mutex;
 use log::debug;
 use std::collections::HashMap;
@@ -34,23 +34,6 @@ impl EpochTracker {
     pub async fn get_lookback_epoch(&self, epoch_index: u64) -> Epoch {
         self.get_epoch(epoch_index - CHALLENGE_LOOKBACK).await
     }
-
-    /*
-     * Start at Epoch 0
-     * Add a genesis block
-     * Move to Epoch 1
-     * Add a genesis block
-     * Move to Epoch 2
-     * Close Epoch 0 -> get randomness
-     * Close Epoch 2
-     * Apply blocks for epoch 2
-     *
-     * Genesis blocks (working)
-     * Create an apply local blocks (buggy code) not ledger, epoch tracker
-     * Sync blocks (working)
-     * Receive and apply remote blocks (working)
-     *
-     */
 
     /// Move to the next epoch
     ///
@@ -97,5 +80,33 @@ impl EpochTracker {
             .get_mut(&epoch_index)
             .unwrap()
             .add_block_to_timeslot(timeslot, block_id);
+    }
+
+    pub async fn get_blocks_for_eon(&self, last_timeslot: u64) -> u64 {
+        let mut block_count = 0;
+
+        let first_timeslot = last_timeslot - TIMESLOTS_PER_EON + 1;
+        let first_epoch = first_timeslot / TIMESLOTS_PER_EPOCH;
+        let mut last_epoch = last_timeslot / TIMESLOTS_PER_EPOCH;
+
+        // 0 Genesis Epoch
+        // 1 First Epoch Begins
+        // 2048 First Epoch Ends (last timeslot)
+        // 2049 Second Epoch Begins
+
+        while last_epoch > first_epoch {
+            block_count += self
+                .0
+                .lock()
+                .await
+                .epochs
+                .get(&last_epoch)
+                .unwrap()
+                .clone()
+                .block_count;
+            last_epoch -= 1;
+        }
+
+        block_count
     }
 }

@@ -56,11 +56,21 @@ pub const TIMESLOT_DURATION: u64 = 1000;
 pub const CHALLENGE_LOOKBACK: u64 = 4;
 // pub const EPOCH_CLOSE_WAIT_TIME: u64 = CHALLENGE_LOOKBACK - 2;
 pub const EPOCH_CLOSE_WAIT_TIME: u64 = 1;
-
 pub const TIMESLOTS_PER_EPOCH: u64 = 1;
+pub const TIMESLOTS_PER_EON: u64 = 2048;
+
+// CONSNANT_FOR_LAST_EON = BLOCKS_PER_EON / TIMESLOTS_PER_EON = 1
+
 pub const EPOCH_GRACE_PERIOD: Duration =
     Duration::from_millis(TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION);
-pub const SOLUTION_RANGE: u64 = std::u64::MAX / PLOT_SIZE as u64 * 2 / 2;
+pub const SOLUTION_RANGE: u64 = std::u64::MAX / PLOT_SIZE as u64 / (2 * 1);
+
+// Three cases
+// 1. Start from genesis (above) -- have to include in at least the genesis block
+// 2. Sync before boundary -- pull from block -- but verify on subsequent boundaries
+// 3. After boundary -- deterministic
+
+// 2^64
 
 // range = +/- 2^64 / number of encodings / 2
 // this will lead to one block per timeslot o.a.
@@ -72,3 +82,8 @@ pub const SOLUTION_RANGE: u64 = std::u64::MAX / PLOT_SIZE as u64 * 2 / 2;
 // we count the number of blocks for each eon
 // if the number of blocks is too high we decrease the range
 // if the number of blocks is too low we increase the range
+
+// start counting the number of blocks
+// every 2048 timeslots
+// adjust the solution range, accordingly
+// start a new eon
