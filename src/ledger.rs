@@ -2,7 +2,7 @@ use crate::block::{Block, Content, Data, Proof};
 use crate::farmer::{FarmerMessage, Solution};
 use crate::timer::EpochTracker;
 use crate::{
-    crypto, sloth, timer, BlockId, Tag, CHALLENGE_LOOKBACK_EPOCHS, PRIME_SIZE_BITS, SOLUTION_RANGE,
+    crypto, sloth, timer, BlockId, Tag, CHALLENGE_LOOKBACK_EPOCHS, PRIME_SIZE_BITS,
     TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::Sender;
@@ -105,15 +105,19 @@ impl Ledger {
         let mut parent_id: BlockId = [0u8; 32];
 
         for _ in 0..CHALLENGE_LOOKBACK_EPOCHS {
-            let current_epoch = self.epoch_tracker.advance_epoch().await;
-            info!("Advanced to epoch {} during genesis init", current_epoch);
+            let current_epoch_index = self.epoch_tracker.advance_epoch().await;
+            let current_epoch = self.epoch_tracker.get_epoch(current_epoch_index).await;
+            info!(
+                "Advanced to epoch {} during genesis init",
+                current_epoch_index
+            );
 
             for current_timeslot in (0..TIMESLOTS_PER_EPOCH)
-                .map(|timeslot_index| timeslot_index + current_epoch * TIMESLOTS_PER_EPOCH)
+                .map(|timeslot_index| timeslot_index + current_epoch_index * TIMESLOTS_PER_EPOCH)
             {
                 let proof = Proof {
                     randomness: self.genesis_piece_hash,
-                    epoch: current_epoch,
+                    epoch: current_epoch_index,
                     timeslot: current_timeslot,
                     public_key: self.keys.public.to_bytes(),
                     tag: Tag::default(),
@@ -124,7 +128,7 @@ impl Ledger {
                             .unwrap(),
                     ),
                     piece_index: 0,
-                    solution_range: SOLUTION_RANGE,
+                    solution_range: current_epoch.solution_range,
                 };
 
                 let mut content = Content {

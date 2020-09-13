@@ -63,7 +63,7 @@ pub const TIMESLOTS_PER_EPOCH: u64 = 10;
 pub const EPOCHS_PER_EON: u64 = 10;
 /// Time in eons
 pub const EON_CLOSE_WAIT_TIME: u64 = 1;
-pub const DIFFICULTY_LOOKBACK_EONS: u64 = 1;
+pub const SOLUTION_RANGE_LOOKBACK_EONS: u64 = 1;
 
 // Assertions about acceptable values for above parameters:
 // Lookback should always be at least one
@@ -74,17 +74,16 @@ const_assert!(CHALLENGE_LOOKBACK_EPOCHS >= EPOCH_CLOSE_WAIT_TIME);
 // Eon should have epochs
 const_assert!(EPOCHS_PER_EON >= 1);
 // Lookback should always be at least one
-const_assert!(DIFFICULTY_LOOKBACK_EONS >= 1);
+const_assert!(SOLUTION_RANGE_LOOKBACK_EONS >= 1);
 // Epoch must be closed by the time eon that includes it closes
 const_assert!(EON_CLOSE_WAIT_TIME >= EPOCH_CLOSE_WAIT_TIME);
 // Eon must be closed by the time we do lookback to it
-const_assert!(DIFFICULTY_LOOKBACK_EONS >= EON_CLOSE_WAIT_TIME);
+const_assert!(SOLUTION_RANGE_LOOKBACK_EONS >= EON_CLOSE_WAIT_TIME);
 
 // CONSTANT_FOR_LAST_EON = BLOCKS_PER_EON / TIMESLOTS_PER_EON = 1
 
 pub const EPOCH_GRACE_PERIOD: Duration =
     Duration::from_millis(TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION);
-pub const SOLUTION_RANGE: u64 = u64::MAX / PLOT_SIZE as u64;
 
 // Three cases
 // 1. Start from genesis (above) -- have to include in at least the genesis block

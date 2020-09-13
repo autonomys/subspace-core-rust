@@ -67,6 +67,7 @@ pub async fn run(
                     timeslot: next_timeslot,
                     epoch_randomness: epoch.randomness,
                     slot_challenge,
+                    solution_range: epoch.solution_range,
                 })
                 .await;
         }

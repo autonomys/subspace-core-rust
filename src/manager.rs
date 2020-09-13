@@ -123,9 +123,6 @@ pub async fn run(
                 )
                 .await;
             });
-        } else {
-            // create the initial epoch
-            epoch_tracker.advance_epoch().await;
         }
 
         loop {

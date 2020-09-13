@@ -17,11 +17,13 @@ pub struct Epoch {
     challenges: Vec<SlotChallenge>,
     /// overall randomness for this epoch
     pub randomness: EpochChallenge,
+    /// Solution range used for this epoch
+    pub solution_range: u64,
 }
 
 // TODO: Make into an enum for a cleaner implementation, separate into active and closed epoch
 impl Epoch {
-    pub(super) fn new(index: u64) -> Epoch {
+    pub(super) fn new(index: u64, solution_range: u64) -> Epoch {
         let randomness = crypto::digest_sha_256(&index.to_le_bytes());
 
         Epoch {
@@ -29,6 +31,7 @@ impl Epoch {
             timeslots: HashMap::new(),
             challenges: Vec::with_capacity(TIMESLOTS_PER_EPOCH as usize),
             randomness,
+            solution_range,
         }
     }
 

@@ -1,6 +1,6 @@
 use crate::manager::ProtocolMessage;
 use crate::plot::Plot;
-use crate::{Piece, Tag, PIECE_COUNT, SOLUTION_RANGE};
+use crate::{Piece, Tag, PIECE_COUNT};
 use async_std::sync::{Receiver, Sender};
 use log::info;
 use std::fmt;
@@ -13,6 +13,7 @@ pub enum FarmerMessage {
         timeslot: u64,
         epoch_randomness: [u8; 32],
         slot_challenge: [u8; 32],
+        solution_range: u64,
     },
     StartFarming,
     StopFarming,
@@ -67,10 +68,9 @@ pub async fn run(
                 timeslot,
                 epoch_randomness,
                 slot_challenge,
+                solution_range,
             } => {
                 if is_farming {
-                    // TODO: make range dynamic based on difficulty resets
-                    let solution_range = SOLUTION_RANGE;
                     let tags = plot
                         .find_by_range(&slot_challenge, solution_range)
                         .await
