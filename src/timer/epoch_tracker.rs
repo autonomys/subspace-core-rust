@@ -1,7 +1,7 @@
 use crate::timer::Epoch;
 use crate::{
-    BlockId, CHALLENGE_LOOKBACK_EPOCHS, EON_CLOSE_WAIT_TIME, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME,
-    PIECE_SIZE, SOLUTION_RANGE_LOOKBACK_EONS, TIMESLOTS_PER_EPOCH,
+    BlockId, CHALLENGE_LOOKBACK_EPOCHS, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME, PIECE_SIZE,
+    SOLUTION_RANGE_LOOKBACK_EONS, TIMESLOTS_PER_EPOCH,
 };
 use async_std::sync::Mutex;
 use log::*;
@@ -62,13 +62,14 @@ impl Inner {
         }
 
         // Close an eon
-        if current_epoch >= EPOCHS_PER_EON * EON_CLOSE_WAIT_TIME
+        if current_epoch >= EPOCHS_PER_EON * SOLUTION_RANGE_LOOKBACK_EONS
             && current_epoch % EPOCHS_PER_EON == 0
         {
-            let close_eon_start_epoch_index = current_epoch - EPOCHS_PER_EON * EON_CLOSE_WAIT_TIME;
-            let close_eon_index = close_eon_start_epoch_index / EPOCHS_PER_EON;
+            let used_eon_start_epoch_index =
+                current_epoch - EPOCHS_PER_EON * SOLUTION_RANGE_LOOKBACK_EONS;
+            let used_eon_index = used_eon_start_epoch_index / EPOCHS_PER_EON;
             // Sum up block count from all epochs in a lookback eon
-            let block_count = (close_eon_start_epoch_index..)
+            let block_count = (used_eon_start_epoch_index..)
                 .take(EPOCHS_PER_EON as usize)
                 .map(|epoch_index| self.epochs.get(&epoch_index).unwrap().get_block_count())
                 .sum::<u64>();
@@ -76,7 +77,7 @@ impl Inner {
             // few eons)
             let used_solution_range = *self
                 .eon_to_solution_range
-                .get(&close_eon_index)
+                .get(&used_eon_index)
                 .expect("No solution range for current eon, this should never happen");
             // Re-adjust previous solution range based on new block count
             let solution_range = if block_count > 0 {
@@ -89,7 +90,7 @@ impl Inner {
                 used_solution_range
             };
             self.eon_to_solution_range.insert(
-                close_eon_index + SOLUTION_RANGE_LOOKBACK_EONS,
+                used_eon_index + SOLUTION_RANGE_LOOKBACK_EONS,
                 solution_range,
             );
 
