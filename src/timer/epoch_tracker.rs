@@ -1,20 +1,39 @@
 use crate::timer::Epoch;
-use crate::{BlockId, CHALLENGE_LOOKBACK_EPOCHS, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME};
+use crate::{
+    BlockId, CHALLENGE_LOOKBACK_EPOCHS, DIFFICULTY_LOOKBACK_EONS, EON_CLOSE_WAIT_TIME,
+    EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME,
+};
 use async_std::sync::Mutex;
 use log::debug;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[derive(Debug, Copy, Clone)]
+pub struct SolutionRange {
+    block_count: u64,
+    solution_range_value: u64,
+}
+
+impl SolutionRange {
+    pub fn value(&self) -> u64 {
+        self.solution_range_value
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     current_epoch: u64,
     epochs: HashMap<u64, Epoch>,
+    // TODO: Pruning, probably replace with VecDeque
+    eon_solution_range: HashMap<u64, SolutionRange>,
 }
 
 #[derive(Default, Clone)]
 pub struct EpochTracker(Arc<Mutex<Inner>>);
 
 impl EpochTracker {
+    // TODO: `fn new()` that will fill initial solution range values based on genesis node's plot
+    //  size
     pub(super) async fn get_current_epoch(&self) -> u64 {
         self.0.lock().await.current_epoch
     }
@@ -66,24 +85,34 @@ impl EpochTracker {
         }
 
         // Close an eon
-        if current_epoch > 0 && current_epoch % EPOCHS_PER_EON == 0 {
-            // Sum up block count from all epochs in in eon
-            let block_count = (current_epoch - EPOCHS_PER_EON..current_epoch)
+        if current_epoch >= EPOCHS_PER_EON * EON_CLOSE_WAIT_TIME
+            && current_epoch % EPOCHS_PER_EON == 0
+        {
+            let close_eon_start_epoch_index = current_epoch - EPOCHS_PER_EON * EON_CLOSE_WAIT_TIME;
+            let close_eon_index = close_eon_start_epoch_index / EPOCHS_PER_EON;
+            // Sum up block count from all epochs in a lookback eon
+            let block_count = (close_eon_start_epoch_index..)
+                .take(EPOCHS_PER_EON as usize)
                 .map(|epoch_index| inner.epochs.get(&epoch_index).unwrap().get_block_count())
                 .sum::<u64>();
-            // let multiplier = block_count / TIMESLOTS_PER_EON;
-            //
-            // // make sure to account for the lookback parameter
-            //
-            // // for each new eon we compute the multiplier
-            // // this is passed to farmer who solves on the new multiplier (after the lookback)
-            // // we then add the multiplier to the block so validation can be correct
-            // // but how do we know the multiplier is accurate in block?
-            // // ledger/manager also needs acces to the difficulty
-            //
-            // // where is this checked?
-            // // when validating the block
-            // // when solving the block challenge
+            let difficulty_eon_index = close_eon_index + DIFFICULTY_LOOKBACK_EONS;
+            // Get difficulty of the previous eon (fallback to eon 0 if necessary in case of first
+            // few eons)
+            let previous_solution_range = inner
+                .eon_solution_range
+                .get(&difficulty_eon_index.checked_sub(1).unwrap_or(0))
+                .expect("No difficulty for previous eon, this should never happen");
+            // Re-adjust previous solution range based on new block count
+            let solution_range_value = previous_solution_range.solution_range_value as f64
+                * block_count as f64
+                / previous_solution_range.block_count as f64;
+            let difficulty = SolutionRange {
+                block_count,
+                solution_range_value: solution_range_value.round() as u64,
+            };
+            inner
+                .eon_solution_range
+                .insert(close_eon_index + DIFFICULTY_LOOKBACK_EONS, difficulty);
 
             debug!("Closed an eon, block count is {}", block_count);
         }
