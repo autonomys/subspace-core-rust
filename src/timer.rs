@@ -63,9 +63,9 @@ pub async fn run(
             let slot_challenge = epoch.get_challenge_for_timeslot(next_timeslot);
             timer_to_farmer_tx
                 .send(FarmerMessage::SlotChallenge {
-                    epoch: current_epoch_index,
+                    epoch_index: current_epoch_index,
                     timeslot: next_timeslot,
-                    epoch_randomness: epoch.randomness,
+                    randomness: epoch.randomness,
                     slot_challenge,
                     solution_range: epoch.solution_range,
                 })

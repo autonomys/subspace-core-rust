@@ -9,9 +9,9 @@ use std::fmt::Display;
 pub enum FarmerMessage {
     /// Challenge to farmer for evaluation
     SlotChallenge {
-        epoch: u64,
+        epoch_index: u64,
         timeslot: u64,
-        epoch_randomness: [u8; 32],
+        randomness: [u8; 32],
         slot_challenge: [u8; 32],
         solution_range: u64,
     },
@@ -36,8 +36,8 @@ impl Display for FarmerMessage {
 #[derive(Copy, Clone)]
 pub struct Solution {
     /// the epoch index for this block
-    pub epoch: u64,
-    /// the slot index for this block
+    pub epoch_index: u64,
+    /// the time slot for this block
     pub timeslot: u64,
     /// the randomness (from past epoch) for this block
     pub randomness: [u8; 32],
@@ -50,7 +50,7 @@ pub struct Solution {
     /// the full encoding
     pub encoding: Piece,
     /// Solution range for the eon block was generated at
-    pub range: u64,
+    pub solution_range: u64,
 }
 
 pub async fn run(
@@ -64,9 +64,9 @@ pub async fn run(
     while let Ok(message) = timer_to_solver_rx.recv().await {
         match message {
             FarmerMessage::SlotChallenge {
-                epoch,
+                epoch_index,
                 timeslot,
-                epoch_randomness,
+                randomness,
                 slot_challenge,
                 solution_range,
             } => {
@@ -80,14 +80,14 @@ pub async fn run(
                         let proof_index = piece_index % PIECE_COUNT;
                         let encoding = plot.read(piece_index).await.unwrap();
                         solutions.push(Solution {
-                            epoch,
+                            epoch_index,
                             timeslot,
-                            randomness: epoch_randomness,
+                            randomness,
                             piece_index: piece_index as u64,
                             proof_index: proof_index as u64,
                             tag,
                             encoding,
-                            range: solution_range,
+                            solution_range,
                         });
                     }
                     debug!(

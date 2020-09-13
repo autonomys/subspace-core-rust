@@ -223,7 +223,7 @@ impl Ledger {
     pub async fn create_and_apply_local_block(&mut self, solution: Solution) -> Block {
         let proof = Proof {
             randomness: solution.randomness,
-            epoch: solution.epoch,
+            epoch: solution.epoch_index,
             timeslot: solution.timeslot,
             public_key: self.keys.public.to_bytes(),
             tag: solution.tag,
@@ -234,7 +234,7 @@ impl Ledger {
                     .unwrap(),
             ),
             piece_index: solution.piece_index,
-            solution_range: solution.range,
+            solution_range: solution.solution_range,
         };
         let data = Data {
             encoding: solution.encoding.to_vec(),
