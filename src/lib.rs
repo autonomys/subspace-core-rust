@@ -53,15 +53,16 @@ pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const CONSOLE: bool = false;
 // TODO: build duration object here and only define once
 // TODO: add documentation on allowed parameters for time
-pub const TIMESLOT_DURATION: u64 = 1000;
+pub const TIMESLOT_DURATION: u64 = 100;
 pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 4;
 // pub const EPOCH_CLOSE_WAIT_TIME: u64 = CHALLENGE_LOOKBACK - 2;
 pub const EPOCH_CLOSE_WAIT_TIME: u64 = 1;
-pub const TIMESLOTS_PER_EPOCH: u64 = 1;
-pub const EPOCHS_PER_EON: u64 = 2048;
+pub const TIMESLOTS_PER_EPOCH: u64 = 10;
+pub const EPOCHS_PER_EON: u64 = 10;
 
-// Assertions about acceptable values for above parameters
-const_assert!(CHALLENGE_LOOKBACK_EPOCHS > EPOCH_CLOSE_WAIT_TIME);
+// Assertions about acceptable values for above parameters:
+// Epoch must be closed by the time we do lookback to it
+const_assert!(CHALLENGE_LOOKBACK_EPOCHS >= EPOCH_CLOSE_WAIT_TIME);
 
 // CONSTANT_FOR_LAST_EON = BLOCKS_PER_EON / TIMESLOTS_PER_EON = 1
 
