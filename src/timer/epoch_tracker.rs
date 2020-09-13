@@ -9,15 +9,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug, Copy, Clone)]
-pub struct SolutionRange {
+struct SolutionRange {
     block_count: u64,
     solution_range_value: u64,
-}
-
-impl SolutionRange {
-    pub fn value(&self) -> u64 {
-        self.solution_range_value
-    }
 }
 
 #[derive(Default)]
@@ -29,17 +23,17 @@ struct Inner {
 }
 
 #[derive(Default, Clone)]
-pub struct EpochTracker(Arc<Mutex<Inner>>);
+pub struct EpochTracker {
+    inner: Arc<Mutex<Inner>>,
+}
 
 impl EpochTracker {
-    // TODO: `fn new()` that will fill initial solution range values based on genesis node's plot
-    //  size
     pub(super) async fn get_current_epoch(&self) -> u64 {
-        self.0.lock().await.current_epoch
+        self.inner.lock().await.current_epoch
     }
 
     pub async fn get_epoch(&self, epoch_index: u64) -> Epoch {
-        self.0
+        self.inner
             .lock()
             .await
             .epochs
@@ -57,7 +51,7 @@ impl EpochTracker {
     ///
     /// Returns current epoch index
     pub async fn advance_epoch(&self) -> u64 {
-        let mut inner = self.0.lock().await;
+        let mut inner = self.inner.lock().await;
         if inner.epochs.is_empty() {
             inner.current_epoch = 0;
         } else {
@@ -103,12 +97,18 @@ impl EpochTracker {
                 .get(&difficulty_eon_index.checked_sub(1).unwrap_or(0))
                 .expect("No difficulty for previous eon, this should never happen");
             // Re-adjust previous solution range based on new block count
-            let solution_range_value = previous_solution_range.solution_range_value as f64
-                * block_count as f64
-                / previous_solution_range.block_count as f64;
+            let solution_range_value;
+            if block_count > 0 && previous_solution_range.block_count > 0 {
+                solution_range_value = (previous_solution_range.solution_range_value as f64
+                    * block_count as f64
+                    / previous_solution_range.block_count as f64)
+                    .round() as u64;
+            } else {
+                solution_range_value = previous_solution_range.solution_range_value;
+            };
             let difficulty = SolutionRange {
                 block_count,
-                solution_range_value: solution_range_value.round() as u64,
+                solution_range_value,
             };
             inner
                 .eon_solution_range
@@ -122,12 +122,15 @@ impl EpochTracker {
 
     /// Returns `true` in case no blocks for this timeslot existed before
     pub async fn add_block_to_epoch(&self, epoch_index: u64, timeslot: u64, block_id: BlockId) {
-        self.0
-            .lock()
-            .await
+        let mut inner = self.inner.lock().await;
+        inner
             .epochs
             .get_mut(&epoch_index)
             .unwrap()
             .add_block_to_timeslot(timeslot, block_id);
+        if inner.eon_solution_range.is_empty() {
+            // TODO: Fill initial values in `eon_solution_range` with difficulty from the block once
+            //  it we have it in there
+        }
     }
 }
