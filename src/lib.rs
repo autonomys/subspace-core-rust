@@ -84,7 +84,7 @@ const_assert!(DIFFICULTY_LOOKBACK_EONS >= EON_CLOSE_WAIT_TIME);
 
 pub const EPOCH_GRACE_PERIOD: Duration =
     Duration::from_millis(TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION);
-pub const SOLUTION_RANGE: u64 = u64::MAX / PLOT_SIZE as u64 / (2 * 1);
+pub const SOLUTION_RANGE: u64 = u64::MAX / PLOT_SIZE as u64;
 
 // Three cases
 // 1. Start from genesis (above) -- have to include in at least the genesis block

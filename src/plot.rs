@@ -201,9 +201,9 @@ impl Plot {
                                     let mut solutions: Vec<(Tag, usize)> = Vec::new();
 
                                     let (lower, is_lower_overflowed) =
-                                        u64::from_be_bytes(target).overflowing_sub(range);
+                                        u64::from_be_bytes(target).overflowing_sub(range / 2);
                                     let (upper, is_upper_overflowed) =
-                                        u64::from_be_bytes(target).overflowing_add(range);
+                                        u64::from_be_bytes(target).overflowing_add(range / 2);
 
                                     debug!(
                                         "Lower overflow: {} -- Upper overflow: {}",

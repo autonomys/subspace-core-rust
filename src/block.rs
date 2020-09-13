@@ -86,7 +86,7 @@ impl Block {
         let tag = u64::from_be_bytes(self.proof.tag);
         let distance = target.checked_sub(tag).unwrap_or_else(|| tag - target);
 
-        if distance > SOLUTION_RANGE {
+        if distance > SOLUTION_RANGE / 2 {
             error!("Invalid block, solution does not meet the difficulty target!");
             return false;
         }
