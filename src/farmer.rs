@@ -2,7 +2,7 @@ use crate::manager::ProtocolMessage;
 use crate::plot::Plot;
 use crate::{Piece, Tag, PIECE_COUNT};
 use async_std::sync::{Receiver, Sender};
-use log::info;
+use log::*;
 use std::fmt;
 use std::fmt::Display;
 
@@ -90,7 +90,12 @@ pub async fn run(
                             range: solution_range,
                         });
                     }
-                    info!("Found {} solutions for challenge", solutions.len());
+                    debug!(
+                        "Found {} solutions for challenge {:?} and solution range ±{}",
+                        solutions.len(),
+                        hex::encode(&slot_challenge[0..8]),
+                        solution_range / 2
+                    );
                     solver_to_main_tx
                         .send(ProtocolMessage::BlockSolutions { solutions })
                         .await;

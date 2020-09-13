@@ -37,9 +37,9 @@ impl Block {
         slot_challenge: &[u8; 32],
         sloth: &sloth::Sloth,
     ) -> bool {
-        // ensure we have the auxillary data
+        // ensure we have the auxiliary data
         if self.data.is_none() {
-            error!("Invalid block, missing auxillary data!");
+            error!("Invalid block, missing auxiliary data!");
             return false;
         }
 
@@ -84,8 +84,13 @@ impl Block {
         let tag = u64::from_be_bytes(self.proof.tag);
         let distance = target.checked_sub(tag).unwrap_or_else(|| tag - target);
 
-        if distance > self.proof.solution_range {
-            error!("Invalid block, solution does not meet the difficulty target!");
+        if distance >= self.proof.solution_range {
+            error!(
+                "Invalid block, solution distance {} does not meet the solution range ±{} for challenge {}!",
+                distance,
+                self.proof.solution_range / 2,
+                hex::encode(&slot_challenge[0..8]),
+            );
             return false;
         }
 

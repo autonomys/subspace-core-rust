@@ -177,7 +177,7 @@ impl Router {
     pub fn gossip(&self, message: Message) {
         let bytes = message.to_bytes();
         for node_addr in self.peers.iter() {
-            info!("Sending a {} message to {}", message, node_addr);
+            trace!("Sending a {} message to {}", message, node_addr);
             self.maybe_send_bytes_to(node_addr, bytes.clone());
         }
     }
@@ -187,7 +187,7 @@ impl Router {
         let bytes = message.to_bytes();
         for node_addr in self.peers.iter() {
             if node_addr != sender {
-                info!("Sending a {} message to {}", message, node_addr);
+                trace!("Sending a {} message to {}", message, node_addr);
                 self.maybe_send_bytes_to(node_addr, bytes.clone());
             }
         }
@@ -195,7 +195,7 @@ impl Router {
 
     /// send a message to specific node by node_id
     pub fn send(&self, receiver: &SocketAddr, message: Message) {
-        info!("Sending a {} message to {}", message, receiver);
+        trace!("Sending a {} message to {}", message, receiver);
         self.maybe_send_bytes_to(receiver, message.to_bytes());
     }
 
@@ -409,7 +409,7 @@ pub async fn run(
             match event {
                 NetworkEvent::InboundMessage { peer_addr, message } => {
                     // messages received over the network from another peer, send to manager or handle internally
-                    info!("Received a {} network message from {}", message, peer_addr);
+                    trace!("Received a {} network message from {}", message, peer_addr);
 
                     // ToDo: (later) implement a cache of last x messages (only if block or tx)
 

@@ -1,37 +1,26 @@
 use crate::timer::Epoch;
 use crate::{
     BlockId, CHALLENGE_LOOKBACK_EPOCHS, EON_CLOSE_WAIT_TIME, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME,
-    SOLUTION_RANGE_LOOKBACK_EONS,
+    PIECE_SIZE, SOLUTION_RANGE_LOOKBACK_EONS, TIMESLOTS_PER_EPOCH,
 };
 use async_std::sync::Mutex;
-use log::debug;
+use log::*;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-#[derive(Debug, Copy, Clone)]
-struct SolutionRange {
-    block_count: u64,
-    solution_range_value: u64,
-}
 
 #[derive(Default)]
 struct Inner {
     current_epoch: u64,
     epochs: HashMap<u64, Epoch>,
     // TODO: Pruning, probably replace with VecDeque
-    eon_solution_range: HashMap<u64, SolutionRange>,
+    /// Solution range for an eon (computed from lookback eon when it was closed)
+    eon_to_solution_range: HashMap<u64, u64>,
 }
 
 impl Inner {
     fn fill_initial_solution_range(&mut self, solution_range: u64) {
-        for eon_index in 0..EON_CLOSE_WAIT_TIME {
-            self.eon_solution_range.insert(
-                eon_index,
-                SolutionRange {
-                    block_count: 0,
-                    solution_range_value: solution_range,
-                },
-            );
+        for eon_index in 0..SOLUTION_RANGE_LOOKBACK_EONS {
+            self.eon_to_solution_range.insert(eon_index, solution_range);
         }
     }
 
@@ -46,20 +35,17 @@ impl Inner {
         let current_epoch = self.current_epoch;
         let current_eon_index = current_epoch / EPOCHS_PER_EON;
         // Get solution range of lookback eon (fallback to eon 0 if necessary in case of first few eons)
-        let solution_range_value = self
-            .eon_solution_range
+        let solution_range = *self
+            .eon_to_solution_range
             .get(
                 &current_eon_index
                     .checked_sub(SOLUTION_RANGE_LOOKBACK_EONS)
                     .unwrap_or(0),
             )
-            .expect("No solution range for lookback eon, this should never happen")
-            .solution_range_value;
+            .expect("No solution range for lookback eon, this should never happen");
 
-        self.epochs.insert(
-            current_epoch,
-            Epoch::new(current_epoch, solution_range_value),
-        );
+        self.epochs
+            .insert(current_epoch, Epoch::new(current_epoch, solution_range));
 
         // Close epoch at lookback offset if it exists
         if current_epoch >= EPOCH_CLOSE_WAIT_TIME {
@@ -89,32 +75,29 @@ impl Inner {
             let solution_range_eon_index = close_eon_index + SOLUTION_RANGE_LOOKBACK_EONS;
             // Get solution range of the previous eon (fallback to eon 0 if necessary in case of first
             // few eons)
-            let previous_solution_range = self
-                .eon_solution_range
+            let previous_solution_range = *self
+                .eon_to_solution_range
                 .get(&solution_range_eon_index.checked_sub(1).unwrap_or(0))
                 .expect("No solution range for previous eon, this should never happen");
             // Re-adjust previous solution range based on new block count
-            let solution_range_value;
-            if block_count > 0 && previous_solution_range.block_count > 0 {
-                solution_range_value = (previous_solution_range.solution_range_value as f64
-                    * block_count as f64
-                    / previous_solution_range.block_count as f64)
-                    .round() as u64;
+            let solution_range = if block_count > 0 {
+                (previous_solution_range as f64 / block_count as f64
+                    * (TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64)
+                    .round() as u64
             } else {
-                solution_range_value = previous_solution_range.solution_range_value;
+                previous_solution_range
             };
-            let solution_range = SolutionRange {
-                block_count,
-                solution_range_value,
-            };
-            self.eon_solution_range.insert(
-                close_eon_index + SOLUTION_RANGE_LOOKBACK_EONS,
-                solution_range,
-            );
+            self.eon_to_solution_range
+                .insert(solution_range_eon_index, solution_range);
 
-            debug!(
-                "Closed an eon, block count is {}, new solution range is {}",
-                block_count, solution_range_value
+            let bytes_pledged = (u64::MAX / solution_range) * PIECE_SIZE as u64;
+
+            info!(
+                "Closed an eon, block count is {}, previous solution range {}, new solution range is {}, ~{}MiB bytes pledged",
+                block_count,
+                previous_solution_range,
+                solution_range,
+                bytes_pledged / 1024 / 1024
             );
         }
 
@@ -180,7 +163,7 @@ impl EpochTracker {
     ) {
         let mut inner = self.inner.lock().await;
 
-        if inner.eon_solution_range.is_empty() {
+        if inner.eon_to_solution_range.is_empty() {
             inner.fill_initial_solution_range(solution_range);
             // Create the initial epoch
             inner.advance_epoch();

@@ -215,7 +215,7 @@ impl Plot {
                                         while let Some(tag) = iter.key() {
                                             let tag = tag.try_into().unwrap();
                                             let index = iter.value().unwrap();
-                                            if u64::from_be_bytes(tag) < lower {
+                                            if u64::from_be_bytes(tag) <= lower {
                                                 solutions.push((
                                                     tag,
                                                     usize::from_le_bytes(index.try_into().unwrap()),
@@ -241,7 +241,7 @@ impl Plot {
                                         while let Some(tag) = iter.key() {
                                             let tag = tag.try_into().unwrap();
                                             let index = iter.value().unwrap();
-                                            if u64::from_be_bytes(tag) < upper {
+                                            if u64::from_be_bytes(tag) <= upper {
                                                 solutions.push((
                                                     tag,
                                                     usize::from_le_bytes(index.try_into().unwrap()),

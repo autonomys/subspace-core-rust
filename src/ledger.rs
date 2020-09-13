@@ -6,7 +6,7 @@ use crate::{
     TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::Sender;
-use log::info;
+use log::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -158,7 +158,7 @@ impl Ledger {
 
                 parent_id = block.get_id();
 
-                info!(
+                debug!(
                     "Applied a genesis block to ledger with id {}",
                     hex::encode(&parent_id[0..8])
                 );
@@ -376,7 +376,7 @@ impl Ledger {
             }
         }
 
-        info!(
+        debug!(
             "Applied new block during sync at timeslot: {}",
             block.proof.timeslot
         );
@@ -435,12 +435,12 @@ impl Ledger {
                 // create the new epoch
                 let current_epoch = self.epoch_tracker.advance_epoch().await;
 
-                info!(
+                debug!(
                     "Closed randomness for epoch {} during apply cached blocks",
                     current_epoch - CHALLENGE_LOOKBACK_EPOCHS
                 );
 
-                info!("Creating a new empty epoch for epoch {}", current_epoch);
+                debug!("Creating a new empty epoch for epoch {}", current_epoch);
             }
         }
 

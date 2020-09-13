@@ -169,12 +169,12 @@ pub async fn run(
                                     // create new epoch
                                     let current_epoch = epoch_tracker.advance_epoch().await;
 
-                                    info!(
+                                    debug!(
                                         "Closed randomness for epoch {} during sync",
                                         current_epoch - 1
                                     );
 
-                                    info!(
+                                    debug!(
                                         "Created a new empty epoch during sync blocks for index {}",
                                         current_epoch
                                     );
@@ -206,19 +206,19 @@ pub async fn run(
                             }
                         }
                         ProtocolMessage::BlockProposalRemote { block, peer_addr } => {
-                            info!(
+                            trace!(
                                 "Received a block via gossip, with {} parents",
                                 block.content.parent_ids.len()
                             );
                             let block_id = block.get_id();
 
                             if ledger.blocks.contains_key(&block_id) {
-                                info!("Received a block proposal via gossip for known block, ignoring");
+                                warn!("Received a block proposal via gossip for known block, ignoring");
                                 continue;
                             }
 
                             if !ledger.timer_is_running {
-                                info!(
+                                trace!(
                                     "Caching a block received via gossip before the ledger is synced"
                                 );
                                 ledger.cache_remote_block(block);
