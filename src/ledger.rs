@@ -315,7 +315,7 @@ impl Ledger {
 
     /// validate and apply a block received via gossip
     pub async fn validate_and_apply_remote_block(&mut self, block: Block) -> bool {
-        info!(
+        debug!(
             "Validating and applying block for epoch: {} at timeslot {}",
             block.proof.epoch, block.proof.timeslot
         );

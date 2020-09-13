@@ -72,32 +72,33 @@ impl Inner {
                 .take(EPOCHS_PER_EON as usize)
                 .map(|epoch_index| self.epochs.get(&epoch_index).unwrap().get_block_count())
                 .sum::<u64>();
-            let solution_range_eon_index = close_eon_index + SOLUTION_RANGE_LOOKBACK_EONS;
             // Get solution range of the previous eon (fallback to eon 0 if necessary in case of first
             // few eons)
-            let previous_solution_range = *self
+            let used_solution_range = *self
                 .eon_to_solution_range
-                .get(&solution_range_eon_index.checked_sub(1).unwrap_or(0))
-                .expect("No solution range for previous eon, this should never happen");
+                .get(&close_eon_index)
+                .expect("No solution range for current eon, this should never happen");
             // Re-adjust previous solution range based on new block count
             let solution_range = if block_count > 0 {
-                let solution_range = (previous_solution_range as f64 / block_count as f64
+                let solution_range = (used_solution_range as f64 / block_count as f64
                     * (TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64)
                     .round() as u64;
                 // Should divide by 2 without remainder
                 solution_range / 2 * 2
             } else {
-                previous_solution_range
+                used_solution_range
             };
-            self.eon_to_solution_range
-                .insert(solution_range_eon_index, solution_range);
+            self.eon_to_solution_range.insert(
+                close_eon_index + SOLUTION_RANGE_LOOKBACK_EONS,
+                solution_range,
+            );
 
-            let bytes_pledged = (u64::MAX / solution_range) * PIECE_SIZE as u64;
+            let bytes_pledged = (u64::MAX / used_solution_range) * PIECE_SIZE as u64;
 
             info!(
-                "Closed an eon, block count is {}, previous solution range {}, new solution range is {}, ~{}MiB bytes pledged",
+                "Closed an eon, block count is {}, used solution range {}, new solution range is {}, ~{}MiB bytes pledged",
                 block_count,
-                previous_solution_range,
+                used_solution_range,
                 solution_range,
                 bytes_pledged / 1024 / 1024
             );
