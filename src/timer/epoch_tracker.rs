@@ -121,7 +121,13 @@ impl EpochTracker {
     }
 
     /// Returns `true` in case no blocks for this timeslot existed before
-    pub async fn add_block_to_epoch(&self, epoch_index: u64, timeslot: u64, block_id: BlockId) {
+    pub async fn add_block_to_epoch(
+        &self,
+        epoch_index: u64,
+        timeslot: u64,
+        block_id: BlockId,
+        solution_range: u64,
+    ) {
         let mut inner = self.inner.lock().await;
         inner
             .epochs
@@ -129,8 +135,15 @@ impl EpochTracker {
             .unwrap()
             .add_block_to_timeslot(timeslot, block_id);
         if inner.eon_solution_range.is_empty() {
-            // TODO: Fill initial values in `eon_solution_range` with difficulty from the block once
-            //  it we have it in there
+            for eon_index in 0..EON_CLOSE_WAIT_TIME {
+                inner.eon_solution_range.insert(
+                    eon_index,
+                    SolutionRange {
+                        block_count: 0,
+                        solution_range_value: solution_range,
+                    },
+                );
+            }
         }
     }
 }

@@ -2,7 +2,7 @@ use crate::block::{Block, Content, Data, Proof};
 use crate::farmer::{FarmerMessage, Solution};
 use crate::timer::EpochTracker;
 use crate::{
-    crypto, sloth, timer, BlockId, Tag, CHALLENGE_LOOKBACK_EPOCHS, PRIME_SIZE_BITS,
+    crypto, sloth, timer, BlockId, Tag, CHALLENGE_LOOKBACK_EPOCHS, PRIME_SIZE_BITS, SOLUTION_RANGE,
     TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::Sender;
@@ -124,6 +124,7 @@ impl Ledger {
                             .unwrap(),
                     ),
                     piece_index: 0,
+                    solution_range: SOLUTION_RANGE,
                 };
 
                 let mut content = Content {
@@ -209,6 +210,7 @@ impl Ledger {
                 block.proof.epoch,
                 block.proof.timeslot,
                 block.proof.get_id(),
+                block.proof.solution_range,
             )
             .await;
     }
@@ -228,6 +230,7 @@ impl Ledger {
                     .unwrap(),
             ),
             piece_index: solution.piece_index,
+            solution_range: solution.range,
         };
         let data = Data {
             encoding: solution.encoding.to_vec(),

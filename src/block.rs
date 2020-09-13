@@ -1,6 +1,4 @@
-use crate::{
-    crypto, sloth, utils, BlockId, ContentId, ProofId, Tag, ENCODING_LAYERS_TEST, SOLUTION_RANGE,
-};
+use crate::{crypto, sloth, utils, BlockId, ContentId, ProofId, Tag, ENCODING_LAYERS_TEST};
 use ed25519_dalek::{PublicKey, Signature};
 use log::error;
 use log::warn;
@@ -86,7 +84,7 @@ impl Block {
         let tag = u64::from_be_bytes(self.proof.tag);
         let distance = target.checked_sub(tag).unwrap_or_else(|| tag - target);
 
-        if distance > SOLUTION_RANGE / 2 {
+        if distance > self.proof.solution_range {
             error!("Invalid block, solution does not meet the difficulty target!");
             return false;
         }
@@ -162,6 +160,9 @@ pub struct Proof {
     pub nonce: u64,
     /// index of piece for encoding
     pub piece_index: u64,
+    // TODO: This property needs to be verified somehow when we receive a proof
+    /// Solution range for the eon block was generated at
+    pub solution_range: u64,
 }
 
 impl Proof {
