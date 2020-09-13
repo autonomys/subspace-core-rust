@@ -17,7 +17,6 @@ pub struct Epoch {
     challenges: Vec<SlotChallenge>,
     /// overall randomness for this epoch
     pub randomness: EpochChallenge,
-    pub block_count: u64,
 }
 
 // TODO: Make into an enum for a cleaner implementation, separate into active and closed epoch
@@ -30,8 +29,11 @@ impl Epoch {
             timeslots: HashMap::new(),
             challenges: Vec::with_capacity(TIMESLOTS_PER_EPOCH as usize),
             randomness,
-            block_count: 0,
         }
+    }
+
+    pub(super) fn get_block_count(&self) -> u64 {
+        self.timeslots.values().map(Vec::len).sum::<usize>() as u64
     }
 
     /// Returns `true` in case no blocks for this timeslot existed before
@@ -48,7 +50,6 @@ impl Epoch {
                 list.push(block_id);
             })
             .or_insert_with(|| vec![block_id]);
-        self.block_count += 1;
     }
 
     pub fn get_challenge_for_timeslot(&self, timeslot: u64) -> SlotChallenge {

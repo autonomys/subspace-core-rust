@@ -4,7 +4,7 @@ use crate::farmer::{FarmerMessage, Solution};
 use crate::network::NodeType;
 use crate::timer::EpochTracker;
 use crate::{
-    ledger, timer, CHALLENGE_LOOKBACK, CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE,
+    ledger, timer, CHALLENGE_LOOKBACK_EPOCHS, CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE,
     TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::{Receiver, Sender};
@@ -117,7 +117,7 @@ pub async fn run(
                 timer::run(
                     timer_to_solver_tx,
                     epoch_tracker,
-                    CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH as u64,
+                    CHALLENGE_LOOKBACK_EPOCHS * TIMESLOTS_PER_EPOCH as u64,
                     true,
                     genesis_timestamp,
                 )
@@ -293,10 +293,7 @@ pub async fn run(
                             // check if the block is valid and apply
                             if ledger.validate_and_apply_remote_block(block.clone()).await {
                                 main_to_net_tx
-                                    .send(ProtocolMessage::BlockProposalRemote {
-                                        block: block,
-                                        peer_addr,
-                                    })
+                                    .send(ProtocolMessage::BlockProposalRemote { block, peer_addr })
                                     .await;
                             }
                         }
@@ -312,10 +309,7 @@ pub async fn run(
 
                             if ledger.validate_and_apply_remote_block(block.clone()).await {
                                 main_to_net_tx
-                                    .send(ProtocolMessage::BlockProposalRemote {
-                                        block: block,
-                                        peer_addr,
-                                    })
+                                    .send(ProtocolMessage::BlockProposalRemote { block, peer_addr })
                                     .await;
                             }
 

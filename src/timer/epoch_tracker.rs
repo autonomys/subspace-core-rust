@@ -1,7 +1,5 @@
 use crate::timer::Epoch;
-use crate::{
-    BlockId, CHALLENGE_LOOKBACK, EPOCH_CLOSE_WAIT_TIME, TIMESLOTS_PER_EON, TIMESLOTS_PER_EPOCH,
-};
+use crate::{BlockId, CHALLENGE_LOOKBACK_EPOCHS, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME};
 use async_std::sync::Mutex;
 use log::debug;
 use std::collections::HashMap;
@@ -32,7 +30,8 @@ impl EpochTracker {
     }
 
     pub async fn get_lookback_epoch(&self, epoch_index: u64) -> Epoch {
-        self.get_epoch(epoch_index - CHALLENGE_LOOKBACK).await
+        self.get_epoch(epoch_index - CHALLENGE_LOOKBACK_EPOCHS)
+            .await
     }
 
     /// Move to the next epoch
@@ -54,10 +53,8 @@ impl EpochTracker {
 
         // Close epoch at lookback offset if it exists
         if current_epoch >= EPOCH_CLOSE_WAIT_TIME {
-            let epoch = inner
-                .epochs
-                .get_mut(&(current_epoch - EPOCH_CLOSE_WAIT_TIME))
-                .unwrap();
+            let close_epoch_index = current_epoch - EPOCH_CLOSE_WAIT_TIME;
+            let epoch = inner.epochs.get_mut(&close_epoch_index).unwrap();
 
             epoch.close();
 
@@ -66,6 +63,29 @@ impl EpochTracker {
                 current_epoch - EPOCH_CLOSE_WAIT_TIME,
                 &hex::encode(epoch.randomness)[0..8]
             );
+        }
+
+        // Close an eon
+        if current_epoch > 0 && current_epoch % EPOCHS_PER_EON == 0 {
+            // Sum up block count from all epochs in in eon
+            let block_count = (current_epoch - EPOCHS_PER_EON..current_epoch)
+                .map(|epoch_index| inner.epochs.get(&epoch_index).unwrap().get_block_count())
+                .sum::<u64>();
+            // let multiplier = block_count / TIMESLOTS_PER_EON;
+            //
+            // // make sure to account for the lookback parameter
+            //
+            // // for each new eon we compute the multiplier
+            // // this is passed to farmer who solves on the new multiplier (after the lookback)
+            // // we then add the multiplier to the block so validation can be correct
+            // // but how do we know the multiplier is accurate in block?
+            // // ledger/manager also needs acces to the difficulty
+            //
+            // // where is this checked?
+            // // when validating the block
+            // // when solving the block challenge
+
+            debug!("Closed an eon, block count is {}", block_count);
         }
 
         current_epoch
@@ -80,33 +100,5 @@ impl EpochTracker {
             .get_mut(&epoch_index)
             .unwrap()
             .add_block_to_timeslot(timeslot, block_id);
-    }
-
-    pub async fn get_blocks_for_eon(&self, last_timeslot: u64) -> u64 {
-        let mut block_count = 0;
-
-        let first_timeslot = last_timeslot - TIMESLOTS_PER_EON + 1;
-        let first_epoch = first_timeslot / TIMESLOTS_PER_EPOCH;
-        let mut last_epoch = last_timeslot / TIMESLOTS_PER_EPOCH;
-
-        // 0 Genesis Epoch
-        // 1 First Epoch Begins
-        // 2048 First Epoch Ends (last timeslot)
-        // 2049 Second Epoch Begins
-
-        while last_epoch > first_epoch {
-            block_count += self
-                .0
-                .lock()
-                .await
-                .epochs
-                .get(&last_epoch)
-                .unwrap()
-                .clone()
-                .block_count;
-            last_epoch -= 1;
-        }
-
-        block_count
     }
 }

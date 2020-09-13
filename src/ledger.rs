@@ -2,8 +2,8 @@ use crate::block::{Block, Content, Data, Proof};
 use crate::farmer::{FarmerMessage, Solution};
 use crate::timer::EpochTracker;
 use crate::{
-    crypto, sloth, timer, BlockId, Tag, CHALLENGE_LOOKBACK, PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH,
-    TIMESLOT_DURATION,
+    crypto, sloth, timer, BlockId, Tag, CHALLENGE_LOOKBACK_EPOCHS, PRIME_SIZE_BITS,
+    TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::Sender;
 use log::info;
@@ -104,7 +104,7 @@ impl Ledger {
         let mut timestamp = self.genesis_timestamp as u64;
         let mut parent_id: BlockId = [0u8; 32];
 
-        for _ in 0..CHALLENGE_LOOKBACK {
+        for _ in 0..CHALLENGE_LOOKBACK_EPOCHS {
             let current_epoch = self.epoch_tracker.advance_epoch().await;
             info!("Advanced to epoch {} during genesis init", current_epoch);
 
@@ -379,7 +379,7 @@ impl Ledger {
     pub async fn validate_and_apply_cached_block(&mut self, block: Block) -> bool {
         //TODO: must handle the case where the epoch is still open
 
-        let randomness_epoch_index = block.proof.epoch - CHALLENGE_LOOKBACK;
+        let randomness_epoch_index = block.proof.epoch - CHALLENGE_LOOKBACK_EPOCHS;
         let challenge_timeslot = block.proof.timeslot;
         info!(
             "Validating and applying cached block for epoch: {} at timeslot {}",
@@ -430,7 +430,7 @@ impl Ledger {
 
                 info!(
                     "Closed randomness for epoch {} during apply cached blocks",
-                    current_epoch - CHALLENGE_LOOKBACK
+                    current_epoch - CHALLENGE_LOOKBACK_EPOCHS
                 );
 
                 info!("Creating a new empty epoch for epoch {}", current_epoch);
