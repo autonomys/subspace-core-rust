@@ -57,13 +57,13 @@ pub const TIMESLOT_DURATION: u64 = 100;
 pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 4;
 // pub const EPOCH_CLOSE_WAIT_TIME: u64 = CHALLENGE_LOOKBACK - 2;
 /// Time in epochs
-pub const EPOCH_CLOSE_WAIT_TIME: u64 = 1;
+pub const EPOCH_CLOSE_WAIT_TIME: u64 = 2;
 pub const TIMESLOTS_PER_EPOCH: u64 = 10;
 
 pub const EPOCHS_PER_EON: u64 = 10;
 /// Time in eons
-pub const EON_CLOSE_WAIT_TIME: u64 = 1;
-pub const SOLUTION_RANGE_LOOKBACK_EONS: u64 = 2;
+pub const EON_CLOSE_WAIT_TIME: u64 = 2;
+pub const SOLUTION_RANGE_LOOKBACK_EONS: u64 = 3;
 
 // Assertions about acceptable values for above parameters:
 // Lookback should always be at least one
