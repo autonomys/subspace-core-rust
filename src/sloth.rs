@@ -2,7 +2,7 @@
 /// https://eprint.iacr.org/2015/366
 /// based on pysloth C implementation by Mathias Michno
 /// https://github.com/randomchain/pysloth/blob/master/sloth.c
-use crate::{crypto, ExpandedIV, Piece, PIECE_SIZE};
+use crate::{ExpandedIV, Piece, PIECE_SIZE};
 use rayon::prelude::*;
 use rug::ops::NegAssign;
 use rug::{integer::IsPrime, integer::Order, ops::BitXorFrom, Integer};
@@ -254,6 +254,7 @@ impl Sloth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto;
 
     #[test]
     fn test_random_data_for_all_primes() {

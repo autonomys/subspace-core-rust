@@ -2,6 +2,7 @@
 #![feature(drain_filter)]
 
 use async_std::sync::{Arc, Mutex};
+use static_assertions::const_assert;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -52,18 +53,31 @@ pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const CONSOLE: bool = false;
 // TODO: build duration object here and only define once
 // TODO: add documentation on allowed parameters for time
-pub const TIMESLOT_DURATION: u64 = 1000;
-pub const CHALLENGE_LOOKBACK: u64 = 4;
+pub const TIMESLOT_DURATION: u64 = 100;
+pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 4;
 // pub const EPOCH_CLOSE_WAIT_TIME: u64 = CHALLENGE_LOOKBACK - 2;
-pub const EPOCH_CLOSE_WAIT_TIME: u64 = 1;
-pub const TIMESLOTS_PER_EPOCH: u64 = 1;
-pub const TIMESLOTS_PER_EON: u64 = 2048;
+/// Time in epochs
+pub const EPOCH_CLOSE_WAIT_TIME: u64 = 2;
+pub const TIMESLOTS_PER_EPOCH: u64 = 10;
 
-// CONSNANT_FOR_LAST_EON = BLOCKS_PER_EON / TIMESLOTS_PER_EON = 1
+pub const EPOCHS_PER_EON: u64 = 10;
+pub const SOLUTION_RANGE_LOOKBACK_EONS: u64 = 3;
+
+// Assertions about acceptable values for above parameters:
+// Lookback should always be at least one
+const_assert!(EPOCH_CLOSE_WAIT_TIME >= 1);
+// Epoch must be closed by the time we do lookback to it
+const_assert!(CHALLENGE_LOOKBACK_EPOCHS >= EPOCH_CLOSE_WAIT_TIME);
+
+// Eon should have epochs
+const_assert!(EPOCHS_PER_EON >= 1);
+// Eon must be closed by the time we do lookback to it
+const_assert!(SOLUTION_RANGE_LOOKBACK_EONS > EPOCH_CLOSE_WAIT_TIME);
+
+// CONSTANT_FOR_LAST_EON = BLOCKS_PER_EON / TIMESLOTS_PER_EON = 1
 
 pub const EPOCH_GRACE_PERIOD: Duration =
     Duration::from_millis(TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION);
-pub const SOLUTION_RANGE: u64 = std::u64::MAX / PLOT_SIZE as u64 / (2 * 1);
 
 // Three cases
 // 1. Start from genesis (above) -- have to include in at least the genesis block
@@ -77,7 +91,7 @@ pub const SOLUTION_RANGE: u64 = std::u64::MAX / PLOT_SIZE as u64 / (2 * 1);
 // if the number of blocks increases the range should get smaller
 // for each doubling of the space pledged the number of blocks will double
 // if the number of blocks decreases the range should get wider
-// for each halving of the psace pledged, the number of blocks will halve
+// for each halving of the space pledged, the number of blocks will halve
 // an eon is 2048 blocks
 // we count the number of blocks for each eon
 // if the number of blocks is too high we decrease the range

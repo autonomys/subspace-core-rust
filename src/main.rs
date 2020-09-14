@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::{env, fs};
 use subspace_core_rust::farmer::FarmerMessage;
+use subspace_core_rust::ledger::Ledger;
 use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::*;
@@ -108,12 +109,16 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     let genesis_piece_hash = crypto::digest_sha_256(&genesis_piece);
 
     // create the randomness tracker
-    let epoch_tracker = EpochTracker::default();
+    let epoch_tracker = if node_type == NodeType::Gateway {
+        EpochTracker::new_genesis(u64::MAX / PLOT_SIZE as u64)
+    } else {
+        EpochTracker::new()
+    };
 
     // create the ledger
     let (merkle_proofs, merkle_root) = crypto::build_merkle_tree();
     let tx_payload = crypto::generate_random_piece().to_vec();
-    let mut ledger = ledger::Ledger::new(
+    let mut ledger = Ledger::new(
         merkle_root,
         genesis_piece_hash,
         keys,

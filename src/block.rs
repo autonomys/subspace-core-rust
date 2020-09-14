@@ -1,6 +1,4 @@
-use crate::{
-    crypto, sloth, utils, BlockId, ContentId, ProofId, Tag, ENCODING_LAYERS_TEST, SOLUTION_RANGE,
-};
+use crate::{crypto, sloth, utils, BlockId, ContentId, ProofId, Tag, ENCODING_LAYERS_TEST};
 use ed25519_dalek::{PublicKey, Signature};
 use log::error;
 use log::warn;
@@ -39,9 +37,9 @@ impl Block {
         slot_challenge: &[u8; 32],
         sloth: &sloth::Sloth,
     ) -> bool {
-        // ensure we have the auxillary data
+        // ensure we have the auxiliary data
         if self.data.is_none() {
-            error!("Invalid block, missing auxillary data!");
+            error!("Invalid block, missing auxiliary data!");
             return false;
         }
 
@@ -84,10 +82,20 @@ impl Block {
 
         let target = u64::from_be_bytes(slot_challenge[0..8].try_into().unwrap());
         let tag = u64::from_be_bytes(self.proof.tag);
-        let distance = target.checked_sub(tag).unwrap_or_else(|| tag - target);
+        let (lower, is_lower_overflowed) = target.overflowing_sub(self.proof.solution_range / 2);
+        let (upper, is_upper_overflowed) = target.overflowing_add(self.proof.solution_range / 2);
+        let within_solution_range = if is_lower_overflowed || is_upper_overflowed {
+            upper <= tag || tag <= lower
+        } else {
+            lower <= tag && tag <= upper
+        };
 
-        if distance > SOLUTION_RANGE {
-            error!("Invalid block, solution does not meet the difficulty target!");
+        if !within_solution_range {
+            error!(
+                "Invalid block, tag does not meet the solution range ±{} for challenge {}!",
+                self.proof.solution_range / 2,
+                hex::encode(&slot_challenge[0..8]),
+            );
             return false;
         }
 
@@ -162,6 +170,9 @@ pub struct Proof {
     pub nonce: u64,
     /// index of piece for encoding
     pub piece_index: u64,
+    // TODO: This property needs to be verified somehow when we receive a proof
+    /// Solution range for the eon block was generated at
+    pub solution_range: u64,
 }
 
 impl Proof {

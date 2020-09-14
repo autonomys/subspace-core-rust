@@ -9,7 +9,7 @@ use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
 use futures::SinkExt;
 use futures::StreamExt;
-use log::debug;
+use log::*;
 use rocksdb::IteratorMode;
 use rocksdb::DB;
 use std::convert::TryInto;
@@ -201,13 +201,15 @@ impl Plot {
                                     let mut solutions: Vec<(Tag, usize)> = Vec::new();
 
                                     let (lower, is_lower_overflowed) =
-                                        u64::from_be_bytes(target).overflowing_sub(range);
+                                        u64::from_be_bytes(target).overflowing_sub(range / 2);
                                     let (upper, is_upper_overflowed) =
-                                        u64::from_be_bytes(target).overflowing_add(range);
+                                        u64::from_be_bytes(target).overflowing_add(range / 2);
 
-                                    debug!(
-                                        "Lower overflow: {} -- Upper overflow: {}",
-                                        is_lower_overflowed, is_upper_overflowed
+                                    trace!(
+                                        "{} Lower overflow: {} -- Upper overflow: {}",
+                                        hex::encode(&target),
+                                        is_lower_overflowed,
+                                        is_upper_overflowed
                                     );
 
                                     if is_lower_overflowed || is_upper_overflowed {
@@ -215,7 +217,7 @@ impl Plot {
                                         while let Some(tag) = iter.key() {
                                             let tag = tag.try_into().unwrap();
                                             let index = iter.value().unwrap();
-                                            if u64::from_be_bytes(tag) < lower {
+                                            if u64::from_be_bytes(tag) <= upper {
                                                 solutions.push((
                                                     tag,
                                                     usize::from_le_bytes(index.try_into().unwrap()),
@@ -225,7 +227,7 @@ impl Plot {
                                                 break;
                                             }
                                         }
-                                        iter.seek(upper.to_be_bytes());
+                                        iter.seek(lower.to_be_bytes());
                                         while let Some(tag) = iter.key() {
                                             let tag = tag.try_into().unwrap();
                                             let index = iter.value().unwrap();
@@ -241,7 +243,7 @@ impl Plot {
                                         while let Some(tag) = iter.key() {
                                             let tag = tag.try_into().unwrap();
                                             let index = iter.value().unwrap();
-                                            if u64::from_be_bytes(tag) < upper {
+                                            if u64::from_be_bytes(tag) <= upper {
                                                 solutions.push((
                                                     tag,
                                                     usize::from_le_bytes(index.try_into().unwrap()),
@@ -424,12 +426,10 @@ impl Plot {
 
     pub async fn find_by_range(
         &self,
-        target_hash: &[u8],
+        target: [u8; 8],
         range: u64,
     ) -> io::Result<Vec<(Tag, usize)>> {
         let (result_sender, result_receiver) = oneshot::channel();
-
-        let target = target_hash[0..8].try_into().unwrap();
 
         self.read_requests_sender
             .clone()

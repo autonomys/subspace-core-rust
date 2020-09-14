@@ -2,11 +2,11 @@ use crate::block::{Block, Content, Data, Proof};
 use crate::farmer::{FarmerMessage, Solution};
 use crate::timer::EpochTracker;
 use crate::{
-    crypto, sloth, timer, BlockId, Tag, CHALLENGE_LOOKBACK, PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH,
-    TIMESLOT_DURATION,
+    crypto, sloth, timer, BlockId, Tag, CHALLENGE_LOOKBACK_EPOCHS, PRIME_SIZE_BITS,
+    TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::Sender;
-use log::info;
+use log::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -104,16 +104,20 @@ impl Ledger {
         let mut timestamp = self.genesis_timestamp as u64;
         let mut parent_id: BlockId = [0u8; 32];
 
-        for _ in 0..CHALLENGE_LOOKBACK {
-            let current_epoch = self.epoch_tracker.advance_epoch().await;
-            info!("Advanced to epoch {} during genesis init", current_epoch);
+        for _ in 0..CHALLENGE_LOOKBACK_EPOCHS {
+            let current_epoch_index = self.epoch_tracker.advance_epoch().await;
+            let current_epoch = self.epoch_tracker.get_epoch(current_epoch_index).await;
+            info!(
+                "Advanced to epoch {} during genesis init",
+                current_epoch_index
+            );
 
             for current_timeslot in (0..TIMESLOTS_PER_EPOCH)
-                .map(|timeslot_index| timeslot_index + current_epoch * TIMESLOTS_PER_EPOCH)
+                .map(|timeslot_index| timeslot_index + current_epoch_index * TIMESLOTS_PER_EPOCH)
             {
                 let proof = Proof {
                     randomness: self.genesis_piece_hash,
-                    epoch: current_epoch,
+                    epoch: current_epoch_index,
                     timeslot: current_timeslot,
                     public_key: self.keys.public.to_bytes(),
                     tag: Tag::default(),
@@ -124,6 +128,7 @@ impl Ledger {
                             .unwrap(),
                     ),
                     piece_index: 0,
+                    solution_range: current_epoch.solution_range,
                 };
 
                 let mut content = Content {
@@ -153,7 +158,7 @@ impl Ledger {
 
                 parent_id = block.get_id();
 
-                info!(
+                debug!(
                     "Applied a genesis block to ledger with id {}",
                     hex::encode(&parent_id[0..8])
                 );
@@ -174,6 +179,9 @@ impl Ledger {
         let block_id = block.get_id();
         let mut pruned_block = block.clone();
         pruned_block.prune();
+        // TODO: Everything that happens here may need to be reversed if `add_block_to_epoch()` at
+        //  the end fails, which implies that this function should have a lock and not be called
+        //  concurrently
         self.blocks.insert(block_id, pruned_block);
 
         self.unseen_block_ids.insert(block_id);
@@ -193,7 +201,7 @@ impl Ledger {
         // smaller the range the higher the quality
         //
 
-        // TODO: Why not genesis block is different?
+        // TODO: Why not genesis block, why is different?
         // if not a genesis block, count block reward
         if block.proof.randomness != self.genesis_piece_hash {
             // update balances, get or add account
@@ -209,6 +217,7 @@ impl Ledger {
                 block.proof.epoch,
                 block.proof.timeslot,
                 block.proof.get_id(),
+                block.proof.solution_range,
             )
             .await;
     }
@@ -217,7 +226,7 @@ impl Ledger {
     pub async fn create_and_apply_local_block(&mut self, solution: Solution) -> Block {
         let proof = Proof {
             randomness: solution.randomness,
-            epoch: solution.epoch,
+            epoch: solution.epoch_index,
             timeslot: solution.timeslot,
             public_key: self.keys.public.to_bytes(),
             tag: solution.tag,
@@ -228,6 +237,7 @@ impl Ledger {
                     .unwrap(),
             ),
             piece_index: solution.piece_index,
+            solution_range: solution.solution_range,
         };
         let data = Data {
             encoding: solution.encoding.to_vec(),
@@ -305,7 +315,7 @@ impl Ledger {
 
     /// validate and apply a block received via gossip
     pub async fn validate_and_apply_remote_block(&mut self, block: Block) -> bool {
-        info!(
+        debug!(
             "Validating and applying block for epoch: {} at timeslot {}",
             block.proof.epoch, block.proof.timeslot
         );
@@ -369,7 +379,7 @@ impl Ledger {
             }
         }
 
-        info!(
+        debug!(
             "Applied new block during sync at timeslot: {}",
             block.proof.timeslot
         );
@@ -379,7 +389,7 @@ impl Ledger {
     pub async fn validate_and_apply_cached_block(&mut self, block: Block) -> bool {
         //TODO: must handle the case where the epoch is still open
 
-        let randomness_epoch_index = block.proof.epoch - CHALLENGE_LOOKBACK;
+        let randomness_epoch_index = block.proof.epoch - CHALLENGE_LOOKBACK_EPOCHS;
         let challenge_timeslot = block.proof.timeslot;
         info!(
             "Validating and applying cached block for epoch: {} at timeslot {}",
@@ -428,12 +438,12 @@ impl Ledger {
                 // create the new epoch
                 let current_epoch = self.epoch_tracker.advance_epoch().await;
 
-                info!(
+                debug!(
                     "Closed randomness for epoch {} during apply cached blocks",
-                    current_epoch - CHALLENGE_LOOKBACK
+                    current_epoch - CHALLENGE_LOOKBACK_EPOCHS
                 );
 
-                info!("Creating a new empty epoch for epoch {}", current_epoch);
+                debug!("Creating a new empty epoch for epoch {}", current_epoch);
             }
         }
 

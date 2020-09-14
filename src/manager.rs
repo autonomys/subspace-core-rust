@@ -4,7 +4,7 @@ use crate::farmer::{FarmerMessage, Solution};
 use crate::network::NodeType;
 use crate::timer::EpochTracker;
 use crate::{
-    ledger, timer, CHALLENGE_LOOKBACK, CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE,
+    ledger, timer, CHALLENGE_LOOKBACK_EPOCHS, CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE,
     TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::{Receiver, Sender};
@@ -117,15 +117,12 @@ pub async fn run(
                 timer::run(
                     timer_to_solver_tx,
                     epoch_tracker,
-                    CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH as u64,
+                    CHALLENGE_LOOKBACK_EPOCHS * TIMESLOTS_PER_EPOCH as u64,
                     true,
                     genesis_timestamp,
                 )
                 .await;
             });
-        } else {
-            // create the initial epoch
-            epoch_tracker.advance_epoch().await;
         }
 
         loop {
@@ -172,12 +169,12 @@ pub async fn run(
                                     // create new epoch
                                     let current_epoch = epoch_tracker.advance_epoch().await;
 
-                                    info!(
+                                    debug!(
                                         "Closed randomness for epoch {} during sync",
                                         current_epoch - 1
                                     );
 
-                                    info!(
+                                    debug!(
                                         "Created a new empty epoch during sync blocks for index {}",
                                         current_epoch
                                     );
@@ -209,19 +206,19 @@ pub async fn run(
                             }
                         }
                         ProtocolMessage::BlockProposalRemote { block, peer_addr } => {
-                            info!(
+                            trace!(
                                 "Received a block via gossip, with {} parents",
                                 block.content.parent_ids.len()
                             );
                             let block_id = block.get_id();
 
                             if ledger.blocks.contains_key(&block_id) {
-                                info!("Received a block proposal via gossip for known block, ignoring");
+                                warn!("Received a block proposal via gossip for known block, ignoring");
                                 continue;
                             }
 
                             if !ledger.timer_is_running {
-                                info!(
+                                trace!(
                                     "Caching a block received via gossip before the ledger is synced"
                                 );
                                 ledger.cache_remote_block(block);
@@ -293,10 +290,7 @@ pub async fn run(
                             // check if the block is valid and apply
                             if ledger.validate_and_apply_remote_block(block.clone()).await {
                                 main_to_net_tx
-                                    .send(ProtocolMessage::BlockProposalRemote {
-                                        block: block,
-                                        peer_addr,
-                                    })
+                                    .send(ProtocolMessage::BlockProposalRemote { block, peer_addr })
                                     .await;
                             }
                         }
@@ -312,10 +306,7 @@ pub async fn run(
 
                             if ledger.validate_and_apply_remote_block(block.clone()).await {
                                 main_to_net_tx
-                                    .send(ProtocolMessage::BlockProposalRemote {
-                                        block: block,
-                                        peer_addr,
-                                    })
+                                    .send(ProtocolMessage::BlockProposalRemote { block, peer_addr })
                                     .await;
                             }
 

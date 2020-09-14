@@ -4,7 +4,7 @@ use crate::BlockId;
 use crate::EpochChallenge;
 use crate::SlotChallenge;
 use crate::TIMESLOTS_PER_EPOCH;
-use log::{debug, warn};
+use log::*;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -17,12 +17,13 @@ pub struct Epoch {
     challenges: Vec<SlotChallenge>,
     /// overall randomness for this epoch
     pub randomness: EpochChallenge,
-    pub block_count: u64,
+    /// Solution range used for this epoch
+    pub solution_range: u64,
 }
 
 // TODO: Make into an enum for a cleaner implementation, separate into active and closed epoch
 impl Epoch {
-    pub(super) fn new(index: u64) -> Epoch {
+    pub(super) fn new(index: u64, solution_range: u64) -> Epoch {
         let randomness = crypto::digest_sha_256(&index.to_le_bytes());
 
         Epoch {
@@ -30,14 +31,21 @@ impl Epoch {
             timeslots: HashMap::new(),
             challenges: Vec::with_capacity(TIMESLOTS_PER_EPOCH as usize),
             randomness,
-            block_count: 0,
+            solution_range,
         }
+    }
+
+    pub(super) fn get_block_count(&self) -> u64 {
+        self.timeslots.values().map(Vec::len).sum::<usize>() as u64
     }
 
     /// Returns `true` in case no blocks for this timeslot existed before
     pub(super) fn add_block_to_timeslot(&mut self, timeslot: u64, block_id: BlockId) {
         if self.is_closed {
-            warn!("Epoch already closed, skipping adding block to time slot");
+            warn!(
+                "Epoch already closed, skipping adding block to time slot {}",
+                timeslot
+            );
             return;
         }
         debug!("Adding block to time slot");
@@ -48,7 +56,6 @@ impl Epoch {
                 list.push(block_id);
             })
             .or_insert_with(|| vec![block_id]);
-        self.block_count += 1;
     }
 
     pub fn get_challenge_for_timeslot(&self, timeslot: u64) -> SlotChallenge {
