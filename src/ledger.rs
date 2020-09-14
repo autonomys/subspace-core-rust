@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
  * Track chain quality
  * Track parent links to order blocks and transactions
  *
- * Commits to the ledger should be atmoic (if we fail part way through)
+ * Commits to the ledger should be atomic (if we fail part way through)
  *
  * TESTING
  * -------
@@ -513,7 +513,7 @@ impl Ledger {
 //     // }
 
 //     // #[test]
-//     // fn auxillary_data() {
+//     // fn auxiliary_data() {
 //     //     let encoding = crypto::generate_random_piece();
 //     //     let (merkle_proofs, _) = crypto::build_merkle_tree();
 //     //     let proof = Proof::new(encoding, merkle_proofs[17].clone(), 17u64, 245u64);

@@ -7,7 +7,7 @@ use futures::channel::mpsc;
 use futures::channel::mpsc::Sender;
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
-use futures::SinkExt;
+use futures::{SinkExt, AsyncReadExt, AsyncWriteExt};
 use futures::StreamExt;
 use log::*;
 use rocksdb::IteratorMode;

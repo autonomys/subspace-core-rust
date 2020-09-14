@@ -24,10 +24,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
  * Peer checks to see if has any cached blocks that reference the block received
  * If yes, peer recursively applies cached blocks
  * If no, peer requests the next block
- *
- * Need to pull old code for apply_pending_chlildren
- * Need to complete the code when blocks are received ahead of the current timeslot (wait for arrival)
- *
 */
 
 // TODO: Split this into multiple enums
