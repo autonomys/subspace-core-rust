@@ -40,7 +40,7 @@ pub const PRIME_SIZE_BYTES: usize = PRIME_SIZE_BITS / 8;
 pub const IV_SIZE: usize = 32;
 pub const PIECE_SIZE: usize = 4096;
 pub const PIECE_COUNT: usize = 256;
-pub const REPLICATION_FACTOR: usize = 256;
+pub const REPLICATION_FACTOR: usize = 2560;
 pub const PLOT_SIZE: usize = PIECE_COUNT * REPLICATION_FACTOR;
 pub const BLOCKS_PER_ENCODING: usize = PIECE_SIZE / PRIME_SIZE_BYTES;
 pub const ENCODING_LAYERS_TEST: usize = 1;
@@ -51,9 +51,10 @@ pub const CONFIRMATION_DEPTH: usize = 6;
 pub const DEV_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const CONSOLE: bool = false;
+pub const BLOCK_REWARD: u64 = 1;
 // TODO: build duration object here and only define once
 // TODO: add documentation on allowed parameters for time
-pub const TIMESLOT_DURATION: u64 = 100;
+pub const TIMESLOT_DURATION: u64 = 10;
 pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 4;
 // pub const EPOCH_CLOSE_WAIT_TIME: u64 = CHALLENGE_LOOKBACK - 2;
 /// Time in epochs

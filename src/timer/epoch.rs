@@ -19,6 +19,8 @@ pub struct Epoch {
     pub randomness: EpochChallenge,
     /// Solution range used for this epoch
     pub solution_range: u64,
+    /// Running sum of the distance from challenge to tag for all blocks in this epoch
+    pub total_distance: u128,
 }
 
 // TODO: Make into an enum for a cleaner implementation, separate into active and closed epoch
@@ -32,6 +34,7 @@ impl Epoch {
             challenges: Vec::with_capacity(TIMESLOTS_PER_EPOCH as usize),
             randomness,
             solution_range,
+            total_distance: 0,
         }
     }
 
@@ -39,8 +42,18 @@ impl Epoch {
         self.timeslots.values().map(Vec::len).sum::<usize>() as u64
     }
 
+    pub(super) fn get_average_range(&self) -> u64 {
+        // for each block, include the range
+        0u64
+    }
+
     /// Returns `true` in case no blocks for this timeslot existed before
-    pub(super) fn add_block_to_timeslot(&mut self, timeslot: u64, block_id: BlockId) {
+    pub(super) fn add_block_to_timeslot(
+        &mut self,
+        timeslot: u64,
+        block_id: BlockId,
+        // distance_from_challenge: u64,
+    ) {
         if self.is_closed {
             warn!(
                 "Epoch already closed, skipping adding block to time slot {}",
@@ -56,6 +69,8 @@ impl Epoch {
                 list.push(block_id);
             })
             .or_insert_with(|| vec![block_id]);
+
+        // self.total_distance += distance_from_challenge as u128;
     }
 
     pub fn get_challenge_for_timeslot(&self, timeslot: u64) -> SlotChallenge {

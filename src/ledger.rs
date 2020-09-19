@@ -1,8 +1,11 @@
 use crate::block::{Block, Content, Data, Proof};
 use crate::farmer::{FarmerMessage, Solution};
 use crate::timer::EpochTracker;
+use crate::transaction::{
+    AccountAddress, AccountState, CoinbaseTx, SimpleCreditTx, Transaction, TransactionState, TxId,
+};
 use crate::{
-    crypto, sloth, timer, BlockId, Tag, CHALLENGE_LOOKBACK_EPOCHS, PRIME_SIZE_BITS,
+    crypto, sloth, timer, BlockId, Tag, BLOCK_REWARD, CHALLENGE_LOOKBACK_EPOCHS, PRIME_SIZE_BITS,
     TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::Sender;
@@ -14,11 +17,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /* ToDo
  * ----
  *
- * Make difficulty self-adjusting
+ * Fix: self-adjusting difficulty
  * Track chain quality
- * Track parent links to order blocks and transactions
+ * Decide on how to track parent links between blocks
  *
- * Commits to the ledger should be atomic (if we fail part way through)
+ * Ensure that commits to the ledger are fully atomic
  *
  * TESTING
  * -------
@@ -30,14 +33,35 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
  *
 */
 
+/*
+   As new blocks are received
+   Validate each new block and all included txs
+   Stage each block and tx for commitment
+   When the epoch is closed and randomness is derived
+   Order the blocks and confirm
+   Order the txs and confirm
+   Need to track confirmation depth for each block until it reaches confirmed level
+   But first just make it work in the honest setting
+
+   Next step will be to apply to the state buffer
+
+   1. Block is received over the network
+   2. Block is validated and added to blocks db
+   3. Block is ordered when epoch closes -> ordered_blocks_by_timeslot
+   4. Block is confirmed when depth is achieved (later)
+
+*/
+
 pub struct Ledger {
-    balances: HashMap<[u8; 32], usize>,
+    pub balances: HashMap<AccountAddress, AccountState>,
+    pub txs: HashMap<TxId, Transaction>,
+    pub tx_mempool: HashMap<TxId, TransactionState>,
     pub genesis_timestamp: u64,
     pub genesis_piece_hash: [u8; 32],
     pub blocks: HashMap<BlockId, Block>,
     pub unseen_block_ids: HashSet<BlockId>,
     // TODO: add ordered confirmed_blocks_by_block_height
-    pub confirmed_blocks_by_timeslot: HashMap<u64, Vec<BlockId>>,
+    pub ordered_blocks_by_timeslot: HashMap<u64, Vec<BlockId>>,
     pub cached_blocks_for_timeslot: BTreeMap<u64, Vec<BlockId>>,
     pub epoch_tracker: EpochTracker,
     pub timer_is_running: bool,
@@ -62,16 +86,19 @@ impl Ledger {
         let prime_size = PRIME_SIZE_BITS;
         let sloth = sloth::Sloth::init(prime_size);
 
+        // TODO: all of these data structures need to be periodically truncated
         Ledger {
+            balances: HashMap::new(),
             blocks: HashMap::new(),
-            epoch_tracker,
-            confirmed_blocks_by_timeslot: HashMap::new(),
+            txs: HashMap::new(),
+            tx_mempool: HashMap::new(),
+            ordered_blocks_by_timeslot: HashMap::new(),
             cached_blocks_for_timeslot: BTreeMap::new(),
             unseen_block_ids: HashSet::new(),
             genesis_timestamp: 0,
             timer_is_running: false,
-            balances: HashMap::new(),
             quality: 0,
+            epoch_tracker,
             merkle_root,
             genesis_piece_hash,
             sloth,
@@ -83,7 +110,7 @@ impl Ledger {
 
     /// Retrieve all blocks for a timeslot, return an empty vec if no blocks
     pub fn get_blocks_by_timeslot(&self, timeslot: u64) -> Vec<Block> {
-        self.confirmed_blocks_by_timeslot
+        self.ordered_blocks_by_timeslot
             .get(&timeslot)
             .map(|blocks| {
                 blocks
@@ -131,12 +158,16 @@ impl Ledger {
                     solution_range: current_epoch.solution_range,
                 };
 
+                let proof_id = proof.get_id();
+                let coinbase_tx = CoinbaseTx::new(BLOCK_REWARD, self.keys.public, proof_id);
+                let tx_ids = coinbase_tx.get_id().to_vec();
+
                 let mut content = Content {
                     parent_ids: vec![parent_id],
-                    proof_id: proof.get_id(),
+                    proof_id,
                     proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
                     timestamp,
-                    tx_ids: Vec::new(),
+                    tx_ids,
                     signature: Vec::new(),
                 };
 
@@ -149,6 +180,7 @@ impl Ledger {
 
                 let block = Block {
                     proof,
+                    coinbase_tx,
                     content,
                     data: Some(data),
                 };
@@ -169,10 +201,73 @@ impl Ledger {
 
                 timestamp += TIMESLOT_DURATION;
 
+                //TODO: this should wait for the correct time to arrive rather than waiting for a fixed amount of time
                 async_std::task::sleep(Duration::from_millis(timestamp - time_now as u64)).await;
             }
         }
     }
+
+    // pub fn apply_coinbase_tx(&mut self, tx: CoinbaseTx, proof: &Proof) -> bool {
+    //     // validate
+    //     if !tx.is_valid(proof) {
+    //         return false;
+    //     }
+    //
+    //     // stage s.t. the tx is applied when the block is ordered
+    //
+    //     // store in tx database
+    //     self.txs.insert(tx.get_id(), Transaction::Coinbase(tx));
+    //
+    //     true
+    // }
+
+    /// Validates a new tx and adds to the mempool
+    /// Returns true if valid and staged
+    // pub fn validate_and_stage_tx(&mut self, tx: SimpleCreditTx) -> bool {
+    //     let tx_id = tx.get_id();
+    //
+    //     // check to see if the tx is already in the mempool
+    //     if self.tx_mempool.contains_key(&tx_id) {
+    //         return false;
+    //     }
+    //
+    //     // get the from account state
+    //     let from_account_state = self.balances.get(&tx.from_address);
+    //
+    //     // is the tx valid
+    //     if !tx.is_valid(from_account_state) {
+    //         return false;
+    //     }
+    //
+    //     // add to the mem pool
+    //     self.tx_mempool.insert(tx_id, tx);
+    //
+    //     true
+    // }
+
+    /// Attempts to apply a tx included in a new block to the ledger
+    /// Returns true if the transaction could be applied
+    // pub fn apply_credit_tx(&mut self, tx: TxId) -> bool {
+    //     true
+    // }
+    //
+    // async fn stage_block(&mut self, block: &Block) {
+    //     // prune the block
+    //
+    //     // add to blocks db
+    //
+    //     // update unseen block ids
+    //
+    //     // add block to epoch
+    //
+    //     // ...
+    //
+    //     // epoch is confirmed (how do we even know)
+    //     // epoch sends a message to manager
+    //     // manager calls ledger and applies all of the blocks
+    //     // ledger then has to apply them one block at a time
+    //     // while being careful to not duplicate transactions
+    // }
 
     /// Apply block to the ledger
     async fn apply_block(&mut self, block: &Block) {
@@ -191,7 +286,7 @@ impl Ledger {
         });
 
         // Adds a pointer to this block id for the given timeslot in the ledger
-        self.confirmed_blocks_by_timeslot
+        self.ordered_blocks_by_timeslot
             .entry(block.proof.timeslot)
             .and_modify(|block_ids| block_ids.push(block_id))
             .or_insert(vec![block_id]);
@@ -201,17 +296,24 @@ impl Ledger {
         // smaller the range the higher the quality
         //
 
+        // validate the genesis tx
+        // apply the genesis tx
+        // add to the tx database
+        // prune from the block
+
         // TODO: Why not genesis block, why is different?
         // if not a genesis block, count block reward
         if block.proof.randomness != self.genesis_piece_hash {
             // update balances, get or add account
             self.balances
                 .entry(crypto::digest_sha_256(&block.proof.public_key))
-                .and_modify(|balance| *balance += 1)
-                .or_insert(1);
+                .and_modify(|account_state| account_state.balance += 1)
+                .or_insert(AccountState {
+                    balance: 1,
+                    nonce: 0,
+                });
         }
 
-        // update the epoch for this block
         self.epoch_tracker
             .add_block_to_epoch(
                 block.proof.epoch,
@@ -251,17 +353,23 @@ impl Ledger {
         // TODO: only get parents that are not at the same level
         // TODO: create an empty vec then do memswap between unseen parent and unseen block ids
         let unseen_parents: Vec<BlockId> = self.unseen_block_ids.drain().collect();
+
+        let proof_id = proof.get_id();
+        let coinbase_tx = CoinbaseTx::new(BLOCK_REWARD, self.keys.public, proof_id);
+        let tx_ids = coinbase_tx.get_id().to_vec();
+
         let mut content = Content {
             parent_ids: unseen_parents,
             proof_id: proof.get_id(),
             proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
             timestamp,
-            tx_ids: self.tx_payload.clone(),
+            tx_ids,
             signature: Vec::new(),
         };
         content.signature = self.keys.sign(&content.get_id()).to_bytes().to_vec();
         let block = Block {
             proof,
+            coinbase_tx,
             content,
             data: Some(data),
         };
@@ -471,15 +579,19 @@ impl Ledger {
     }
 
     /// Retrieve the balance for a given node id
-    pub fn get_balance(&self, id: &[u8]) -> Option<usize> {
+    pub fn get_account_state(&self, id: &[u8]) -> Option<AccountState> {
         self.balances.get(id).copied()
     }
 
     /// Print the balance of all accounts in the ledger
     pub fn print_balances(&self) {
         info!("Current balance of accounts:\n");
-        for (id, balance) in self.balances.iter() {
-            info!("Account: {} \t {} \t credits", hex::encode(id), balance);
+        for (id, account_state) in self.balances.iter() {
+            info!(
+                "Account: {} \t {} \t credits",
+                hex::encode(id),
+                account_state.balance
+            );
         }
     }
 }

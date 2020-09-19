@@ -1,5 +1,6 @@
 use crate::block::Block;
 use crate::manager::ProtocolMessage;
+use crate::transaction::SimpleCreditTx;
 use crate::{console, MAX_PEERS};
 use crate::{crypto, DEV_GATEWAY_ADDR};
 use async_std::net::{TcpListener, TcpStream};
@@ -7,7 +8,7 @@ use async_std::prelude::*;
 use async_std::sync::{channel, Receiver, Sender};
 use bytes::buf::BufMutExt;
 use bytes::{Bytes, BytesMut};
-use futures::join;
+use futures::{join, StreamExt};
 use log::*;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -74,6 +75,7 @@ pub enum Message {
     BlocksRequest { timeslot: u64 },
     BlocksResponse { timeslot: u64, blocks: Vec<Block> },
     BlockProposal { block: Block },
+    TxProposal { tx: SimpleCreditTx },
 }
 
 impl Display for Message {
@@ -89,6 +91,7 @@ impl Display for Message {
                 Self::BlocksRequest { .. } => "BlockRequest",
                 Self::BlocksResponse { .. } => "BlockResponse",
                 Self::BlockProposal { .. } => "BlockProposal",
+                Self::TxProposal { .. } => "TxProposal",
             }
         )
     }
@@ -221,7 +224,7 @@ impl Router {
             .copied()
     }
 
-    // retrieve the socket addr for each peer, except the one asking
+    /// retrieve the socket addr for each peer, except the one asking
     pub fn get_contacts(&self, exception: &SocketAddr) -> Vec<SocketAddr> {
         self.peers
             .iter()
@@ -505,6 +508,17 @@ pub async fn run(
                                     .await;
                             });
                         }
+                        Message::TxProposal { tx } => {
+                            // send to main
+
+                            let net_to_main_tx = net_to_main_tx.clone();
+
+                            async_std::task::spawn(async move {
+                                net_to_main_tx
+                                    .send(ProtocolMessage::TxProposalRemote { tx, peer_addr })
+                                    .await;
+                            });
+                        }
                     }
                 }
                 NetworkEvent::OutboundMessage { message } => {
@@ -535,10 +549,21 @@ pub async fn run(
 
                             router.regossip(&peer_addr, Message::BlockProposal { block });
                         }
+                        ProtocolMessage::TxProposalRemote { tx, peer_addr } => {
+                            // propagating a tx received over the network that was valid
+                            // do not send back to the node who sent to you
+
+                            router.regossip(&peer_addr, Message::TxProposal { tx });
+                        }
                         ProtocolMessage::BlockProposalLocal { block } => {
                             // propagating a block generated locally, send to all
 
                             router.gossip(Message::BlockProposal { block });
+                        }
+                        ProtocolMessage::TxProposalLocal { tx } => {
+                            // propagating a tx generated locally, send to all
+
+                            router.gossip(Message::TxProposal { tx });
                         }
                         ProtocolMessage::StateUpdateRequest => {
                             let state = router.get_state();

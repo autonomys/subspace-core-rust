@@ -65,43 +65,56 @@ impl Inner {
         if current_epoch >= EPOCHS_PER_EON * SOLUTION_RANGE_LOOKBACK_EONS
             && current_epoch % EPOCHS_PER_EON == 0
         {
-            let used_eon_start_epoch_index =
+            let lookback_eon_start_epoch_index =
                 current_epoch - EPOCHS_PER_EON * SOLUTION_RANGE_LOOKBACK_EONS;
-            let used_eon_index = used_eon_start_epoch_index / EPOCHS_PER_EON;
+            let lookback_eon_index = lookback_eon_start_epoch_index / EPOCHS_PER_EON;
             // Sum up block count from all epochs in a lookback eon
-            let block_count = (used_eon_start_epoch_index..)
+            let block_count = (lookback_eon_start_epoch_index..)
                 .take(EPOCHS_PER_EON as usize)
                 .map(|epoch_index| self.epochs.get(&epoch_index).unwrap().get_block_count())
                 .sum::<u64>();
             // Get solution range of the previous eon (fallback to eon 0 if necessary in case of first
             // few eons)
-            let used_solution_range = *self
+            let lookback_solution_range = *self
                 .eon_to_solution_range
-                .get(&used_eon_index)
+                .get(&lookback_eon_index)
                 .expect("No solution range for current eon, this should never happen");
             // Re-adjust previous solution range based on new block count
             let solution_range = if block_count > 0 {
-                let solution_range = (used_solution_range as f64 / block_count as f64
-                    * (TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64)
+                // let solution_range = (lookback_solution_range as f64 / block_count as f64
+                //     * (TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64)
+                //     .round() as u64;
+
+                // let mut range_multiplier: f64 =
+                //     (TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64 / block_count as f64;
+                //
+                // if range_multiplier > 1f64 {
+                //     range_multiplier *= 0.5f64;
+                // } else {
+                // }
+
+                let solution_range = (lookback_solution_range as f64
+                    * ((TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64 / block_count as f64))
                     .round() as u64;
+
                 // Should divide by 2 without remainder
                 solution_range / 2 * 2
             } else {
-                used_solution_range
+                lookback_solution_range
             };
             self.eon_to_solution_range.insert(
-                used_eon_index + SOLUTION_RANGE_LOOKBACK_EONS,
-                solution_range,
+                lookback_eon_index + SOLUTION_RANGE_LOOKBACK_EONS,
+                lookback_solution_range,
             );
 
-            let bytes_pledged = (u64::MAX / used_solution_range) * PIECE_SIZE as u64;
+            let bytes_pledged = (u64::MAX / lookback_solution_range) * PIECE_SIZE as u64;
 
             info!(
                 "Closed an eon, block count is {}, used solution range {}, new solution range is {}, ~{}MiB bytes pledged",
                 block_count,
-                used_solution_range,
+                lookback_solution_range,
                 solution_range,
-                bytes_pledged / 1024 / 1024
+                bytes_pledged / 1024 / 1024,
             );
         }
 
@@ -163,6 +176,7 @@ impl EpochTracker {
         epoch_index: u64,
         timeslot: u64,
         block_id: BlockId,
+        // distance_from_challenge: u64,
         solution_range: u64,
     ) {
         let mut inner = self.inner.lock().await;
