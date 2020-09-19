@@ -1,7 +1,7 @@
 use crate::block::Block;
 use crate::console::AppState;
 use crate::farmer::{FarmerMessage, Solution};
-use crate::network::{Network, NodeType};
+use crate::network::{GossipMessage, Network, NodeType};
 use crate::timer::EpochTracker;
 use crate::transaction::SimpleCreditTx;
 use crate::{
@@ -46,21 +46,12 @@ pub enum ProtocolMessage {
     BlocksResponse { blocks: Vec<Block>, timeslot: u64 },
     /// Net receives new full block, validates/applies, sends back to net for re-gossip
     BlockProposalRemote { block: Block, peer_addr: SocketAddr },
-    /// A valid full block has been produced locally and needs to be gossiped
-    BlockProposalLocal { block: Block },
     /// Solver sends a set of solutions back to main for application
     BlockSolutions { solutions: Vec<Solution> },
     BlockArrived {
         block: Block,
         peer_addr: SocketAddr,
         cached: bool,
-    },
-    /// A valid full block has been produced locally and needs to be gossiped
-    TxProposalLocal { tx: SimpleCreditTx },
-    /// Net receives new tx, validates/applies, sends back to net for re-gossip
-    TxProposalRemote {
-        tx: SimpleCreditTx,
-        peer_addr: SocketAddr,
     },
     /// Main sends a state update request to manager for console state
     StateUpdateRequest,
@@ -79,11 +70,8 @@ impl Display for ProtocolMessage {
                 Self::BlocksRequestFrom { .. } => "BlockRequestFrom",
                 Self::BlocksResponseTo { .. } => "BlockResponseTo",
                 Self::BlockProposalRemote { .. } => "BlockProposalRemote",
-                Self::BlockProposalLocal { .. } => "BlockProposalLocal",
                 Self::BlockSolutions { .. } => "BlockSolutions",
                 Self::BlockArrived { .. } => "BlockArrived",
-                Self::TxProposalLocal { .. } => "TxProposalLocal",
-                Self::TxProposalRemote { .. } => "TxProposalRemote",
                 Self::StateUpdateRequest { .. } => "StateUpdateRequest",
                 Self::StateUpdateResponse { .. } => "StateUpdateResponse",
             }
@@ -278,8 +266,8 @@ pub async fn run(
 
                             // check if the block is valid and apply
                             if ledger.validate_and_apply_remote_block(block.clone()).await {
-                                main_to_net_tx
-                                    .send(ProtocolMessage::BlockProposalRemote { block, peer_addr })
+                                network
+                                    .regossip(&peer_addr, GossipMessage::BlockProposal { block })
                                     .await;
                             }
                         }
@@ -294,8 +282,8 @@ pub async fn run(
                             );
 
                             if ledger.validate_and_apply_remote_block(block.clone()).await {
-                                main_to_net_tx
-                                    .send(ProtocolMessage::BlockProposalRemote { block, peer_addr })
+                                network
+                                    .regossip(&peer_addr, GossipMessage::BlockProposal { block })
                                     .await;
                             }
 
@@ -316,20 +304,9 @@ pub async fn run(
                             if !solutions.is_empty() {
                                 for solution in solutions.into_iter() {
                                     let block = ledger.create_and_apply_local_block(solution).await;
-                                    main_to_net_tx
-                                        .send(ProtocolMessage::BlockProposalLocal { block })
-                                        .await;
+                                    network.gossip(GossipMessage::BlockProposal { block }).await;
                                 }
                             }
-                        }
-                        ProtocolMessage::TxProposalRemote { tx, peer_addr } => {
-                            // verify the tx
-                            // if ledger.validate_and_stage_tx(tx.clone()) {
-                            //     // regossip the tx
-                            //     main_to_net_tx
-                            //         .send(ProtocolMessage::TxProposalRemote { tx, peer_addr })
-                            //         .await;
-                            // }
                         }
                         ProtocolMessage::StateUpdateResponse { mut state } => {
                             state.node_type = node_type.to_string();

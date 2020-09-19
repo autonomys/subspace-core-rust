@@ -465,12 +465,12 @@ impl Network {
     }
 
     /// Send a message to all peers
-    async fn gossip(&self, message: GossipMessage) {
+    pub(crate) async fn gossip(&self, message: GossipMessage) {
         self.inner.router.lock().await.gossip(message);
     }
 
     /// Send a message to all but one peer (who sent you the message)
-    async fn regossip(&self, sender: &SocketAddr, message: GossipMessage) {
+    pub(crate) async fn regossip(&self, sender: &SocketAddr, message: GossipMessage) {
         self.inner.router.lock().await.regossip(sender, message);
     }
 
@@ -645,32 +645,6 @@ pub async fn run(
                                 .await
                                 .send(&node_addr, Message::BlocksResponse { timeslot, blocks });
                         }
-                        ProtocolMessage::BlockProposalRemote { block, peer_addr } => {
-                            // propagating a block received over the network that was valid
-                            // do not send back to the node who sent to you
-
-                            network
-                                .regossip(&peer_addr, GossipMessage::BlockProposal { block })
-                                .await;
-                        }
-                        ProtocolMessage::TxProposalRemote { tx, peer_addr } => {
-                            // propagating a tx received over the network that was valid
-                            // do not send back to the node who sent to you
-
-                            network
-                                .regossip(&peer_addr, GossipMessage::TxProposal { tx })
-                                .await;
-                        }
-                        ProtocolMessage::BlockProposalLocal { block } => {
-                            // propagating a block generated locally, send to all
-
-                            network.gossip(GossipMessage::BlockProposal { block }).await;
-                        }
-                        ProtocolMessage::TxProposalLocal { tx } => {
-                            // propagating a tx generated locally, send to all
-
-                            network.gossip(GossipMessage::TxProposal { tx }).await;
-                        }
                         ProtocolMessage::StateUpdateRequest => {
                             let state = network.inner.router.lock().await.get_state();
                             net_to_main_tx
@@ -796,11 +770,11 @@ pub async fn run(
                             Message::TxProposal { tx } => {
                                 // send to main
 
-                                let net_to_main_tx = net_to_main_tx.clone();
+                                let network = network.clone();
 
                                 async_std::task::spawn(async move {
-                                    net_to_main_tx
-                                        .send(ProtocolMessage::TxProposalRemote { tx, peer_addr })
+                                    network
+                                        .regossip(&peer_addr, GossipMessage::TxProposal { tx })
                                         .await;
                                 });
                             }
