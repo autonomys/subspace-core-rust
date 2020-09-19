@@ -67,8 +67,6 @@ impl FromStr for NodeType {
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub enum Message {
-    Ping,
-    Pong,
     PeersRequest,
     PeersResponse { contacts: Vec<SocketAddr> },
     BlocksRequest { timeslot: u64 },
@@ -83,8 +81,6 @@ impl Display for Message {
             f,
             "{}",
             match self {
-                Self::Ping => "Ping",
-                Self::Pong => "Pong",
                 Self::PeersRequest => "PeersRequest",
                 Self::PeersResponse { .. } => "PeersResponse",
                 Self::BlocksRequest { .. } => "BlockRequest",
@@ -416,11 +412,6 @@ pub async fn run(
                     // ToDo: (later) implement a cache of last x messages (only if block or tx)
 
                     match message {
-                        Message::Ping => {
-                            // send a pong response
-
-                            router.send(&peer_addr, Message::Pong);
-                        }
                         Message::Pong => {
                             // do nothing for now
 
