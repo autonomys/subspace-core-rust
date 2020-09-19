@@ -332,6 +332,7 @@ pub(crate) enum RequestError {
     ConnectionClosed,
     BadResponse,
     MessageTooLong,
+    NoPeers,
     TimedOut,
 }
 
@@ -482,6 +483,14 @@ impl Network {
             return Err(RequestError::MessageTooLong);
         }
 
+        let router = self.inner.router.lock().await;
+        let peer = match router.get_random_peer() {
+            Some(peer) => peer,
+            None => {
+                return Err(RequestError::NoPeers);
+            }
+        };
+
         let id;
         let (result_sender, result_receiver) = async_oneshot::oneshot();
         let requests_container = &self.inner.requests_container;
@@ -492,10 +501,13 @@ impl Network {
             id = requests_container.next_id;
 
             requests_container.next_id = requests_container.next_id.wrapping_add(1);
+            // TODO: No one writes to this yet
             requests_container.handlers.insert(id, result_sender);
         }
 
-        // TODO: Make actual request
+        // TODO: Should be a better method for this (maybe without router)
+        router.maybe_send_bytes_to(&peer, message);
+        drop(router);
 
         future::or(
             async move {
