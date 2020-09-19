@@ -1,4 +1,3 @@
-#![feature(try_blocks)]
 use async_std::sync::channel;
 use async_std::task;
 use console::AppState;
@@ -136,26 +135,27 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     let solver_to_main_tx = any_to_main_tx.clone();
     let main_to_main_tx = any_to_main_tx.clone();
 
+    let network = network::run(
+        node_type,
+        node_id,
+        node_addr,
+        any_to_main_tx,
+        main_to_net_rx,
+    )
+    .await;
+
     // manager loop
     let main = manager::run(
         node_type,
         genesis_piece_hash,
         &mut ledger,
         any_to_main_rx,
+        network,
         main_to_net_tx,
         main_to_main_tx,
         state_sender,
         timer_to_farmer_tx,
         epoch_tracker,
-    );
-
-    // network loop
-    let net = network::run(
-        node_type,
-        node_id,
-        node_addr,
-        any_to_main_tx,
-        main_to_net_rx,
     );
 
     if is_farming {
@@ -164,9 +164,9 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         // start solve loop
         let farmer = farmer::run(timer_to_farmer_rx, solver_to_main_tx, &plot);
 
-        join!(main, net, farmer);
+        join!(main, farmer);
     } else {
         // listen and farm
-        join!(main, net);
+        join!(main);
     }
 }

@@ -10,18 +10,19 @@ use bytes::buf::BufMutExt;
 use bytes::{Bytes, BytesMut};
 use futures::lock::Mutex as AsyncMutex;
 use futures::{join, AsyncReadExt, AsyncWriteExt, StreamExt};
+use futures_lite::future;
 use log::*;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
-use std::fmt::Display;
-use std::io;
+use std::fmt::{Debug, Display};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
-use std::{fmt, mem};
+use std::time::Duration;
+use std::{fmt, io, mem};
 
 /* Todo
  *
@@ -36,6 +37,10 @@ use std::{fmt, mem};
  * Handle get peers response with outbound message correctly
  *
 */
+
+const MAX_MESSAGE_CONTENTS_LENGTH: usize = 2usize.pow(16) - 1;
+// TODO: What should this timeout be?
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub type NodeID = [u8; 32];
 
@@ -69,6 +74,16 @@ impl FromStr for NodeType {
     }
 }
 
+pub(crate) trait ToBytes {
+    fn to_bytes(&self) -> Bytes;
+}
+
+pub(crate) trait FromBytes {
+    fn from_bytes(bytes: &[u8]) -> Result<Self, ()>
+    where
+        Self: Sized;
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub enum Message {
     BlocksRequest { timeslot: u64 },
@@ -92,19 +107,23 @@ impl Display for Message {
     }
 }
 
-impl Message {
-    pub fn to_bytes(&self) -> Bytes {
+impl ToBytes for Message {
+    fn to_bytes(&self) -> Bytes {
         let mut writer = BytesMut::new().writer();
         bincode::serialize_into(&mut writer, self).unwrap();
         writer.into_inner().freeze()
     }
+}
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
+impl FromBytes for Message {
+    fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
         bincode::deserialize(bytes).map_err(|error| {
             debug!("Failed to deserialize network message: {}", error);
         })
     }
+}
 
+impl Message {
     pub fn get_id(&self) -> [u8; 32] {
         crypto::digest_sha_256(&self.to_bytes())
     }
@@ -254,7 +273,7 @@ fn read_messages(mut stream: TcpStream) -> Receiver<Result<Message, ()>> {
 
     async_std::task::spawn(async move {
         let header_length = 2;
-        let max_message_length = 2usize.pow(16) - 1;
+        let max_message_length = MAX_MESSAGE_CONTENTS_LENGTH;
         // We support up to 16 kiB message + 2 byte header, so since we may have message across 2
         // read buffers, allocate enough space to contain up to 2 such messages
         let mut buffer = BytesMut::with_capacity((header_length + max_message_length) * 2);
@@ -305,10 +324,30 @@ fn read_messages(mut stream: TcpStream) -> Receiver<Result<Message, ()>> {
     messages_receiver
 }
 
+pub(crate) trait Request: Debug + ToBytes {
+    type Response: FromBytes;
+}
+
+pub(crate) enum RequestError {
+    ConnectionClosed,
+    BadResponse,
+    MessageTooLong,
+    TimedOut,
+}
+
+type Response = Result<Vec<u8>, RequestError>;
+
+#[derive(Default)]
+struct RequestsContainer {
+    next_id: u32,
+    handlers: HashMap<u32, async_oneshot::Sender<Vec<u8>>>,
+}
+
 struct Inner {
     // TODO: Remove `broker_sender`
     broker_sender: Sender<NetworkEvent>,
     connections_handle: StdMutex<Option<JoinHandle<()>>>,
+    requests_container: Arc<AsyncMutex<RequestsContainer>>,
     router: AsyncMutex<Router>,
 }
 
@@ -339,11 +378,13 @@ impl Network {
         broker_sender: Sender<NetworkEvent>,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
+        let requests_container = Arc::<AsyncMutex<RequestsContainer>>::default();
         let router = Router::new(node_id, listener.local_addr()?);
 
         let inner = Arc::new(Inner {
             broker_sender: broker_sender.clone(),
             connections_handle: StdMutex::default(),
+            requests_container,
             router: AsyncMutex::new(router),
         });
 
@@ -379,6 +420,19 @@ impl Network {
             .replace(connections_handle);
 
         Ok(network)
+    }
+
+    pub(crate) async fn request<R>(&self, request: R) -> Result<R::Response, RequestError>
+    where
+        R: Request,
+    {
+        let data = self.request_internal(request.to_bytes()).await?;
+
+        R::Response::from_bytes(&data).map_err(|error| {
+            debug!("Received bad response");
+
+            RequestError::BadResponse
+        })
     }
 
     fn downgrade(&self) -> NetworkWeak {
@@ -420,6 +474,44 @@ impl Network {
 
         self.inner.router.lock().await.remove(peer_addr);
         info!("Broker has dropped a peer who disconnected");
+    }
+
+    /// Non-generic method to avoid significant duplication in final binary
+    async fn request_internal(&self, message: Bytes) -> Result<Vec<u8>, RequestError> {
+        if message.len() > MAX_MESSAGE_CONTENTS_LENGTH {
+            return Err(RequestError::MessageTooLong);
+        }
+
+        let id;
+        let (result_sender, result_receiver) = async_oneshot::oneshot();
+        let requests_container = &self.inner.requests_container;
+
+        {
+            let mut requests_container = requests_container.lock().await;
+
+            id = requests_container.next_id;
+
+            requests_container.next_id = requests_container.next_id.wrapping_add(1);
+            requests_container.handlers.insert(id, result_sender);
+        }
+
+        // TODO: Make actual request
+
+        future::or(
+            async move {
+                result_receiver
+                    .await
+                    .map_err(|_| RequestError::ConnectionClosed {})
+            },
+            async move {
+                async_io::Timer::after(REQUEST_TIMEOUT).await;
+
+                requests_container.lock().await.handlers.remove(&id);
+
+                Err(RequestError::TimedOut)
+            },
+        )
+        .await
     }
 }
 

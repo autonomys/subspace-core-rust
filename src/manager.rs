@@ -1,7 +1,7 @@
 use crate::block::Block;
 use crate::console::AppState;
 use crate::farmer::{FarmerMessage, Solution};
-use crate::network::NodeType;
+use crate::network::{Network, NodeType};
 use crate::timer::EpochTracker;
 use crate::transaction::SimpleCreditTx;
 use crate::{
@@ -97,6 +97,7 @@ pub async fn run(
     genesis_piece_hash: [u8; 32],
     ledger: &mut ledger::Ledger,
     any_to_main_rx: Receiver<ProtocolMessage>,
+    network: Network,
     main_to_net_tx: Sender<ProtocolMessage>,
     main_to_main_tx: Sender<ProtocolMessage>,
     state_sender: crossbeam_channel::Sender<AppState>,
