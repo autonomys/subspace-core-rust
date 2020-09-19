@@ -365,10 +365,7 @@ pub async fn run(
     } else {
         local_addr
     };
-    let socket = TcpListener::bind(addr).await.unwrap();
-
-    let mut connections = socket.incoming();
-    info!("Network is listening on TCP socket for inbound connections");
+    let listener = TcpListener::bind(addr).await.unwrap();
 
     // receives protocol messages from manager
     let protocol_receiver_loop = async {
@@ -385,23 +382,24 @@ pub async fn run(
 
     // receives new connection requests over the TCP socket
     let new_connection_loop = async {
+        let mut connections = listener.incoming();
+        info!("Listening on TCP socket for inbound connections");
+
         while let Some(stream) = connections.next().await {
             let broker_sender = broker_sender.clone();
 
-            async_std::task::spawn(async move {
-                info!("New inbound TCP connection initiated");
+            info!("New inbound TCP connection initiated");
 
-                let stream = stream.unwrap();
-                let peer_addr = stream.peer_addr().unwrap();
-                on_connected(peer_addr, stream, broker_sender).await;
-            });
+            let stream = stream.unwrap();
+            let peer_addr = stream.peer_addr().unwrap();
+            async_std::task::spawn(on_connected(peer_addr, stream, broker_sender));
         }
     };
 
     // receives network messages from peers and protocol messages from manager
     // maintains an async channel between each open socket and sender half
     let broker_loop = async {
-        let mut router = Router::new(node_id, socket.local_addr().unwrap());
+        let mut router = Router::new(node_id, listener.local_addr().unwrap());
 
         while let Some(event) = broker_receiver.next().await {
             match event {
@@ -412,11 +410,6 @@ pub async fn run(
                     // ToDo: (later) implement a cache of last x messages (only if block or tx)
 
                     match message {
-                        Message::Pong => {
-                            // do nothing for now
-
-                            // ToDo: latency timing
-                        }
                         Message::PeersRequest => {
                             // retrieve peers and send over the wire
 
