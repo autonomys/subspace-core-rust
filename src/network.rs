@@ -8,6 +8,7 @@ use async_std::sync::{channel, Receiver, Sender};
 use async_std::task::JoinHandle;
 use bytes::buf::BufMutExt;
 use bytes::{Bytes, BytesMut};
+use futures::lock::Mutex as AsyncMutex;
 use futures::{join, AsyncReadExt, AsyncWriteExt, StreamExt};
 use log::*;
 use rand::prelude::*;
@@ -19,7 +20,7 @@ use std::io;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::{fmt, mem};
 
 /* Todo
@@ -114,13 +115,6 @@ impl Message {
 }
 
 enum NetworkEvent {
-    NewPeer {
-        peer_addr: SocketAddr,
-        stream: TcpStream,
-    },
-    RemovedPeer {
-        peer_addr: SocketAddr,
-    },
     InboundMessage {
         peer_addr: SocketAddr,
         message: Message,
@@ -318,43 +312,11 @@ fn read_messages(mut stream: TcpStream) -> Receiver<Result<Message, ()>> {
     messages_receiver
 }
 
-async fn connect(peer_addr: SocketAddr, broker_sender: Sender<NetworkEvent>) {
-    let stream = TcpStream::connect(peer_addr).await.unwrap();
-    on_connected(peer_addr, stream, broker_sender).await;
-}
-
-async fn on_connected(
-    peer_addr: SocketAddr,
-    stream: TcpStream,
-    broker_sender: Sender<NetworkEvent>,
-) {
-    broker_sender
-        .send({
-            let stream = stream.clone();
-
-            NetworkEvent::NewPeer { peer_addr, stream }
-        })
-        .await;
-
-    let mut messages_receiver = read_messages(stream);
-
-    while let Some(message) = messages_receiver.next().await {
-        if let Ok(message) = message {
-            // info!("{:?}", message);
-            broker_sender
-                .send(NetworkEvent::InboundMessage { peer_addr, message })
-                .await;
-        }
-    }
-
-    broker_sender
-        .send(NetworkEvent::RemovedPeer { peer_addr })
-        .await;
-}
-
 struct Inner {
-    address: SocketAddr,
-    connections_handle: Mutex<Option<JoinHandle<()>>>,
+    // TODO: Remove `broker_sender`
+    broker_sender: Sender<NetworkEvent>,
+    connections_handle: StdMutex<Option<JoinHandle<()>>>,
+    router: AsyncMutex<Router>,
 }
 
 impl Drop for Inner {
@@ -378,13 +340,18 @@ struct Network {
 
 impl Network {
     // TODO: Remove `broker_sender`
-    async fn new(addr: SocketAddr, broker_sender: Sender<NetworkEvent>) -> io::Result<Self> {
+    async fn new(
+        node_id: NodeID,
+        addr: SocketAddr,
+        broker_sender: Sender<NetworkEvent>,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
-        let address = listener.local_addr()?;
+        let router = Router::new(node_id, listener.local_addr()?);
 
         let inner = Arc::new(Inner {
-            address,
-            connections_handle: Mutex::default(),
+            broker_sender: broker_sender.clone(),
+            connections_handle: StdMutex::default(),
+            router: AsyncMutex::new(router),
         });
 
         let network = Self { inner };
@@ -403,11 +370,7 @@ impl Network {
                     let stream = stream.unwrap();
                     let peer_addr = stream.peer_addr().unwrap();
                     if let Some(network) = network_weak.upgrade() {
-                        async_std::task::spawn(on_connected(
-                            peer_addr,
-                            stream,
-                            broker_sender.clone(),
-                        ));
+                        async_std::task::spawn(network.on_connected(peer_addr, stream));
                     } else {
                         break;
                     }
@@ -430,8 +393,40 @@ impl Network {
         NetworkWeak { inner }
     }
 
-    fn address(&self) -> SocketAddr {
-        self.inner.address
+    async fn connect_to(&self, peer_addr: SocketAddr) -> io::Result<()> {
+        let stream = TcpStream::connect(peer_addr).await?;
+        async_std::task::spawn(self.clone().on_connected(peer_addr, stream));
+
+        Ok(())
+    }
+
+    async fn on_connected(self, peer_addr: SocketAddr, mut stream: TcpStream) {
+        let (client_sender, mut client_receiver) = channel::<Bytes>(32);
+        self.inner.router.lock().await.add(peer_addr, client_sender);
+
+        let mut messages_receiver = read_messages(stream.clone());
+
+        // listen for new messages from the broker and send back to peer over stream
+        async_std::task::spawn(async move {
+            while let Some(bytes) = client_receiver.next().await {
+                let length = bytes.len() as u16;
+                stream.write_all(&length.to_le_bytes()).await.unwrap();
+                stream.write_all(&bytes).await.unwrap();
+            }
+        });
+
+        while let Some(message) = messages_receiver.next().await {
+            if let Ok(message) = message {
+                // trace!("{:?}", message);
+                self.inner
+                    .broker_sender
+                    .send(NetworkEvent::InboundMessage { peer_addr, message })
+                    .await;
+            }
+        }
+
+        self.inner.router.lock().await.remove(peer_addr);
+        info!("Broker has dropped a peer who disconnected");
     }
 }
 
@@ -463,7 +458,9 @@ pub async fn run(
         local_addr
     };
     // TODO: This works because of `join!()` at the end that prevents `network` from being dropped
-    let network = Network::new(addr, broker_sender.clone()).await.unwrap();
+    let network = Network::new(node_id, addr, broker_sender.clone())
+        .await
+        .unwrap();
 
     // receives protocol messages from manager
     let protocol_receiver_loop = async {
@@ -481,8 +478,6 @@ pub async fn run(
     // receives network messages from peers and protocol messages from manager
     // maintains an async channel between each open socket and sender half
     let broker_loop = async {
-        let mut router = Router::new(node_id, network.address());
-
         while let Some(event) = broker_receiver.next().await {
             match event {
                 NetworkEvent::InboundMessage { peer_addr, message } => {
@@ -497,9 +492,15 @@ pub async fn run(
 
                             // ToDo: fully implement and test
 
-                            let contacts = router.get_contacts(&peer_addr);
+                            let contacts =
+                                network.inner.router.lock().await.get_contacts(&peer_addr);
 
-                            router.send(&peer_addr, Message::PeersResponse { contacts });
+                            network
+                                .inner
+                                .router
+                                .lock()
+                                .await
+                                .send(&peer_addr, Message::PeersResponse { contacts });
                         }
                         Message::PeersResponse { contacts } => {
                             // ToDo: match responses to request id, else ignore
@@ -507,10 +508,11 @@ pub async fn run(
                             // convert binary to peers, for each peer, attempt to connect
                             // need to write another method to add peer on connection
                             for potential_peer_addr in contacts.iter().copied() {
-                                while router.peers.len() < MAX_PEERS {
+                                while network.inner.router.lock().await.peers.len() < MAX_PEERS {
                                     let broker_sender = broker_sender.clone();
+                                    let network = network.clone();
                                     async_std::task::spawn(async move {
-                                        connect(potential_peer_addr, broker_sender).await;
+                                        network.connect_to(peer_addr).await.unwrap();
                                     });
                                 }
                             }
@@ -593,6 +595,7 @@ pub async fn run(
                             // ledger requested a block at a given index
                             // send a block_request to one peer chosen at random from gossip group
 
+                            let router = network.inner.router.lock().await;
                             if let Some(peer) = router.get_random_peer() {
                                 router.send(&peer, Message::BlocksRequest { timeslot });
                             } else {
@@ -606,32 +609,57 @@ pub async fn run(
                         } => {
                             // send a block back to a peer that has requested it from you
 
-                            router.send(&node_addr, Message::BlocksResponse { timeslot, blocks });
+                            network
+                                .inner
+                                .router
+                                .lock()
+                                .await
+                                .send(&node_addr, Message::BlocksResponse { timeslot, blocks });
                         }
                         ProtocolMessage::BlockProposalRemote { block, peer_addr } => {
                             // propagating a block received over the network that was valid
                             // do not send back to the node who sent to you
 
-                            router.regossip(&peer_addr, Message::BlockProposal { block });
+                            network
+                                .inner
+                                .router
+                                .lock()
+                                .await
+                                .regossip(&peer_addr, Message::BlockProposal { block });
                         }
                         ProtocolMessage::TxProposalRemote { tx, peer_addr } => {
                             // propagating a tx received over the network that was valid
                             // do not send back to the node who sent to you
 
-                            router.regossip(&peer_addr, Message::TxProposal { tx });
+                            network
+                                .inner
+                                .router
+                                .lock()
+                                .await
+                                .regossip(&peer_addr, Message::TxProposal { tx });
                         }
                         ProtocolMessage::BlockProposalLocal { block } => {
                             // propagating a block generated locally, send to all
 
-                            router.gossip(Message::BlockProposal { block });
+                            network
+                                .inner
+                                .router
+                                .lock()
+                                .await
+                                .gossip(Message::BlockProposal { block });
                         }
                         ProtocolMessage::TxProposalLocal { tx } => {
                             // propagating a tx generated locally, send to all
 
-                            router.gossip(Message::TxProposal { tx });
+                            network
+                                .inner
+                                .router
+                                .lock()
+                                .await
+                                .gossip(Message::TxProposal { tx });
                         }
                         ProtocolMessage::StateUpdateRequest => {
-                            let state = router.get_state();
+                            let state = network.inner.router.lock().await.get_state();
                             net_to_main_tx
                                 .send(ProtocolMessage::StateUpdateResponse { state })
                                 .await;
@@ -640,27 +668,6 @@ pub async fn run(
                             "Network protocol listener has received an unknown protocol message!"
                         ),
                     }
-                }
-                NetworkEvent::NewPeer {
-                    peer_addr,
-                    mut stream,
-                } => {
-                    info!("Broker is adding a new peer");
-                    let (client_sender, mut client_receiver) = channel::<Bytes>(32);
-                    router.add(peer_addr, client_sender);
-
-                    // listen for new messages from the broker and send back to peer over stream
-                    async_std::task::spawn(async move {
-                        while let Some(bytes) = client_receiver.next().await {
-                            let length = bytes.len() as u16;
-                            stream.write_all(&length.to_le_bytes()).await.unwrap();
-                            stream.write_all(&bytes).await.unwrap();
-                        }
-                    });
-                }
-                NetworkEvent::RemovedPeer { peer_addr } => {
-                    router.remove(peer_addr);
-                    info!("Broker has dropped a peer who disconnected");
                 }
             }
         }
@@ -672,7 +679,7 @@ pub async fn run(
             info!("Connecting to gateway node");
 
             let broker_sender = broker_sender.clone();
-            connect(gateway_addr, broker_sender).await;
+            network.connect_to(gateway_addr).await.unwrap();
         }
     };
 
