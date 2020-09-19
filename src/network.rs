@@ -487,6 +487,10 @@ impl Network {
         })
     }
 
+    pub(crate) async fn get_state(&self) -> console::AppState {
+        self.inner.router.lock().await.get_state()
+    }
+
     fn downgrade(&self) -> NetworkWeak {
         let inner = Arc::downgrade(&self.inner);
         NetworkWeak { inner }
@@ -612,7 +616,6 @@ pub async fn run(
     // receives protocol messages from manager
     let protocol_receiver_loop = {
         let network = network.clone();
-        let net_to_main_tx = net_to_main_tx.clone();
 
         async move {
             info!("Network is listening for protocol messages");
@@ -644,12 +647,6 @@ pub async fn run(
                                 .lock()
                                 .await
                                 .send(&node_addr, Message::BlocksResponse { timeslot, blocks });
-                        }
-                        ProtocolMessage::StateUpdateRequest => {
-                            let state = network.inner.router.lock().await.get_state();
-                            net_to_main_tx
-                                .send(ProtocolMessage::StateUpdateResponse { state })
-                                .await;
                         }
                         _ => panic!(
                             "Network protocol listener has received an unknown protocol message!"

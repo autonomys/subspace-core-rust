@@ -53,10 +53,6 @@ pub enum ProtocolMessage {
         peer_addr: SocketAddr,
         cached: bool,
     },
-    /// Main sends a state update request to manager for console state
-    StateUpdateRequest,
-    /// Manager sends a state update response to main for console state
-    StateUpdateResponse { state: AppState },
 }
 
 impl Display for ProtocolMessage {
@@ -72,8 +68,6 @@ impl Display for ProtocolMessage {
                 Self::BlockProposalRemote { .. } => "BlockProposalRemote",
                 Self::BlockSolutions { .. } => "BlockSolutions",
                 Self::BlockArrived { .. } => "BlockArrived",
-                Self::StateUpdateRequest { .. } => "StateUpdateRequest",
-                Self::StateUpdateResponse { .. } => "StateUpdateResponse",
             }
         )
     }
@@ -308,17 +302,6 @@ pub async fn run(
                                 }
                             }
                         }
-                        ProtocolMessage::StateUpdateResponse { mut state } => {
-                            state.node_type = node_type.to_string();
-                            state.peers = state.peers + "/" + &MAX_PEERS.to_string()[..];
-                            state.blocks = "TODO".to_string();
-                            state.pieces = match node_type {
-                                NodeType::Gateway => PLOT_SIZE.to_string(),
-                                NodeType::Farmer => PLOT_SIZE.to_string(),
-                                NodeType::Peer => 0.to_string(),
-                            };
-                            state_sender.send(state).unwrap();
-                        }
                         _ => panic!(
                             "Main protocol listener has received an unknown protocol message!"
                         ),
@@ -362,9 +345,17 @@ pub async fn run(
         // send state update requests in a loop to network
         if CONSOLE {
             loop {
-                main_to_net_tx
-                    .send(ProtocolMessage::StateUpdateRequest)
-                    .await;
+                let mut state = network.get_state().await;
+                state.node_type = node_type.to_string();
+                state.peers = state.peers + "/" + &MAX_PEERS.to_string()[..];
+                state.blocks = "TODO".to_string();
+                state.pieces = match node_type {
+                    NodeType::Gateway => PLOT_SIZE.to_string(),
+                    NodeType::Farmer => PLOT_SIZE.to_string(),
+                    NodeType::Peer => 0.to_string(),
+                };
+                state_sender.send(state).unwrap();
+
                 task::sleep(Duration::from_millis(1000)).await;
             }
         }
