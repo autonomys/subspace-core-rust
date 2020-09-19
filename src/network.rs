@@ -71,8 +71,6 @@ impl FromStr for NodeType {
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub enum Message {
-    PeersRequest,
-    PeersResponse { contacts: Vec<SocketAddr> },
     BlocksRequest { timeslot: u64 },
     BlocksResponse { timeslot: u64, blocks: Vec<Block> },
     BlockProposal { block: Block },
@@ -85,8 +83,6 @@ impl Display for Message {
             f,
             "{}",
             match self {
-                Self::PeersRequest => "PeersRequest",
-                Self::PeersResponse { .. } => "PeersResponse",
                 Self::BlocksRequest { .. } => "BlockRequest",
                 Self::BlocksResponse { .. } => "BlockResponse",
                 Self::BlockProposal { .. } => "BlockProposal",
@@ -566,39 +562,39 @@ pub async fn run(
                         // ToDo: (later) implement a cache of last x messages (only if block or tx)
 
                         match message {
-                            Message::PeersRequest => {
-                                // retrieve peers and send over the wire
-
-                                // ToDo: fully implement and test
-
-                                let contacts =
-                                    network.inner.router.lock().await.get_contacts(&peer_addr);
-
-                                network
-                                    .inner
-                                    .router
-                                    .lock()
-                                    .await
-                                    .send(&peer_addr, Message::PeersResponse { contacts });
-                            }
-                            Message::PeersResponse { contacts } => {
-                                // ToDo: match responses to request id, else ignore
-
-                                // convert binary to peers, for each peer, attempt to connect
-                                // need to write another method to add peer on connection
-                                for potential_peer_addr in contacts.iter().copied() {
-                                    while network.inner.router.lock().await.peers.len() < MAX_PEERS
-                                    {
-                                        let broker_sender = broker_sender.clone();
-                                        let network = network.clone();
-                                        async_std::task::spawn(async move {
-                                            network.connect_to(peer_addr).await.unwrap();
-                                        });
-                                    }
-                                }
-
-                                // if we still have too few peers, should we try another peer
-                            }
+                            // Message::PeersRequest => {
+                            //     // retrieve peers and send over the wire
+                            //
+                            //     // ToDo: fully implement and test
+                            //
+                            //     let contacts =
+                            //         network.inner.router.lock().await.get_contacts(&peer_addr);
+                            //
+                            //     network
+                            //         .inner
+                            //         .router
+                            //         .lock()
+                            //         .await
+                            //         .send(&peer_addr, Message::PeersResponse { contacts });
+                            // }
+                            // Message::PeersResponse { contacts } => {
+                            //     // ToDo: match responses to request id, else ignore
+                            //
+                            //     // convert binary to peers, for each peer, attempt to connect
+                            //     // need to write another method to add peer on connection
+                            //     for potential_peer_addr in contacts.iter().copied() {
+                            //         while network.inner.router.lock().await.peers.len() < MAX_PEERS
+                            //         {
+                            //             let broker_sender = broker_sender.clone();
+                            //             let network = network.clone();
+                            //             async_std::task::spawn(async move {
+                            //                 network.connect_to(peer_addr).await.unwrap();
+                            //             });
+                            //         }
+                            //     }
+                            //
+                            //     // if we still have too few peers, should we try another peer
+                            // }
                             Message::BlocksRequest { timeslot } => {
                                 let net_to_main_tx = net_to_main_tx.clone();
                                 let message = ProtocolMessage::BlocksRequestFrom {
