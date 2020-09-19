@@ -19,7 +19,7 @@ use std::io;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::{fmt, mem};
 
 /* Todo
@@ -354,16 +354,24 @@ async fn on_connected(
 
 struct Inner {
     address: SocketAddr,
-    connections_handle: Option<JoinHandle<()>>,
+    connections_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Drop for Inner {
     fn drop(&mut self) {
         // Stop accepting new connections, this will also drop the listener and close the socket
-        async_std::task::spawn(self.connections_handle.take().unwrap().cancel());
+        async_std::task::spawn(
+            self.connections_handle
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .cancel(),
+        );
     }
 }
 
+#[derive(Clone)]
 struct Network {
     inner: Arc<Inner>,
 }
@@ -374,30 +382,67 @@ impl Network {
         let listener = TcpListener::bind(addr).await?;
         let address = listener.local_addr()?;
 
-        let connections_handle = async_std::task::spawn(async move {
-            let mut connections = listener.incoming();
-
-            info!("Listening on TCP socket for inbound connections");
-
-            while let Some(stream) = connections.next().await {
-                info!("New inbound TCP connection initiated");
-
-                let stream = stream.unwrap();
-                let peer_addr = stream.peer_addr().unwrap();
-                async_std::task::spawn(on_connected(peer_addr, stream, broker_sender.clone()));
-            }
-        });
-
         let inner = Arc::new(Inner {
             address,
-            connections_handle: Some(connections_handle),
+            connections_handle: Mutex::default(),
         });
 
-        Ok(Self { inner })
+        let network = Self { inner };
+
+        let connections_handle = {
+            let network_weak = network.downgrade();
+
+            async_std::task::spawn(async move {
+                let mut connections = listener.incoming();
+
+                info!("Listening on TCP socket for inbound connections");
+
+                while let Some(stream) = connections.next().await {
+                    info!("New inbound TCP connection initiated");
+
+                    let stream = stream.unwrap();
+                    let peer_addr = stream.peer_addr().unwrap();
+                    if let Some(network) = network_weak.upgrade() {
+                        async_std::task::spawn(on_connected(
+                            peer_addr,
+                            stream,
+                            broker_sender.clone(),
+                        ));
+                    } else {
+                        break;
+                    }
+                }
+            })
+        };
+
+        network
+            .inner
+            .connections_handle
+            .lock()
+            .unwrap()
+            .replace(connections_handle);
+
+        Ok(network)
+    }
+
+    fn downgrade(&self) -> NetworkWeak {
+        let inner = Arc::downgrade(&self.inner);
+        NetworkWeak { inner }
     }
 
     fn address(&self) -> SocketAddr {
         self.inner.address
+    }
+}
+
+#[derive(Clone)]
+struct NetworkWeak {
+    inner: Weak<Inner>,
+}
+
+impl NetworkWeak {
+    fn upgrade(&self) -> Option<Network> {
+        self.inner.upgrade().map(|inner| Network { inner })
     }
 }
 
