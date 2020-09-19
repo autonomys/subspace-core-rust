@@ -1,14 +1,12 @@
 use crate::{crypto, Piece, Tag, PIECE_SIZE};
 use async_std::fs::OpenOptions;
-use async_std::io::prelude::*;
 use async_std::path::PathBuf;
 use async_std::task;
 use futures::channel::mpsc;
 use futures::channel::mpsc::Sender;
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
-use futures::StreamExt;
-use futures::{AsyncReadExt, AsyncWriteExt, SinkExt};
+use futures::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SinkExt, StreamExt};
 use log::*;
 use rocksdb::IteratorMode;
 use rocksdb::DB;
