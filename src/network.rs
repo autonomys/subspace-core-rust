@@ -5,6 +5,7 @@ use crate::{console, MAX_PEERS};
 use crate::{crypto, DEV_GATEWAY_ADDR};
 use async_std::net::{TcpListener, TcpStream};
 use async_std::sync::{channel, Receiver, Sender};
+use async_std::task::JoinHandle;
 use bytes::buf::BufMutExt;
 use bytes::{Bytes, BytesMut};
 use futures::{join, AsyncReadExt, AsyncWriteExt, StreamExt};
@@ -14,9 +15,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt::Display;
+use std::io;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::{fmt, mem};
 
 /* Todo
@@ -349,6 +352,55 @@ async fn on_connected(
         .await;
 }
 
+struct Inner {
+    address: SocketAddr,
+    connections_handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // Stop accepting new connections, this will also drop the listener and close the socket
+        async_std::task::spawn(self.connections_handle.take().unwrap().cancel());
+    }
+}
+
+struct Network {
+    inner: Arc<Inner>,
+}
+
+impl Network {
+    // TODO: Remove `broker_sender`
+    async fn new(addr: SocketAddr, broker_sender: Sender<NetworkEvent>) -> io::Result<Self> {
+        let listener = TcpListener::bind(addr).await?;
+        let address = listener.local_addr()?;
+
+        let connections_handle = async_std::task::spawn(async move {
+            let mut connections = listener.incoming();
+
+            info!("Listening on TCP socket for inbound connections");
+
+            while let Some(stream) = connections.next().await {
+                info!("New inbound TCP connection initiated");
+
+                let stream = stream.unwrap();
+                let peer_addr = stream.peer_addr().unwrap();
+                async_std::task::spawn(on_connected(peer_addr, stream, broker_sender.clone()));
+            }
+        });
+
+        let inner = Arc::new(Inner {
+            address,
+            connections_handle: Some(connections_handle),
+        });
+
+        Ok(Self { inner })
+    }
+
+    fn address(&self) -> SocketAddr {
+        self.inner.address
+    }
+}
+
 pub async fn run(
     node_type: NodeType,
     node_id: NodeID,
@@ -365,7 +417,8 @@ pub async fn run(
     } else {
         local_addr
     };
-    let listener = TcpListener::bind(addr).await.unwrap();
+    // TODO: This works because of `join!()` at the end that prevents `network` from being dropped
+    let network = Network::new(addr, broker_sender.clone()).await.unwrap();
 
     // receives protocol messages from manager
     let protocol_receiver_loop = async {
@@ -380,26 +433,10 @@ pub async fn run(
         }
     };
 
-    // receives new connection requests over the TCP socket
-    let new_connection_loop = async {
-        let mut connections = listener.incoming();
-        info!("Listening on TCP socket for inbound connections");
-
-        while let Some(stream) = connections.next().await {
-            let broker_sender = broker_sender.clone();
-
-            info!("New inbound TCP connection initiated");
-
-            let stream = stream.unwrap();
-            let peer_addr = stream.peer_addr().unwrap();
-            async_std::task::spawn(on_connected(peer_addr, stream, broker_sender));
-        }
-    };
-
     // receives network messages from peers and protocol messages from manager
     // maintains an async channel between each open socket and sender half
     let broker_loop = async {
-        let mut router = Router::new(node_id, listener.local_addr().unwrap());
+        let mut router = Router::new(node_id, network.address());
 
         while let Some(event) = broker_receiver.next().await {
             match event {
@@ -594,10 +631,5 @@ pub async fn run(
         }
     };
 
-    join!(
-        protocol_receiver_loop,
-        new_connection_loop,
-        broker_loop,
-        network_startup
-    );
+    join!(protocol_receiver_loop, broker_loop, network_startup);
 }
