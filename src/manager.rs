@@ -1,7 +1,8 @@
 use crate::block::Block;
 use crate::console::AppState;
 use crate::farmer::{FarmerMessage, Solution};
-use crate::network::{GossipMessage, Network, NodeType};
+use crate::network::messages::GossipMessage;
+use crate::network::{Network, NodeType};
 use crate::timer::EpochTracker;
 use crate::transaction::SimpleCreditTx;
 use crate::{
