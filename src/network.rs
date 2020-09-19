@@ -164,12 +164,6 @@ impl FromBytes for Message {
     }
 }
 
-impl Message {
-    pub fn get_id(&self) -> [u8; 32] {
-        crypto::digest_sha_256(&self.to_bytes())
-    }
-}
-
 enum NetworkEvent {
     InboundMessage {
         peer_addr: SocketAddr,
