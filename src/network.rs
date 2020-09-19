@@ -85,6 +85,47 @@ pub(crate) trait FromBytes {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+pub(crate) enum GossipMessage {
+    // TODO: This is temporary for compatibility with `Message` struct
+    BlocksRequest { timeslot: u64 },
+    // TODO: This is temporary for compatibility with `Message` struct
+    BlocksResponse { timeslot: u64, blocks: Vec<Block> },
+    BlockProposal { block: Block },
+    TxProposal { tx: SimpleCreditTx },
+}
+
+impl ToBytes for GossipMessage {
+    fn to_bytes(&self) -> Bytes {
+        let mut writer = BytesMut::new().writer();
+        bincode::serialize_into(&mut writer, self).unwrap();
+        writer.into_inner().freeze()
+    }
+}
+
+impl FromBytes for GossipMessage {
+    fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
+        bincode::deserialize(bytes).map_err(|error| {
+            debug!("Failed to deserialize network message: {}", error);
+        })
+    }
+}
+
+impl Display for GossipMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::BlocksRequest { .. } => "BlockRequest",
+                Self::BlocksResponse { .. } => "BlockResponse",
+                Self::BlockProposal { .. } => "BlockProposal",
+                Self::TxProposal { .. } => "TxProposal",
+            }
+        )
+    }
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub enum Message {
     BlocksRequest { timeslot: u64 },
     BlocksResponse { timeslot: u64, blocks: Vec<Block> },
@@ -136,7 +177,7 @@ enum NetworkEvent {
     },
 }
 
-pub struct Router {
+struct Router {
     node_id: NodeID,
     node_addr: SocketAddr,
     connections: HashMap<SocketAddr, Sender<Bytes>>,
@@ -145,7 +186,7 @@ pub struct Router {
 
 impl Router {
     /// create a new empty router
-    pub fn new(node_id: NodeID, node_addr: SocketAddr) -> Router {
+    fn new(node_id: NodeID, node_addr: SocketAddr) -> Router {
         Router {
             node_id,
             node_addr,
@@ -155,7 +196,7 @@ impl Router {
     }
 
     /// add a new connection, possibly add a new peer
-    pub fn add(&mut self, node_addr: SocketAddr, sender: Sender<Bytes>) {
+    fn add(&mut self, node_addr: SocketAddr, sender: Sender<Bytes>) {
         self.connections.insert(node_addr, sender);
 
         // if peers is low, add to peers
@@ -171,7 +212,7 @@ impl Router {
     }
 
     /// remove a connection and peer if connection is removed
-    pub fn remove(&mut self, peer_addr: SocketAddr) {
+    fn remove(&mut self, peer_addr: SocketAddr) {
         // ToDo: Add another peer to replace the removed one
 
         if self.connections.contains_key(&peer_addr) {
@@ -180,8 +221,8 @@ impl Router {
         }
     }
 
-    /// send a message to all peers
-    pub fn gossip(&self, message: Message) {
+    /// Send a message to all peers
+    fn gossip(&self, message: GossipMessage) {
         let bytes = message.to_bytes();
         for node_addr in self.peers.iter() {
             trace!("Sending a {} message to {}", message, node_addr);
@@ -189,8 +230,8 @@ impl Router {
         }
     }
 
-    /// send a message to all but one peer (who sent you the message)
-    pub fn regossip(&self, sender: &SocketAddr, message: Message) {
+    /// Send a message to all but one peer (who sent you the message)
+    fn regossip(&self, sender: &SocketAddr, message: GossipMessage) {
         let bytes = message.to_bytes();
         for node_addr in self.peers.iter() {
             if node_addr != sender {
@@ -201,7 +242,7 @@ impl Router {
     }
 
     /// send a message to specific node by node_id
-    pub fn send(&self, receiver: &SocketAddr, message: Message) {
+    fn send(&self, receiver: &SocketAddr, message: Message) {
         trace!("Sending a {} message to {}", message, receiver);
         self.maybe_send_bytes_to(receiver, message.to_bytes());
     }
@@ -215,12 +256,12 @@ impl Router {
     }
 
     /// get a peer at random
-    pub fn get_random_peer(&self) -> Option<SocketAddr> {
+    fn get_random_peer(&self) -> Option<SocketAddr> {
         self.peers.iter().choose(&mut rand::thread_rng()).copied()
     }
 
     /// get a peer at random excluding a specific peer
-    pub fn get_random_peer_excluding(&self, node_addr: SocketAddr) -> Option<SocketAddr> {
+    fn get_random_peer_excluding(&self, node_addr: SocketAddr) -> Option<SocketAddr> {
         self.peers
             .iter()
             .filter(|&peer_addr| !peer_addr.eq(&node_addr))
@@ -229,7 +270,7 @@ impl Router {
     }
 
     /// retrieve the socket addr for each peer, except the one asking
-    pub fn get_contacts(&self, exception: &SocketAddr) -> Vec<SocketAddr> {
+    fn get_contacts(&self, exception: &SocketAddr) -> Vec<SocketAddr> {
         self.peers
             .iter()
             .filter(|&peer| !peer.eq(&exception))
@@ -237,7 +278,7 @@ impl Router {
             .collect()
     }
 
-    pub fn get_state(&self) -> console::AppState {
+    fn get_state(&self) -> console::AppState {
         console::AppState {
             node_type: String::from(""),
             node_id: hex::encode(&self.node_id[0..8]),
@@ -423,6 +464,16 @@ impl Network {
         Ok(network)
     }
 
+    /// Send a message to all peers
+    async fn gossip(&self, message: GossipMessage) {
+        self.inner.router.lock().await.gossip(message);
+    }
+
+    /// Send a message to all but one peer (who sent you the message)
+    async fn regossip(&self, sender: &SocketAddr, message: GossipMessage) {
+        self.inner.router.lock().await.regossip(sender, message);
+    }
+
     pub(crate) async fn request<R>(&self, request: R) -> Result<R::Response, RequestError>
     where
         R: Request,
@@ -599,42 +650,26 @@ pub async fn run(
                             // do not send back to the node who sent to you
 
                             network
-                                .inner
-                                .router
-                                .lock()
-                                .await
-                                .regossip(&peer_addr, Message::BlockProposal { block });
+                                .regossip(&peer_addr, GossipMessage::BlockProposal { block })
+                                .await;
                         }
                         ProtocolMessage::TxProposalRemote { tx, peer_addr } => {
                             // propagating a tx received over the network that was valid
                             // do not send back to the node who sent to you
 
                             network
-                                .inner
-                                .router
-                                .lock()
-                                .await
-                                .regossip(&peer_addr, Message::TxProposal { tx });
+                                .regossip(&peer_addr, GossipMessage::TxProposal { tx })
+                                .await;
                         }
                         ProtocolMessage::BlockProposalLocal { block } => {
                             // propagating a block generated locally, send to all
 
-                            network
-                                .inner
-                                .router
-                                .lock()
-                                .await
-                                .gossip(Message::BlockProposal { block });
+                            network.gossip(GossipMessage::BlockProposal { block }).await;
                         }
                         ProtocolMessage::TxProposalLocal { tx } => {
                             // propagating a tx generated locally, send to all
 
-                            network
-                                .inner
-                                .router
-                                .lock()
-                                .await
-                                .gossip(Message::TxProposal { tx });
+                            network.gossip(GossipMessage::TxProposal { tx }).await;
                         }
                         ProtocolMessage::StateUpdateRequest => {
                             let state = network.inner.router.lock().await.get_state();
