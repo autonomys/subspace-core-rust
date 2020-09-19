@@ -119,9 +119,6 @@ enum NetworkEvent {
         peer_addr: SocketAddr,
         message: Message,
     },
-    OutboundMessage {
-        message: ProtocolMessage,
-    },
 }
 
 pub struct Router {
@@ -467,10 +464,85 @@ pub async fn run(
         info!("Network is listening for protocol messages");
         loop {
             if let Ok(message) = main_to_net_rx.recv().await {
-                // forward to broker as protocol message
-                broker_sender
-                    .send(NetworkEvent::OutboundMessage { message })
-                    .await;
+                // messages received from manager that need to be sent over the network to peers
+                match message {
+                    ProtocolMessage::BlocksRequest { timeslot } => {
+                        // ledger requested a block at a given index
+                        // send a block_request to one peer chosen at random from gossip group
+
+                        let router = network.inner.router.lock().await;
+                        if let Some(peer) = router.get_random_peer() {
+                            router.send(&peer, Message::BlocksRequest { timeslot });
+                        } else {
+                            info!("Failed to request block at index {}: no peers", timeslot);
+                        }
+                    }
+                    ProtocolMessage::BlocksResponseTo {
+                        node_addr,
+                        blocks,
+                        timeslot,
+                    } => {
+                        // send a block back to a peer that has requested it from you
+
+                        network
+                            .inner
+                            .router
+                            .lock()
+                            .await
+                            .send(&node_addr, Message::BlocksResponse { timeslot, blocks });
+                    }
+                    ProtocolMessage::BlockProposalRemote { block, peer_addr } => {
+                        // propagating a block received over the network that was valid
+                        // do not send back to the node who sent to you
+
+                        network
+                            .inner
+                            .router
+                            .lock()
+                            .await
+                            .regossip(&peer_addr, Message::BlockProposal { block });
+                    }
+                    ProtocolMessage::TxProposalRemote { tx, peer_addr } => {
+                        // propagating a tx received over the network that was valid
+                        // do not send back to the node who sent to you
+
+                        network
+                            .inner
+                            .router
+                            .lock()
+                            .await
+                            .regossip(&peer_addr, Message::TxProposal { tx });
+                    }
+                    ProtocolMessage::BlockProposalLocal { block } => {
+                        // propagating a block generated locally, send to all
+
+                        network
+                            .inner
+                            .router
+                            .lock()
+                            .await
+                            .gossip(Message::BlockProposal { block });
+                    }
+                    ProtocolMessage::TxProposalLocal { tx } => {
+                        // propagating a tx generated locally, send to all
+
+                        network
+                            .inner
+                            .router
+                            .lock()
+                            .await
+                            .gossip(Message::TxProposal { tx });
+                    }
+                    ProtocolMessage::StateUpdateRequest => {
+                        let state = network.inner.router.lock().await.get_state();
+                        net_to_main_tx
+                            .send(ProtocolMessage::StateUpdateResponse { state })
+                            .await;
+                    }
+                    _ => panic!(
+                        "Network protocol listener has received an unknown protocol message!"
+                    ),
+                }
             }
         }
     };
@@ -586,87 +658,6 @@ pub async fn run(
                                     .await;
                             });
                         }
-                    }
-                }
-                NetworkEvent::OutboundMessage { message } => {
-                    // messages received from manager that need to be sent over the network to peers
-                    match message {
-                        ProtocolMessage::BlocksRequest { timeslot } => {
-                            // ledger requested a block at a given index
-                            // send a block_request to one peer chosen at random from gossip group
-
-                            let router = network.inner.router.lock().await;
-                            if let Some(peer) = router.get_random_peer() {
-                                router.send(&peer, Message::BlocksRequest { timeslot });
-                            } else {
-                                info!("Failed to request block at index {}: no peers", timeslot);
-                            }
-                        }
-                        ProtocolMessage::BlocksResponseTo {
-                            node_addr,
-                            blocks,
-                            timeslot,
-                        } => {
-                            // send a block back to a peer that has requested it from you
-
-                            network
-                                .inner
-                                .router
-                                .lock()
-                                .await
-                                .send(&node_addr, Message::BlocksResponse { timeslot, blocks });
-                        }
-                        ProtocolMessage::BlockProposalRemote { block, peer_addr } => {
-                            // propagating a block received over the network that was valid
-                            // do not send back to the node who sent to you
-
-                            network
-                                .inner
-                                .router
-                                .lock()
-                                .await
-                                .regossip(&peer_addr, Message::BlockProposal { block });
-                        }
-                        ProtocolMessage::TxProposalRemote { tx, peer_addr } => {
-                            // propagating a tx received over the network that was valid
-                            // do not send back to the node who sent to you
-
-                            network
-                                .inner
-                                .router
-                                .lock()
-                                .await
-                                .regossip(&peer_addr, Message::TxProposal { tx });
-                        }
-                        ProtocolMessage::BlockProposalLocal { block } => {
-                            // propagating a block generated locally, send to all
-
-                            network
-                                .inner
-                                .router
-                                .lock()
-                                .await
-                                .gossip(Message::BlockProposal { block });
-                        }
-                        ProtocolMessage::TxProposalLocal { tx } => {
-                            // propagating a tx generated locally, send to all
-
-                            network
-                                .inner
-                                .router
-                                .lock()
-                                .await
-                                .gossip(Message::TxProposal { tx });
-                        }
-                        ProtocolMessage::StateUpdateRequest => {
-                            let state = network.inner.router.lock().await.get_state();
-                            net_to_main_tx
-                                .send(ProtocolMessage::StateUpdateResponse { state })
-                                .await;
-                        }
-                        _ => panic!(
-                            "Network protocol listener has received an unknown protocol message!"
-                        ),
                     }
                 }
             }
