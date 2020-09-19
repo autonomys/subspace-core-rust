@@ -42,9 +42,9 @@ dependencies = [
 
 [[package]]
 name = "async-channel"
-version = "1.1.1"
+version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee81ba99bee79f3c8ae114ae4baa7eaa326f63447cf2ec65e4393618b63f8770"
+checksum = "21279cfaa4f47df10b1816007e738ca3747ef2ee53ffc51cdbf57a8bb266fee3"
 dependencies = [
  "concurrent-queue",
  "event-listener",
@@ -601,9 +601,9 @@ dependencies = [
 
 [[package]]
 name = "event-listener"
-version = "2.2.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "699d84875f1b72b4da017e6b0f77dfa88c0137f089958a88974d15938cbc2976"
+checksum = "e1cd41440ae7e4734bbd42302f63eaba892afc93a3912dad84006247f0dedb0e"
 
 [[package]]
 name = "fake-simd"
@@ -1568,6 +1568,7 @@ checksum = "8ea5119cdb4c55b55d432abb513a0429384878c15dde60cc77b1c99de1a95a6a"
 name = "subspace-core-rust"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "async-io",
  "async-oneshot",
  "async-std",

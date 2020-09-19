@@ -1,21 +1,23 @@
 use crate::block::Block;
 use crate::console::AppState;
 use crate::farmer::{FarmerMessage, Solution};
+use crate::ledger::Ledger;
 use crate::network::messages::GossipMessage;
 use crate::network::{Network, NodeType};
 use crate::timer::EpochTracker;
 use crate::transaction::SimpleCreditTx;
 use crate::{
-    ledger, CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE, TIMESLOTS_PER_EPOCH,
-    TIMESLOT_DURATION,
+    CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
 use futures::join;
+use futures::lock::Mutex;
 use log::*;
 use std::fmt;
 use std::fmt::Display;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /*
@@ -45,8 +47,6 @@ pub enum ProtocolMessage {
     },
     /// self receives at Net and forwards response back to Main
     BlocksResponse { blocks: Vec<Block>, timeslot: u64 },
-    /// Net receives new full block, validates/applies, sends back to net for re-gossip
-    BlockProposalRemote { block: Block, peer_addr: SocketAddr },
     /// Solver sends a set of solutions back to main for application
     BlockSolutions { solutions: Vec<Solution> },
     BlockArrived {
@@ -66,7 +66,6 @@ impl Display for ProtocolMessage {
                 Self::BlocksResponse { .. } => "BlockResponse",
                 Self::BlocksRequestFrom { .. } => "BlockRequestFrom",
                 Self::BlocksResponseTo { .. } => "BlockResponseTo",
-                Self::BlockProposalRemote { .. } => "BlockProposalRemote",
                 Self::BlockSolutions { .. } => "BlockSolutions",
                 Self::BlockArrived { .. } => "BlockArrived",
             }
@@ -78,7 +77,7 @@ impl Display for ProtocolMessage {
 pub async fn run(
     node_type: NodeType,
     genesis_piece_hash: [u8; 32],
-    ledger: &mut ledger::Ledger,
+    ledger: Ledger,
     any_to_main_rx: Receiver<ProtocolMessage>,
     network: Network,
     main_to_net_tx: Sender<ProtocolMessage>,
@@ -87,6 +86,117 @@ pub async fn run(
     timer_to_solver_tx: Sender<FarmerMessage>,
     epoch_tracker: EpochTracker,
 ) {
+    let ledger = Arc::new(Mutex::new(ledger));
+    {
+        let network = network.clone();
+        let epoch_tracker = epoch_tracker.clone();
+        let ledger = Arc::clone(&ledger);
+
+        async_std::task::spawn(async move {
+            let gossip_receiver = network.get_gossip_receiver().unwrap();
+            for (peer_addr, message) in gossip_receiver.recv().await {
+                match message {
+                    GossipMessage::BlockProposal { block } => {
+                        let mut ledger = ledger.lock().await;
+                        trace!(
+                            "Received a block via gossip, with {} parents",
+                            block.content.parent_ids.len()
+                        );
+                        let block_id = block.get_id();
+
+                        if ledger.blocks.contains_key(&block_id) {
+                            warn!("Received a block proposal via gossip for known block, ignoring");
+                            continue;
+                        }
+
+                        if !ledger.timer_is_running {
+                            trace!(
+                                "Caching a block received via gossip before the ledger is synced"
+                            );
+                            ledger.cache_remote_block(block);
+                            continue;
+                        }
+
+                        // TODO: this should be set once as a constant on ledger
+                        let genesis_instant = Instant::now()
+                            - (UNIX_EPOCH.elapsed().unwrap()
+                                - Duration::from_millis(ledger.genesis_timestamp));
+
+                        let block_arrival_time = Duration::from_millis(
+                            (block.proof.timeslot * TIMESLOT_DURATION) as u64,
+                        );
+
+                        let earliest_arrival_time = block_arrival_time - EPOCH_GRACE_PERIOD;
+                        let latest_arrival_time = block_arrival_time + EPOCH_GRACE_PERIOD;
+
+                        if genesis_instant.elapsed() < earliest_arrival_time {
+                            error!(
+                                "genesis instant {}, earliest arrival time {}",
+                                genesis_instant.elapsed().as_millis(),
+                                earliest_arrival_time.as_millis()
+                            );
+
+                            let wait_time = earliest_arrival_time - genesis_instant.elapsed();
+                            error!("Received an early block via gossip, waiting {} ms for block arrival!", wait_time.as_millis());
+
+                            let sender = main_to_main_tx.clone();
+                            async_std::task::spawn(async move {
+                                async_std::task::sleep(
+                                    earliest_arrival_time
+                                        .checked_sub(genesis_instant.elapsed())
+                                        .unwrap_or_default(),
+                                )
+                                .await;
+
+                                sender
+                                    .send(ProtocolMessage::BlockArrived {
+                                        block,
+                                        peer_addr,
+                                        cached: false,
+                                    })
+                                    .await;
+                            })
+                            .await;
+
+                            continue;
+                        }
+
+                        if block_arrival_time > latest_arrival_time {
+                            // block is too late, ignore
+                            error!("Received a late block via gossip, ignoring");
+                            continue;
+                        }
+
+                        // check that we have the randomness for the desired epoch
+                        // then apply the block
+
+                        let randomness_epoch =
+                            epoch_tracker.get_lookback_epoch(block.proof.epoch).await;
+
+                        if !randomness_epoch.is_closed {
+                            panic!("Unable to apply block received via gossip, the randomness epoch is still open!");
+                        }
+
+                        // TODO: important -- this may lead to forks if nodes are malicious
+
+                        // check if the block is valid and apply
+                        if ledger.validate_and_apply_remote_block(block.clone()).await {
+                            network
+                                .regossip(&peer_addr, GossipMessage::BlockProposal { block })
+                                .await;
+                        }
+                    }
+                    GossipMessage::TxProposal { tx } => {
+                        // TODO: Handle this
+
+                        network
+                            .regossip(&peer_addr, GossipMessage::TxProposal { tx })
+                            .await;
+                    }
+                }
+            }
+        });
+    }
     let protocol_listener = async {
         info!("Main protocol loop is running...");
         let is_farming = matches!(node_type, NodeType::Gateway | NodeType::Farmer);
@@ -94,7 +204,11 @@ pub async fn run(
         // if gateway init the genesis block set and then start the timer
         if node_type == NodeType::Gateway {
             // init ledger from genesis
-            ledger.init_from_genesis(timer_to_solver_tx.clone()).await;
+            ledger
+                .lock()
+                .await
+                .init_from_genesis(timer_to_solver_tx.clone())
+                .await;
         }
 
         loop {
@@ -106,7 +220,7 @@ pub async fn run(
                             timeslot,
                         } => {
                             // TODO: check to make sure that the requested timeslot is not ahead of local timeslot
-                            let blocks = ledger.get_blocks_by_timeslot(timeslot);
+                            let blocks = ledger.lock().await.get_blocks_by_timeslot(timeslot);
 
                             let message = ProtocolMessage::BlocksResponseTo {
                                 node_addr,
@@ -116,6 +230,7 @@ pub async fn run(
                             main_to_net_tx.send(message).await;
                         }
                         ProtocolMessage::BlocksResponse { blocks, timeslot } => {
+                            let mut ledger = ledger.lock().await;
                             // TODO: this is mainly for testing, later this will be replaced by state chain sync
                             // so there is no need for validating the block or timestamp
 
@@ -177,100 +292,12 @@ pub async fn run(
                                 }
                             }
                         }
-                        ProtocolMessage::BlockProposalRemote { block, peer_addr } => {
-                            trace!(
-                                "Received a block via gossip, with {} parents",
-                                block.content.parent_ids.len()
-                            );
-                            let block_id = block.get_id();
-
-                            if ledger.blocks.contains_key(&block_id) {
-                                warn!("Received a block proposal via gossip for known block, ignoring");
-                                continue;
-                            }
-
-                            if !ledger.timer_is_running {
-                                trace!(
-                                    "Caching a block received via gossip before the ledger is synced"
-                                );
-                                ledger.cache_remote_block(block);
-                                continue;
-                            }
-
-                            // TODO: this should be set once as a constant on ledger
-                            let genesis_instant = Instant::now()
-                                - (UNIX_EPOCH.elapsed().unwrap()
-                                    - Duration::from_millis(ledger.genesis_timestamp));
-
-                            let block_arrival_time = Duration::from_millis(
-                                (block.proof.timeslot * TIMESLOT_DURATION) as u64,
-                            );
-
-                            let earliest_arrival_time = block_arrival_time - EPOCH_GRACE_PERIOD;
-                            let latest_arrival_time = block_arrival_time + EPOCH_GRACE_PERIOD;
-
-                            if genesis_instant.elapsed() < earliest_arrival_time {
-                                error!(
-                                    "genesis instant {}, earliest arrival time {}",
-                                    genesis_instant.elapsed().as_millis(),
-                                    earliest_arrival_time.as_millis()
-                                );
-
-                                let wait_time = earliest_arrival_time - genesis_instant.elapsed();
-                                error!("Received an early block via gossip, waiting {} ms for block arrival!", wait_time.as_millis());
-
-                                let sender = main_to_main_tx.clone();
-                                async_std::task::spawn(async move {
-                                    async_std::task::sleep(
-                                        earliest_arrival_time
-                                            .checked_sub(genesis_instant.elapsed())
-                                            .unwrap_or_default(),
-                                    )
-                                    .await;
-
-                                    sender
-                                        .send(ProtocolMessage::BlockArrived {
-                                            block,
-                                            peer_addr,
-                                            cached: false,
-                                        })
-                                        .await;
-                                })
-                                .await;
-
-                                continue;
-                            }
-
-                            if block_arrival_time > latest_arrival_time {
-                                // block is too late, ignore
-                                error!("Received a late block via gossip, ignoring");
-                                continue;
-                            }
-
-                            // check that we have the randomness for the desired epoch
-                            // then apply the block
-
-                            let randomness_epoch =
-                                epoch_tracker.get_lookback_epoch(block.proof.epoch).await;
-
-                            if !randomness_epoch.is_closed {
-                                panic!("Unable to apply block received via gossip, the randomness epoch is still open!");
-                            }
-
-                            // TODO: important -- this may lead to forks if nodes are malicious
-
-                            // check if the block is valid and apply
-                            if ledger.validate_and_apply_remote_block(block.clone()).await {
-                                network
-                                    .regossip(&peer_addr, GossipMessage::BlockProposal { block })
-                                    .await;
-                            }
-                        }
                         ProtocolMessage::BlockArrived {
                             block,
                             peer_addr,
                             cached: _,
                         } => {
+                            let mut ledger = ledger.lock().await;
                             info!(
                                 "A new block has arrived with id: {}",
                                 hex::encode(&block.get_id()[0..8])
@@ -298,7 +325,11 @@ pub async fn run(
                         ProtocolMessage::BlockSolutions { solutions } => {
                             if !solutions.is_empty() {
                                 for solution in solutions.into_iter() {
-                                    let block = ledger.create_and_apply_local_block(solution).await;
+                                    let block = ledger
+                                        .lock()
+                                        .await
+                                        .create_and_apply_local_block(solution)
+                                        .await;
                                     network.gossip(GossipMessage::BlockProposal { block }).await;
                                 }
                             }

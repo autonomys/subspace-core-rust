@@ -117,7 +117,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     // create the ledger
     let (merkle_proofs, merkle_root) = crypto::build_merkle_tree();
     let tx_payload = crypto::generate_random_piece().to_vec();
-    let mut ledger = Ledger::new(
+    let ledger = Ledger::new(
         merkle_root,
         genesis_piece_hash,
         keys,
@@ -148,7 +148,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     let main = manager::run(
         node_type,
         genesis_piece_hash,
-        &mut ledger,
+        ledger,
         any_to_main_rx,
         network,
         main_to_net_tx,

@@ -296,6 +296,8 @@ struct Inner {
     // TODO: Remove `broker_sender`
     broker_sender: Sender<NetworkEvent>,
     connections_handle: StdMutex<Option<JoinHandle<()>>>,
+    gossip_sender: async_channel::Sender<(SocketAddr, GossipMessage)>,
+    gossip_receiver: StdMutex<Option<async_channel::Receiver<(SocketAddr, GossipMessage)>>>,
     requests_container: Arc<AsyncMutex<RequestsContainer>>,
     router: AsyncMutex<Router>,
 }
@@ -327,12 +329,16 @@ impl Network {
         broker_sender: Sender<NetworkEvent>,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
+        let (gossip_sender, gossip_receiver) =
+            async_channel::bounded::<(SocketAddr, GossipMessage)>(32);
         let requests_container = Arc::<AsyncMutex<RequestsContainer>>::default();
         let router = Router::new(node_id, listener.local_addr()?);
 
         let inner = Arc::new(Inner {
             broker_sender: broker_sender.clone(),
             connections_handle: StdMutex::default(),
+            gossip_sender,
+            gossip_receiver: StdMutex::new(Some(gossip_receiver)),
             requests_container,
             router: AsyncMutex::new(router),
         });
@@ -394,6 +400,12 @@ impl Network {
         })
     }
 
+    pub(crate) fn get_gossip_receiver(
+        &self,
+    ) -> Option<async_channel::Receiver<(SocketAddr, GossipMessage)>> {
+        self.inner.gossip_receiver.lock().unwrap().take()
+    }
+
     pub(crate) async fn get_state(&self) -> console::AppState {
         self.inner.router.lock().await.get_state()
     }
@@ -427,11 +439,17 @@ impl Network {
 
         while let Some(message) = messages_receiver.next().await {
             if let Ok(message) = message {
-                // trace!("{:?}", message);
-                self.inner
-                    .broker_sender
-                    .send(NetworkEvent::InboundMessage { peer_addr, message })
-                    .await;
+                match message {
+                    Message::Gossip(message) => {
+                        drop(self.inner.gossip_sender.send((peer_addr, message)).await);
+                    }
+                    message => {
+                        self.inner
+                            .broker_sender
+                            .send(NetworkEvent::InboundMessage { peer_addr, message })
+                            .await;
+                    }
+                }
             }
         }
 
@@ -553,7 +571,6 @@ pub async fn run(
                             timeslot,
                         } => {
                             // send a block back to a peer that has requested it from you
-
                             network.inner.router.lock().await.send(
                                 &node_addr,
                                 Message::Response {
@@ -586,33 +603,10 @@ pub async fn run(
                         // ToDo: (later) implement a cache of last x messages (only if block or tx)
 
                         match message {
-                            Message::Gossip(message) => match message {
-                                GossipMessage::BlockProposal { block } => {
-                                    // send to main
-
-                                    let net_to_main_tx = net_to_main_tx.clone();
-
-                                    async_std::task::spawn(async move {
-                                        net_to_main_tx
-                                            .send(ProtocolMessage::BlockProposalRemote {
-                                                block,
-                                                peer_addr,
-                                            })
-                                            .await;
-                                    });
-                                }
-                                GossipMessage::TxProposal { tx } => {
-                                    // send to main
-
-                                    let network = network.clone();
-
-                                    async_std::task::spawn(async move {
-                                        network
-                                            .regossip(&peer_addr, GossipMessage::TxProposal { tx })
-                                            .await;
-                                    });
-                                }
-                            },
+                            Message::Gossip(_) => {
+                                error!("Shoudn't get here")
+                                // TODO: Remove, never called
+                            }
                             // Message::PeersRequest => {
                             //     // retrieve peers and send over the wire
                             //

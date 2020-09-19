@@ -4,9 +4,8 @@ version = "0.1.0"
 authors = ["jwagstaff", "nazar-pc"]
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
+async-channel = "1.4.2"
 async-io = "1.1.2"
 async-oneshot = "0.3.3"
 bincode = "1.2.1"
