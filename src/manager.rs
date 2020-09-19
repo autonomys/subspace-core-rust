@@ -5,8 +5,8 @@ use crate::network::NodeType;
 use crate::timer::EpochTracker;
 use crate::transaction::SimpleCreditTx;
 use crate::{
-    ledger, timer, CHALLENGE_LOOKBACK_EPOCHS, CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE,
-    TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+    ledger, CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE, TIMESLOTS_PER_EPOCH,
+    TIMESLOT_DURATION,
 };
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
@@ -110,25 +110,7 @@ pub async fn run(
         // if gateway init the genesis block set and then start the timer
         if node_type == NodeType::Gateway {
             // init ledger from genesis
-            ledger.init_from_genesis().await;
-
-            // TODO: are we sure this is starting at the exact right time?
-            // start timer loop
-            ledger.timer_is_running = true;
-
-            let timer_to_solver_tx = timer_to_solver_tx.clone();
-            let epoch_tracker = epoch_tracker.clone();
-            let genesis_timestamp = ledger.genesis_timestamp;
-            async_std::task::spawn(async move {
-                timer::run(
-                    timer_to_solver_tx,
-                    epoch_tracker,
-                    CHALLENGE_LOOKBACK_EPOCHS * TIMESLOTS_PER_EPOCH as u64,
-                    true,
-                    genesis_timestamp,
-                )
-                .await;
-            });
+            ledger.init_from_genesis(timer_to_solver_tx.clone()).await;
         }
 
         loop {
@@ -197,13 +179,13 @@ pub async fn run(
                                 info!("Applying cached blocks");
                                 match ledger.apply_cached_blocks(timeslot).await {
                                     Ok(timeslot) => {
-                                        ledger
-                                            .start_timer_from_genesis_time(
-                                                timer_to_solver_tx.clone(),
-                                                timeslot,
-                                                is_farming,
-                                            )
-                                            .await;
+                                        info!("Starting the timer from genesis time");
+
+                                        ledger.start_timer(
+                                            timer_to_solver_tx.clone(),
+                                            timeslot,
+                                            is_farming,
+                                        );
                                     }
                                     Err(_) => {
                                         panic!("Unable to sync the ledger, invalid blocks!");
