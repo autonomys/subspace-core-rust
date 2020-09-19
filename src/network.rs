@@ -86,10 +86,6 @@ pub(crate) trait FromBytes {
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub(crate) enum GossipMessage {
-    // TODO: This is temporary for compatibility with `Message` struct
-    BlocksRequest { timeslot: u64 },
-    // TODO: This is temporary for compatibility with `Message` struct
-    BlocksResponse { timeslot: u64, blocks: Vec<Block> },
     BlockProposal { block: Block },
     TxProposal { tx: SimpleCreditTx },
 }
@@ -116,8 +112,6 @@ impl Display for GossipMessage {
             f,
             "{}",
             match self {
-                Self::BlocksRequest { .. } => "BlockRequest",
-                Self::BlocksResponse { .. } => "BlockResponse",
                 Self::BlockProposal { .. } => "BlockProposal",
                 Self::TxProposal { .. } => "TxProposal",
             }
@@ -126,25 +120,54 @@ impl Display for GossipMessage {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
-pub enum Message {
+pub(crate) enum RequestMessage {
     BlocksRequest { timeslot: u64 },
-    BlocksResponse { timeslot: u64, blocks: Vec<Block> },
-    BlockProposal { block: Block },
-    TxProposal { tx: SimpleCreditTx },
 }
 
-impl Display for Message {
+impl Display for RequestMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "{}",
             match self {
                 Self::BlocksRequest { .. } => "BlockRequest",
-                Self::BlocksResponse { .. } => "BlockResponse",
-                Self::BlockProposal { .. } => "BlockProposal",
-                Self::TxProposal { .. } => "TxProposal",
             }
         )
+    }
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+pub(crate) enum ResponseMessage {
+    // TODO: Remove timeslot once proper request/response mechanism is implemented
+    BlocksResponse { timeslot: u64, blocks: Vec<Block> },
+}
+
+impl Display for ResponseMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::BlocksResponse { .. } => "BlockResponse",
+            }
+        )
+    }
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+pub(crate) enum Message {
+    Gossip(GossipMessage),
+    Request { id: u32, message: RequestMessage },
+    Response { id: u32, message: ResponseMessage },
+}
+
+impl Display for Message {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Gossip(message) => write!(f, "{}", message),
+            Self::Request { id, message } => write!(f, "{}:{}", message, id),
+            Self::Response { id, message } => write!(f, "{}:{}", message, id),
+        }
     }
 }
 
@@ -217,6 +240,7 @@ impl Router {
 
     /// Send a message to all peers
     fn gossip(&self, message: GossipMessage) {
+        let message = Message::Gossip(message);
         let bytes = message.to_bytes();
         for node_addr in self.peers.iter() {
             trace!("Sending a {} message to {}", message, node_addr);
@@ -226,6 +250,7 @@ impl Router {
 
     /// Send a message to all but one peer (who sent you the message)
     fn regossip(&self, sender: &SocketAddr, message: GossipMessage) {
+        let message = Message::Gossip(message);
         let bytes = message.to_bytes();
         for node_addr in self.peers.iter() {
             if node_addr != sender {
@@ -238,6 +263,7 @@ impl Router {
     /// send a message to specific node by node_id
     fn send(&self, receiver: &SocketAddr, message: Message) {
         trace!("Sending a {} message to {}", message, receiver);
+        // TODO: Should be `Message` here, not `Message`
         self.maybe_send_bytes_to(receiver, message.to_bytes());
     }
 
@@ -623,7 +649,13 @@ pub async fn run(
 
                             let router = network.inner.router.lock().await;
                             if let Some(peer) = router.get_random_peer() {
-                                router.send(&peer, Message::BlocksRequest { timeslot });
+                                router.send(
+                                    &peer,
+                                    Message::Request {
+                                        id: 0,
+                                        message: RequestMessage::BlocksRequest { timeslot },
+                                    },
+                                );
                             } else {
                                 info!("Failed to request block at index {}: no peers", timeslot);
                             }
@@ -635,12 +667,13 @@ pub async fn run(
                         } => {
                             // send a block back to a peer that has requested it from you
 
-                            network
-                                .inner
-                                .router
-                                .lock()
-                                .await
-                                .send(&node_addr, Message::BlocksResponse { timeslot, blocks });
+                            network.inner.router.lock().await.send(
+                                &node_addr,
+                                Message::Response {
+                                    id: 0,
+                                    message: ResponseMessage::BlocksResponse { timeslot, blocks },
+                                },
+                            );
                         }
                         _ => panic!(
                             "Network protocol listener has received an unknown protocol message!"
@@ -666,6 +699,33 @@ pub async fn run(
                         // ToDo: (later) implement a cache of last x messages (only if block or tx)
 
                         match message {
+                            Message::Gossip(message) => match message {
+                                GossipMessage::BlockProposal { block } => {
+                                    // send to main
+
+                                    let net_to_main_tx = net_to_main_tx.clone();
+
+                                    async_std::task::spawn(async move {
+                                        net_to_main_tx
+                                            .send(ProtocolMessage::BlockProposalRemote {
+                                                block,
+                                                peer_addr,
+                                            })
+                                            .await;
+                                    });
+                                }
+                                GossipMessage::TxProposal { tx } => {
+                                    // send to main
+
+                                    let network = network.clone();
+
+                                    async_std::task::spawn(async move {
+                                        network
+                                            .regossip(&peer_addr, GossipMessage::TxProposal { tx })
+                                            .await;
+                                    });
+                                }
+                            },
                             // Message::PeersRequest => {
                             //     // retrieve peers and send over the wire
                             //
@@ -699,75 +759,59 @@ pub async fn run(
                             //
                             //     // if we still have too few peers, should we try another peer
                             // }
-                            Message::BlocksRequest { timeslot } => {
-                                let net_to_main_tx = net_to_main_tx.clone();
-                                let message = ProtocolMessage::BlocksRequestFrom {
-                                    node_addr: peer_addr,
-                                    timeslot,
-                                };
+                            Message::Request { id, message } => match message {
+                                RequestMessage::BlocksRequest { timeslot } => {
+                                    let net_to_main_tx = net_to_main_tx.clone();
+                                    let message = ProtocolMessage::BlocksRequestFrom {
+                                        node_addr: peer_addr,
+                                        timeslot,
+                                    };
 
-                                async_std::task::spawn(async move {
-                                    net_to_main_tx.send(message).await;
-                                });
-                            }
-                            Message::BlocksResponse { timeslot, blocks } => {
-                                // TODO: Handle the case where peer does not have the block
-                                let net_to_main_tx = net_to_main_tx.clone();
-                                async_std::task::spawn(async move {
-                                    net_to_main_tx
-                                        .send(ProtocolMessage::BlocksResponse { timeslot, blocks })
-                                        .await;
-                                });
+                                    async_std::task::spawn(async move {
+                                        net_to_main_tx.send(message).await;
+                                    });
+                                }
+                            },
+                            Message::Response { id, message } => {
+                                match message {
+                                    ResponseMessage::BlocksResponse { timeslot, blocks } => {
+                                        // TODO: Handle the case where peer does not have the block
+                                        let net_to_main_tx = net_to_main_tx.clone();
+                                        async_std::task::spawn(async move {
+                                            net_to_main_tx
+                                                .send(ProtocolMessage::BlocksResponse {
+                                                    timeslot,
+                                                    blocks,
+                                                })
+                                                .await;
+                                        });
 
-                                // if no block in response, request from a different peer
-                                // match block {
-                                //     Some(block) => {
-                                //         let net_to_main_tx = net_to_main_tx.clone();
+                                        // if no block in response, request from a different peer
+                                        // match block {
+                                        //     Some(block) => {
+                                        //         let net_to_main_tx = net_to_main_tx.clone();
 
-                                //         async_std::task::spawn(async move {
-                                //             net_to_main_tx
-                                //                 .send(ProtocolMessage::BlockResponse { block })
-                                //                 .await;
-                                //         });
-                                //     }
-                                //     None => {
-                                //         info!("Peer did not have block at desired index, requesting from a different peer");
+                                        //         async_std::task::spawn(async move {
+                                        //             net_to_main_tx
+                                        //                 .send(ProtocolMessage::BlockResponse { block })
+                                        //                 .await;
+                                        //         });
+                                        //     }
+                                        //     None => {
+                                        //         info!("Peer did not have block at desired index, requesting from a different peer");
 
-                                //         if let Some(new_peer) =
-                                //             router.get_random_peer_excluding(peer_addr)
-                                //         {
-                                //             router.send(&new_peer, Message::BlockRequest { index });
-                                //         } else {
-                                //             info!("Failed to request block: no other peers found");
-                                //         }
-                                //         continue;
-                                //     }
-                                // }
-                            }
-                            Message::BlockProposal { block } => {
-                                // send to main
-
-                                let net_to_main_tx = net_to_main_tx.clone();
-
-                                async_std::task::spawn(async move {
-                                    net_to_main_tx
-                                        .send(ProtocolMessage::BlockProposalRemote {
-                                            block,
-                                            peer_addr,
-                                        })
-                                        .await;
-                                });
-                            }
-                            Message::TxProposal { tx } => {
-                                // send to main
-
-                                let network = network.clone();
-
-                                async_std::task::spawn(async move {
-                                    network
-                                        .regossip(&peer_addr, GossipMessage::TxProposal { tx })
-                                        .await;
-                                });
+                                        //         if let Some(new_peer) =
+                                        //             router.get_random_peer_excluding(peer_addr)
+                                        //         {
+                                        //             router.send(&new_peer, Message::BlockRequest { index });
+                                        //         } else {
+                                        //             info!("Failed to request block: no other peers found");
+                                        //         }
+                                        //         continue;
+                                        //     }
+                                        // }
+                                    }
+                                }
                             }
                         }
                     }
