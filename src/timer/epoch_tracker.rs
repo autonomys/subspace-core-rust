@@ -1,6 +1,6 @@
 use crate::timer::Epoch;
 use crate::{
-    ProofId, CHALLENGE_LOOKBACK_EPOCHS, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME, PIECE_SIZE,
+    BlockId, CHALLENGE_LOOKBACK_EPOCHS, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME, PIECE_SIZE,
     SOLUTION_RANGE_LOOKBACK_EONS, TIMESLOTS_PER_EPOCH,
 };
 use async_std::sync::Mutex;
@@ -81,12 +81,8 @@ impl Inner {
                 .expect("No solution range for current eon, this should never happen");
             // Re-adjust previous solution range based on new block count
             let solution_range = if block_count > 0 {
-                // let solution_range = (lookback_solution_range as f64 / block_count as f64
-                //     * (TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64)
-                //     .round() as u64;
-
-                let solution_range = (lookback_solution_range as f64
-                    * ((TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64 / block_count as f64))
+                let solution_range = (lookback_solution_range as f64 / block_count as f64
+                    * (TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64)
                     .round() as u64;
 
                 // Should divide by 2 without remainder
@@ -169,7 +165,7 @@ impl EpochTracker {
         &self,
         epoch_index: u64,
         timeslot: u64,
-        proof_id: ProofId,
+        block_id: BlockId,
         // distance_from_challenge: u64,
         solution_range: u64,
     ) {
@@ -185,6 +181,6 @@ impl EpochTracker {
             .epochs
             .get_mut(&epoch_index)
             .unwrap()
-            .add_block_to_timeslot(timeslot, proof_id);
+            .add_block_to_timeslot(timeslot, block_id);
     }
 }

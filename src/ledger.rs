@@ -58,7 +58,7 @@ pub struct Ledger {
     pub last_content_id: ContentId,
     pub unseen_content_ids: HashSet<BlockId>,
     pub seen_content_ids: HashSet<BlockId>,
-    pub ordered_proofs_by_timeslot: HashMap<u64, Vec<ProofId>>,
+    pub ordered_blocks_by_timeslot: HashMap<u64, Vec<ProofId>>,
     pub cached_blocks_for_timeslot: BTreeMap<u64, Vec<BlockId>>,
     pub epoch_tracker: EpochTracker,
     pub timer_is_running: bool,
@@ -89,7 +89,7 @@ impl Ledger {
             blocks: HashMap::new(),
             txs: HashMap::new(),
             tx_mempool: HashMap::new(),
-            ordered_proofs_by_timeslot: HashMap::new(),
+            ordered_blocks_by_timeslot: HashMap::new(),
             cached_blocks_for_timeslot: BTreeMap::new(),
             last_content_id: ContentId::default(),
             unseen_content_ids: HashSet::new(),
@@ -109,7 +109,7 @@ impl Ledger {
 
     /// Retrieve all blocks for a timeslot, return an empty vec if no blocks
     pub fn get_blocks_by_timeslot(&self, timeslot: u64) -> Vec<Block> {
-        self.ordered_proofs_by_timeslot
+        self.ordered_blocks_by_timeslot
             .get(&timeslot)
             .map(|blocks| {
                 blocks
@@ -245,19 +245,19 @@ impl Ledger {
 
         // Adds a pointer to this proof id for the given timeslot in the ledger
         // Sorts on each insertion
-        self.ordered_proofs_by_timeslot
+        self.ordered_blocks_by_timeslot
             .entry(block.proof.timeslot)
-            .and_modify(|proof_ids| {
-                proof_ids.push(block.proof.get_id());
-                proof_ids.sort();
+            .and_modify(|block_ids| {
+                block_ids.push(block.get_id());
+                block_ids.sort();
             })
-            .or_insert(vec![block.proof.get_id()]);
+            .or_insert(vec![block.get_id()]);
 
         self.epoch_tracker
             .add_block_to_epoch(
                 block.proof.epoch,
                 block.proof.timeslot,
-                block.proof.get_id(),
+                block.get_id(),
                 block.proof.solution_range,
             )
             .await;
