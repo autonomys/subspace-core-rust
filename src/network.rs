@@ -306,7 +306,7 @@ pub struct Network {
 }
 
 impl Network {
-    async fn new(node_id: NodeID, addr: SocketAddr) -> io::Result<Self> {
+    pub async fn new(node_id: NodeID, addr: SocketAddr) -> io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         let (gossip_sender, gossip_receiver) =
             async_channel::bounded::<(SocketAddr, GossipMessage)>(32);
@@ -405,7 +405,7 @@ impl Network {
         NetworkWeak { inner }
     }
 
-    async fn connect_to(&self, peer_addr: SocketAddr) -> io::Result<()> {
+    pub async fn connect_to(&self, peer_addr: SocketAddr) -> io::Result<()> {
         let stream = TcpStream::connect(peer_addr).await?;
         async_std::task::spawn(self.clone().on_connected(peer_addr, stream));
 
@@ -503,7 +503,6 @@ impl Network {
             id = requests_container.next_id;
 
             requests_container.next_id = requests_container.next_id.wrapping_add(1);
-            // TODO: No one writes to this yet
             requests_container.handlers.insert(id, response_sender);
         }
 
@@ -545,25 +544,4 @@ impl NetworkWeak {
     fn upgrade(&self) -> Option<Network> {
         self.inner.upgrade().map(|inner| Network { inner })
     }
-}
-
-pub async fn run(node_type: NodeType, node_id: NodeID, local_addr: SocketAddr) -> Network {
-    let gateway_addr: std::net::SocketAddr = DEV_GATEWAY_ADDR.parse().unwrap();
-
-    // create the tcp listener
-    let addr = if matches!(node_type, NodeType::Gateway) {
-        gateway_addr
-    } else {
-        local_addr
-    };
-    let network = Network::new(node_id, addr).await.unwrap();
-
-    // if not gateway, connect to the gateway
-    if node_type != NodeType::Gateway {
-        info!("Connecting to gateway node");
-
-        network.connect_to(gateway_addr).await.unwrap();
-    }
-
-    network
 }

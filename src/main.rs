@@ -6,8 +6,7 @@ use futures::join;
 use log::LevelFilter;
 use log::*;
 use manager::ProtocolMessage;
-use network::NodeType;
-use std::net::SocketAddr;
+use network::{Network, NodeType};
 use std::path::PathBuf;
 use std::thread;
 use std::{env, fs};
@@ -66,7 +65,7 @@ async fn main() {
 }
 
 pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
-    let node_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let node_addr = "127.0.0.1:0".parse().unwrap();
     let node_type = env::args()
         .skip(1)
         .take(1)
@@ -134,7 +133,23 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     let solver_to_main_tx = any_to_main_tx.clone();
     let main_to_main_tx = any_to_main_tx.clone();
 
-    let network = network::run(node_type, node_id, node_addr).await;
+    let network_fut = Network::new(
+        node_id,
+        if node_type == NodeType::Gateway {
+            DEV_GATEWAY_ADDR.parse().unwrap()
+        } else {
+            node_addr
+        },
+    );
+    let network = network_fut.await.unwrap();
+    if node_type != NodeType::Gateway {
+        info!("Connecting to gateway node");
+
+        network
+            .connect_to(DEV_GATEWAY_ADDR.parse().unwrap())
+            .await
+            .unwrap();
+    }
 
     // manager loop
     let main = manager::run(
