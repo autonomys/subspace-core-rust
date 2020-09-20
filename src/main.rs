@@ -129,20 +129,12 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     let is_farming = matches!(node_type, NodeType::Gateway | NodeType::Farmer);
 
     // create channels between background tasks
-    let (main_to_net_tx, main_to_net_rx) = channel::<ProtocolMessage>(32);
     let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(32);
     let (timer_to_farmer_tx, timer_to_farmer_rx) = channel::<FarmerMessage>(32);
     let solver_to_main_tx = any_to_main_tx.clone();
     let main_to_main_tx = any_to_main_tx.clone();
 
-    let network = network::run(
-        node_type,
-        node_id,
-        node_addr,
-        any_to_main_tx,
-        main_to_net_rx,
-    )
-    .await;
+    let network = network::run(node_type, node_id, node_addr).await;
 
     // manager loop
     let main = manager::run(
@@ -151,7 +143,6 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         ledger,
         any_to_main_rx,
         network,
-        main_to_net_tx,
         main_to_main_tx,
         state_sender,
         timer_to_farmer_tx,

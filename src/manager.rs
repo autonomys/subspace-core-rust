@@ -7,7 +7,6 @@ use crate::network::messages::{
 };
 use crate::network::{Network, NodeType};
 use crate::timer::EpochTracker;
-use crate::transaction::SimpleCreditTx;
 use crate::{
     CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
@@ -34,21 +33,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // TODO: Split this into multiple enums
 pub enum ProtocolMessage {
-    /// On sync, main forwards block request to Net for tx from self to peer
-    BlocksRequest { timeslot: u64 },
-    /// peer receives at Net and forwards request to main for fetch
-    BlocksRequestFrom {
-        node_addr: SocketAddr,
-        timeslot: u64,
-    },
-    /// peer main forwards response back to Net for tx
-    BlocksResponseTo {
-        node_addr: SocketAddr,
-        blocks: Vec<Block>,
-        timeslot: u64,
-    },
-    /// self receives at Net and forwards response back to Main
-    BlocksResponse { blocks: Vec<Block>, timeslot: u64 },
     /// Solver sends a set of solutions back to main for application
     BlockSolutions { solutions: Vec<Solution> },
     BlockArrived {
@@ -64,10 +48,6 @@ impl Display for ProtocolMessage {
             f,
             "{}",
             match self {
-                Self::BlocksRequest { .. } => "BlockRequest",
-                Self::BlocksResponse { .. } => "BlockResponse",
-                Self::BlocksRequestFrom { .. } => "BlockRequestFrom",
-                Self::BlocksResponseTo { .. } => "BlockResponseTo",
                 Self::BlockSolutions { .. } => "BlockSolutions",
                 Self::BlockArrived { .. } => "BlockArrived",
             }
@@ -82,7 +62,6 @@ pub async fn run(
     ledger: Ledger,
     any_to_main_rx: Receiver<ProtocolMessage>,
     network: Network,
-    main_to_net_tx: Sender<ProtocolMessage>,
     main_to_main_tx: Sender<ProtocolMessage>,
     state_sender: crossbeam_channel::Sender<AppState>,
     timer_to_solver_tx: Sender<FarmerMessage>,
@@ -202,12 +181,11 @@ pub async fn run(
 
     {
         let network = network.clone();
-        let epoch_tracker = epoch_tracker.clone();
         let ledger = Arc::clone(&ledger);
 
         async_std::task::spawn(async move {
             let requests_receiver = network.get_requests_receiver().unwrap();
-            while let Ok((peer_addr, message, response_sender)) = requests_receiver.recv().await {
+            while let Ok((message, response_sender)) = requests_receiver.recv().await {
                 let ledger = Arc::clone(&ledger);
 
                 async_std::task::spawn(async move {
@@ -245,23 +223,6 @@ pub async fn run(
             match any_to_main_rx.recv().await {
                 Ok(message) => {
                     match message {
-                        ProtocolMessage::BlocksRequestFrom {
-                            node_addr,
-                            timeslot,
-                        } => {
-                            // TODO: check to make sure that the requested timeslot is not ahead of local timeslot
-                            let blocks = ledger.lock().await.get_blocks_by_timeslot(timeslot);
-
-                            let message = ProtocolMessage::BlocksResponseTo {
-                                node_addr,
-                                blocks,
-                                timeslot,
-                            };
-                            main_to_net_tx.send(message).await;
-                        }
-                        ProtocolMessage::BlocksResponse { blocks, timeslot } => {
-                            // TODO: Remove
-                        }
                         ProtocolMessage::BlockArrived {
                             block,
                             peer_addr,
@@ -304,9 +265,6 @@ pub async fn run(
                                 }
                             }
                         }
-                        _ => panic!(
-                            "Main protocol listener has received an unknown protocol message!"
-                        ),
                     }
                 }
                 Err(error) => {
@@ -408,9 +366,6 @@ pub async fn run(
                         }
                     }
                 }
-                main_to_net_tx
-                    .send(ProtocolMessage::BlocksRequest { timeslot: 0 })
-                    .await;
 
                 // on genesis block
 
