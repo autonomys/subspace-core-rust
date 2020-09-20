@@ -81,20 +81,23 @@ impl Inner {
                 .expect("No solution range for current eon, this should never happen");
             // Re-adjust previous solution range based on new block count
             let solution_range = if block_count > 0 {
-                let solution_range = (lookback_solution_range as f64 / block_count as f64
+                let new_solution_range = (lookback_solution_range as f64 / block_count as f64
                     * (TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64)
                     .round() as u64;
 
+                // Apply 3% of the change to lookback solution range
+                let solution_range = lookback_solution_range as i64
+                    + (new_solution_range as i64 - lookback_solution_range as i64) / 100 * 3;
+
                 // Should divide by 2 without remainder
-                solution_range / 2 * 2
+                solution_range as u64 / 2 * 2
             } else {
                 lookback_solution_range
             };
 
-            // TODO: change to back to solution range to make dynamic
             self.eon_to_solution_range.insert(
                 lookback_eon_index + SOLUTION_RANGE_LOOKBACK_EONS,
-                lookback_solution_range,
+                solution_range,
             );
 
             let bytes_pledged = (u64::MAX / lookback_solution_range) * PIECE_SIZE as u64;

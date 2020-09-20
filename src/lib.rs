@@ -62,7 +62,7 @@ pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 4;
 pub const EPOCH_CLOSE_WAIT_TIME: u64 = 2;
 pub const TIMESLOTS_PER_EPOCH: u64 = 10;
 
-pub const EPOCHS_PER_EON: u64 = 10;
+pub const EPOCHS_PER_EON: u64 = 2;
 pub const SOLUTION_RANGE_LOOKBACK_EONS: u64 = 3;
 
 // Assertions about acceptable values for above parameters:
