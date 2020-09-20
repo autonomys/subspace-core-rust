@@ -1,14 +1,12 @@
 use crate::{crypto, Piece, Tag, PIECE_SIZE};
 use async_std::fs::OpenOptions;
-use async_std::io::prelude::*;
 use async_std::path::PathBuf;
 use async_std::task;
 use futures::channel::mpsc;
 use futures::channel::mpsc::Sender;
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
-use futures::StreamExt;
-use futures::{AsyncReadExt, AsyncWriteExt, SinkExt};
+use futures::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SinkExt, StreamExt};
 use log::*;
 use rocksdb::IteratorMode;
 use rocksdb::DB;
@@ -155,11 +153,7 @@ impl Plot {
                                     try {
                                         plot_file.seek(SeekFrom::Start(position)).await?;
                                         let mut buffer = [0u8; PIECE_SIZE];
-                                        async_std::io::ReadExt::read_exact(
-                                            &mut plot_file,
-                                            &mut buffer,
-                                        )
-                                        .await?;
+                                        plot_file.read_exact(&mut buffer).await?;
                                         buffer
                                     }
                                 }
@@ -315,7 +309,7 @@ impl Plot {
                         let _ = result_sender.send(
                             try {
                                 let position = plot_file.seek(SeekFrom::Current(0)).await?;
-                                AsyncWriteExt::write_all(&mut plot_file, &encoding).await?;
+                                plot_file.write_all(&encoding).await?;
 
                                 // TODO: remove unwrap
                                 task::spawn_blocking({

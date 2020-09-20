@@ -1,4 +1,3 @@
-#![feature(try_blocks)]
 use async_std::sync::channel;
 use async_std::task;
 use console::AppState;
@@ -7,8 +6,7 @@ use futures::join;
 use log::LevelFilter;
 use log::*;
 use manager::ProtocolMessage;
-use network::NodeType;
-use std::net::SocketAddr;
+use network::{Network, NodeType};
 use std::path::PathBuf;
 use std::thread;
 use std::{env, fs};
@@ -67,7 +65,7 @@ async fn main() {
 }
 
 pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
-    let node_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let node_addr = "127.0.0.1:0".parse().unwrap();
     let node_type = env::args()
         .skip(1)
         .take(1)
@@ -118,7 +116,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     // create the ledger
     let (merkle_proofs, merkle_root) = crypto::build_merkle_tree();
     let tx_payload = crypto::generate_random_piece().to_vec();
-    let mut ledger = Ledger::new(
+    let ledger = Ledger::new(
         merkle_root,
         genesis_piece_hash,
         keys,
@@ -130,32 +128,40 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     let is_farming = matches!(node_type, NodeType::Gateway | NodeType::Farmer);
 
     // create channels between background tasks
-    let (main_to_net_tx, main_to_net_rx) = channel::<ProtocolMessage>(32);
     let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(32);
     let (timer_to_farmer_tx, timer_to_farmer_rx) = channel::<FarmerMessage>(32);
     let solver_to_main_tx = any_to_main_tx.clone();
     let main_to_main_tx = any_to_main_tx.clone();
 
+    let network_fut = Network::new(
+        node_id,
+        if node_type == NodeType::Gateway {
+            DEV_GATEWAY_ADDR.parse().unwrap()
+        } else {
+            node_addr
+        },
+    );
+    let network = network_fut.await.unwrap();
+    if node_type != NodeType::Gateway {
+        info!("Connecting to gateway node");
+
+        network
+            .connect_to(DEV_GATEWAY_ADDR.parse().unwrap())
+            .await
+            .unwrap();
+    }
+
     // manager loop
     let main = manager::run(
         node_type,
         genesis_piece_hash,
-        &mut ledger,
+        ledger,
         any_to_main_rx,
-        main_to_net_tx,
+        network,
         main_to_main_tx,
         state_sender,
         timer_to_farmer_tx,
         epoch_tracker,
-    );
-
-    // network loop
-    let net = network::run(
-        node_type,
-        node_id,
-        node_addr,
-        any_to_main_tx,
-        main_to_net_rx,
     );
 
     if is_farming {
@@ -164,9 +170,9 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         // start solve loop
         let farmer = farmer::run(timer_to_farmer_rx, solver_to_main_tx, &plot);
 
-        join!(main, net, farmer);
+        join!(main, farmer);
     } else {
         // listen and farm
-        join!(main, net);
+        join!(main);
     }
 }

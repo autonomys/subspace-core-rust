@@ -122,7 +122,7 @@ impl Ledger {
     }
 
     /// Start a new chain from genesis as a gateway node
-    pub async fn init_from_genesis(&mut self) {
+    pub async fn init_from_genesis(&mut self, timer_to_solver_tx: Sender<FarmerMessage>) {
         self.genesis_timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
@@ -205,6 +205,12 @@ impl Ledger {
                 async_std::task::sleep(Duration::from_millis(timestamp - time_now as u64)).await;
             }
         }
+
+        self.start_timer(
+            timer_to_solver_tx,
+            CHALLENGE_LOOKBACK_EPOCHS * TIMESLOTS_PER_EPOCH as u64,
+            true,
+        );
     }
 
     // pub fn apply_coinbase_tx(&mut self, tx: CoinbaseTx, proof: &Proof) -> bool {
@@ -559,14 +565,12 @@ impl Ledger {
     }
 
     /// start the timer after syncing the ledger
-    pub async fn start_timer_from_genesis_time(
+    pub fn start_timer(
         &mut self,
         timer_to_farmer_tx: Sender<FarmerMessage>,
         elapsed_timeslots: u64,
         is_farming: bool,
     ) {
-        info!("Starting the timer from genesis time");
-
         self.timer_is_running = true;
 
         async_std::task::spawn(timer::run(

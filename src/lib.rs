@@ -1,4 +1,5 @@
 #![feature(try_blocks)]
+#![feature(const_int_pow)]
 #![feature(drain_filter)]
 
 use async_std::sync::{Arc, Mutex};
