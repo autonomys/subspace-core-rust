@@ -164,6 +164,14 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         epoch_tracker,
     );
 
+    let mut rpc_server = None;
+    if std::env::var("RUN_WS_RPC")
+        .map(|value| value == "1".to_string())
+        .unwrap_or_default()
+    {
+        rpc_server = Some(rpc::run());
+    }
+
     if is_farming {
         // plot, slow...
         let plot = plotter::plot(path.into(), node_id, genesis_piece).await;

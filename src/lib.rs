@@ -17,6 +17,7 @@ pub mod network;
 pub mod plot;
 pub mod plotter;
 pub mod pseudo_wallet;
+pub mod rpc;
 pub mod sloth;
 pub mod timer;
 pub mod transaction;
@@ -51,6 +52,7 @@ pub const MAX_PEERS: usize = 8;
 pub const CONFIRMATION_DEPTH: usize = 6;
 pub const DEV_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";
+pub const DEV_WS_ADDR: &str = "127.0.0.1:8880";
 pub const CONSOLE: bool = false;
 pub const BLOCK_REWARD: u64 = 1;
 // TODO: build duration object here and only define once
