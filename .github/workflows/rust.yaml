@@ -56,8 +56,11 @@ jobs:
       - name: Build container image
         uses: docker/build-push-action@v2
         with:
-          push: true
+          push: false
           tags: |
             ghcr.io/subspace/subspace:${{ env.GITHUB_REF_SLUG }}
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache
+      - name: Push container image
+        run: |
+          docker push ghcr.io/subspace/subspace:${{ env.GITHUB_REF_SLUG }}
