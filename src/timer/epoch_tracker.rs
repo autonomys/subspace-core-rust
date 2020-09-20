@@ -69,14 +69,14 @@ impl Inner {
                 current_epoch - EPOCHS_PER_EON * SOLUTION_RANGE_LOOKBACK_EONS;
             let lookback_eon_index = lookback_eon_start_epoch_index / EPOCHS_PER_EON;
 
-            let source_start_epoch_index = current_epoch - EPOCH_CLOSE_WAIT_TIME - EPOCHS_PER_EON;
-            // Sum up block count from all epochs in a lookback eon
-            let block_count = (source_start_epoch_index..)
-                .take(EPOCHS_PER_EON as usize)
+            let last_closed_epoch_index = current_epoch - EPOCH_CLOSE_WAIT_TIME;
+            // Sum up block count from all epochs starting with lookback eon and til last closed
+            // epoch
+            let block_count = (lookback_eon_start_epoch_index..=last_closed_epoch_index)
                 .map(|epoch_index| self.epochs.get(&epoch_index).unwrap().get_block_count())
                 .sum::<u64>();
-            // Get solution range of the previous eon (fallback to eon 0 if necessary in case of first
-            // few eons)
+            // Get solution range of the lookback eon (fallback to eon 0 if necessary in case of
+            // first few eons)
             let lookback_solution_range = *self
                 .eon_to_solution_range
                 .get(&lookback_eon_index)
@@ -84,12 +84,14 @@ impl Inner {
             // Re-adjust previous solution range based on new block count
             let solution_range = if block_count > 0 {
                 let new_solution_range = (lookback_solution_range as f64 / block_count as f64
-                    * (TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64)
+                    * (TIMESLOTS_PER_EPOCH
+                        * (last_closed_epoch_index - lookback_eon_start_epoch_index + 1))
+                        as f64)
                     .round() as u64;
 
-                // Apply 3% of the change to lookback solution range
+                // Apply 10% of the change to lookback solution range
                 let solution_range = lookback_solution_range as i64
-                    + (new_solution_range as i64 - lookback_solution_range as i64) / 100 * 3;
+                    + (new_solution_range as i64 - lookback_solution_range as i64) / 100 * 10;
 
                 // Should divide by 2 without remainder
                 solution_range as u64 / 2 * 2
