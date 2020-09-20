@@ -18,6 +18,13 @@ jobs:
           rustup toolchain install nightly
           rustup default nightly
       - uses: actions/checkout@v2
+      - name: Cache Rust dependencies
+        uses: actions/cache@v1.0.1
+        with:
+          path: target
+          key: ${{ runner.OS }}-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.OS }}-build
       - name: Build
         run: cargo build --verbose
       - name: Run tests
