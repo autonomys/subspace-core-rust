@@ -153,7 +153,7 @@ impl Router {
     }
 
     /// get a peer at random excluding a specific peer
-    fn get_random_peer_excluding(&self, node_addr: SocketAddr) -> Option<SocketAddr> {
+    fn _get_random_peer_excluding(&self, node_addr: SocketAddr) -> Option<SocketAddr> {
         self.peers
             .iter()
             .filter(|&peer_addr| !peer_addr.eq(&node_addr))
@@ -162,7 +162,7 @@ impl Router {
     }
 
     /// retrieve the socket addr for each peer, except the one asking
-    fn get_contacts(&self, exception: &SocketAddr) -> Vec<SocketAddr> {
+    fn _get_contacts(&self, exception: &SocketAddr) -> Vec<SocketAddr> {
         self.peers
             .iter()
             .filter(|&peer| !peer.eq(&exception))

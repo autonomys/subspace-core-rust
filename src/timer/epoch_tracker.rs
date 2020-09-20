@@ -1,6 +1,6 @@
 use crate::timer::Epoch;
 use crate::{
-    BlockId, CHALLENGE_LOOKBACK_EPOCHS, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME, PIECE_SIZE,
+    ProofId, CHALLENGE_LOOKBACK_EPOCHS, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME, PIECE_SIZE,
     SOLUTION_RANGE_LOOKBACK_EONS, TIMESLOTS_PER_EPOCH,
 };
 use async_std::sync::Mutex;
@@ -169,7 +169,7 @@ impl EpochTracker {
         &self,
         epoch_index: u64,
         timeslot: u64,
-        block_id: BlockId,
+        proof_id: ProofId,
         // distance_from_challenge: u64,
         solution_range: u64,
     ) {
@@ -185,6 +185,6 @@ impl EpochTracker {
             .epochs
             .get_mut(&epoch_index)
             .unwrap()
-            .add_block_to_timeslot(timeslot, block_id);
+            .add_block_to_timeslot(timeslot, proof_id);
     }
 }

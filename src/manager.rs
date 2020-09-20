@@ -83,6 +83,8 @@ pub async fn run(
                             "Received a block via gossip, with {} uncles",
                             block.content.uncle_ids.len()
                         );
+                        
+                        // TODO: need to reference block by proof not by full block
                         let block_id = block.get_id();
 
                         if ledger.blocks.contains_key(&block_id) {

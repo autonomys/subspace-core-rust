@@ -2,11 +2,11 @@ use crate::block::{Block, Content, Data, Proof};
 use crate::farmer::{FarmerMessage, Solution};
 use crate::timer::EpochTracker;
 use crate::transaction::{
-    AccountAddress, AccountState, CoinbaseTx, SimpleCreditTx, Transaction, TransactionState, TxId,
+    AccountAddress, AccountState, CoinbaseTx, Transaction, TransactionState, TxId,
 };
 use crate::{
-    crypto, sloth, timer, BlockId, ContentId, Tag, BLOCK_REWARD, CHALLENGE_LOOKBACK_EPOCHS,
-    PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+    crypto, sloth, timer, BlockId, ContentId, ProofId, Tag, BLOCK_REWARD,
+    CHALLENGE_LOOKBACK_EPOCHS, PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::Sender;
 use log::*;
@@ -56,8 +56,9 @@ pub struct Ledger {
     pub genesis_piece_hash: [u8; 32],
     pub blocks: HashMap<BlockId, Block>,
     pub last_content_id: ContentId,
-    pub unseen_uncle_ids: HashSet<BlockId>,
-    pub ordered_blocks_by_timeslot: HashMap<u64, Vec<BlockId>>,
+    pub unseen_content_ids: HashSet<BlockId>,
+    pub seen_content_ids: HashSet<BlockId>,
+    pub ordered_proofs_by_timeslot: HashMap<u64, Vec<ProofId>>,
     pub cached_blocks_for_timeslot: BTreeMap<u64, Vec<BlockId>>,
     pub epoch_tracker: EpochTracker,
     pub timer_is_running: bool,
@@ -88,10 +89,11 @@ impl Ledger {
             blocks: HashMap::new(),
             txs: HashMap::new(),
             tx_mempool: HashMap::new(),
-            ordered_blocks_by_timeslot: HashMap::new(),
+            ordered_proofs_by_timeslot: HashMap::new(),
             cached_blocks_for_timeslot: BTreeMap::new(),
             last_content_id: ContentId::default(),
-            unseen_uncle_ids: HashSet::new(),
+            unseen_content_ids: HashSet::new(),
+            seen_content_ids: HashSet::new(),
             genesis_timestamp: 0,
             timer_is_running: false,
             quality: 0,
@@ -107,7 +109,7 @@ impl Ledger {
 
     /// Retrieve all blocks for a timeslot, return an empty vec if no blocks
     pub fn get_blocks_by_timeslot(&self, timeslot: u64) -> Vec<Block> {
-        self.ordered_blocks_by_timeslot
+        self.ordered_proofs_by_timeslot
             .get(&timeslot)
             .map(|blocks| {
                 blocks
@@ -183,7 +185,7 @@ impl Ledger {
                 };
 
                 // apply the block to the ledger
-                self.apply_block(&block).await;
+                self.stage_block(&block).await;
 
                 self.last_content_id = block.content.get_id();
 
@@ -210,9 +212,10 @@ impl Ledger {
         );
     }
 
-    // TODO: change the name to something like save block
-    /// Apply block to the ledger
-    async fn apply_block(&mut self, block: &Block) {
+    /// Prepare the block for insertion once we have an ordering
+    async fn stage_block(&mut self, block: &Block) {
+        // TODO: what if two blocks reference the same proof, they will still have different block ids ...
+        // TODO: may want to reference by proof_id instead
         let block_id = block.get_id();
 
         // save the coinbase tx
@@ -228,35 +231,27 @@ impl Ledger {
         //  concurrently
         self.blocks.insert(block_id, pruned_block);
 
-        self.unseen_uncle_ids.insert(block_id);
+        // switch parent from unseen to seen
+        // TODO: what if parent was not in unseen blocks?
+        self.unseen_content_ids.remove(&block.content.parent_id);
+        self.seen_content_ids.insert(block.content.parent_id);
 
+        // switch uncles form unseen to seen
+        // TODO: what if an uncle is not in unseen blocks?
         block.content.uncle_ids.iter().for_each(|uncle_id| {
-            self.unseen_uncle_ids.remove(uncle_id);
+            self.unseen_content_ids.remove(uncle_id);
+            self.seen_content_ids.insert(*uncle_id);
         });
 
-        // Adds a pointer to this block id for the given timeslot in the ledger
-        self.ordered_blocks_by_timeslot
+        // Adds a pointer to this proof id for the given timeslot in the ledger
+        // Sorts on each insertion
+        self.ordered_proofs_by_timeslot
             .entry(block.proof.timeslot)
-            .and_modify(|block_ids| block_ids.push(block_id))
-            .or_insert(vec![block_id]);
-
-        // TODO: update chain quality
-        // Weight: actual blocks / expected blocks (eon)
-        // smaller the range the higher the quality
-        //
-
-        // TODO: Why not genesis block, why is different?
-        // if not a genesis block, count block reward
-        if block.proof.randomness != self.genesis_piece_hash {
-            // update balances, get or add account
-            self.balances
-                .entry(crypto::digest_sha_256(&block.proof.public_key))
-                .and_modify(|account_state| account_state.balance += 1)
-                .or_insert(AccountState {
-                    balance: 1,
-                    nonce: 0,
-                });
-        }
+            .and_modify(|proof_ids| {
+                proof_ids.push(block.proof.get_id());
+                proof_ids.sort();
+            })
+            .or_insert(vec![block.proof.get_id()]);
 
         self.epoch_tracker
             .add_block_to_epoch(
@@ -266,6 +261,37 @@ impl Ledger {
                 block.proof.solution_range,
             )
             .await;
+    }
+
+    fn apply_seen_blocks(&mut self, block_id: BlockId) {
+
+        // for each block in seen_block_ids
+        // apply the block
+        // remove from seen_blocks
+
+        // TODO: look through all the blocks in this timeslot and take the smallest that references the longest chain
+
+        // apply all txs
+        // first the coinbase
+        // then all credit tx
+
+        // TODO: Why not genesis block, why is different?
+        // if not a genesis block, count block reward
+        // if block.proof.randomness != self.genesis_piece_hash {
+        //     // update balances, get or add account
+        //     self.balances
+        //         .entry(crypto::digest_sha_256(&block.proof.public_key))
+        //         .and_modify(|account_state| account_state.balance += 1)
+        //         .or_insert(AccountState {
+        //             balance: 1,
+        //             nonce: 0,
+        //         });
+        // }
+
+        // TODO: update chain quality
+        // Weight: actual blocks / expected blocks (eon)
+        // smaller the range the higher the quality
+        //
     }
 
     /// create a new block locally from a valid farming solution
@@ -294,7 +320,7 @@ impl Ledger {
             .expect("Time went backwards")
             .as_millis() as u64;
 
-        let unseen_uncles: Vec<ContentId> = self.unseen_uncle_ids.drain().collect();
+        let unseen_uncles: Vec<ContentId> = self.unseen_content_ids.drain().collect();
         let proof_id = proof.get_id();
         let coinbase_tx = CoinbaseTx::new(BLOCK_REWARD, self.keys.public, proof_id);
 
@@ -341,7 +367,7 @@ impl Ledger {
         assert!(is_valid, "Local block must always be valid");
 
         // apply the block to the ledger
-        self.apply_block(&block).await;
+        self.stage_block(&block).await;
 
         // TODO: collect all blocks for a slot, then order blocks, then order tx
 
@@ -391,7 +417,7 @@ impl Ledger {
         }
 
         // apply the block to the ledger
-        self.apply_block(&block).await;
+        self.stage_block(&block).await;
 
         // TODO: collect all blocks for a slot, then order blocks, then order tx
 
@@ -408,7 +434,7 @@ impl Ledger {
         }
         let block_id = block.get_id();
         // apply the block to the ledger
-        self.apply_block(&block).await;
+        self.stage_block(&block).await;
 
         // check if the block is in pending gossip and remove
         {
@@ -460,7 +486,7 @@ impl Ledger {
         }
 
         // apply the block to the ledger
-        self.apply_block(&block).await;
+        self.stage_block(&block).await;
 
         true
     }

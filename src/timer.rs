@@ -37,6 +37,8 @@ pub async fn run(
         )
         .await;
 
+        // TODO: apply all blocks that were referenced in the previous round
+
         // We are looking to epoch boundary, but also trying not to go ahead of clock
         if next_timeslot % TIMESLOTS_PER_EPOCH == 0
             && (current_epoch_index < next_timeslot / TIMESLOTS_PER_EPOCH)
