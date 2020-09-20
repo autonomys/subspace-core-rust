@@ -527,6 +527,7 @@ mod tests {
     #[async_std::test]
     async fn test_basic() {
         let path = PathBuf::from("target").join("test");
+        std::fs::create_dir_all(&path).unwrap();
 
         let piece = crypto::generate_random_piece();
         let tag = rand::thread_rng().gen::<u64>();
