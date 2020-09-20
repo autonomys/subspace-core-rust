@@ -1,6 +1,5 @@
 pub(crate) mod messages;
 
-use crate::DEV_GATEWAY_ADDR;
 use crate::{console, MAX_PEERS};
 use async_std::net::{TcpListener, TcpStream};
 use async_std::sync::{channel, Receiver, Sender};

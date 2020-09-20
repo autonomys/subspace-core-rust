@@ -50,11 +50,11 @@ pub struct AccountState {
 /// The state of a non-coinbase tx, as tracked in the memory pool
 pub enum TransactionState {
     /// Recently published and valid, will soon be published in a new block
-    announced,
+    Announced,
     /// Has been seen in at least one valid content block
-    published,
+    Published,
     /// The content block has achieved a depth of k
-    confirmed,
+    Confirmed,
 }
 
 /// Dynamic transaction type that allows all types to be stored in the same hash map
