@@ -5,8 +5,8 @@ use crate::transaction::{
     AccountAddress, AccountState, CoinbaseTx, SimpleCreditTx, Transaction, TransactionState, TxId,
 };
 use crate::{
-    crypto, sloth, timer, BlockId, Tag, BLOCK_REWARD, CHALLENGE_LOOKBACK_EPOCHS, PRIME_SIZE_BITS,
-    TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+    crypto, sloth, timer, BlockId, ContentId, Tag, BLOCK_REWARD, CHALLENGE_LOOKBACK_EPOCHS,
+    PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::Sender;
 use log::*;
@@ -55,7 +55,8 @@ pub struct Ledger {
     pub genesis_timestamp: u64,
     pub genesis_piece_hash: [u8; 32],
     pub blocks: HashMap<BlockId, Block>,
-    pub unseen_block_ids: HashSet<BlockId>,
+    pub last_content_id: ContentId,
+    pub unseen_uncle_ids: HashSet<BlockId>,
     pub ordered_blocks_by_timeslot: HashMap<u64, Vec<BlockId>>,
     pub cached_blocks_for_timeslot: BTreeMap<u64, Vec<BlockId>>,
     pub epoch_tracker: EpochTracker,
@@ -89,7 +90,8 @@ impl Ledger {
             tx_mempool: HashMap::new(),
             ordered_blocks_by_timeslot: HashMap::new(),
             cached_blocks_for_timeslot: BTreeMap::new(),
-            unseen_block_ids: HashSet::new(),
+            last_content_id: ContentId::default(),
+            unseen_uncle_ids: HashSet::new(),
             genesis_timestamp: 0,
             timer_is_running: false,
             quality: 0,
@@ -124,7 +126,7 @@ impl Ledger {
             .as_millis() as u64;
 
         let mut timestamp = self.genesis_timestamp as u64;
-        let mut parent_id: BlockId = [0u8; 32];
+        // let mut parent_id: BlockId = [0u8; 32];
 
         for _ in 0..CHALLENGE_LOOKBACK_EPOCHS {
             let current_epoch_index = self.epoch_tracker.advance_epoch().await;
@@ -157,7 +159,8 @@ impl Ledger {
                 let coinbase_tx = CoinbaseTx::new(BLOCK_REWARD, self.keys.public, proof_id);
 
                 let mut content = Content {
-                    parent_ids: vec![parent_id],
+                    parent_id: self.last_content_id,
+                    uncle_ids: vec![],
                     proof_id,
                     proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
                     timestamp,
@@ -182,11 +185,11 @@ impl Ledger {
                 // apply the block to the ledger
                 self.apply_block(&block).await;
 
-                parent_id = block.get_id();
+                self.last_content_id = block.content.get_id();
 
                 debug!(
                     "Applied a genesis block to ledger with id {}",
-                    hex::encode(&parent_id[0..8])
+                    hex::encode(&self.last_content_id[0..8])
                 );
                 let time_now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -225,10 +228,10 @@ impl Ledger {
         //  concurrently
         self.blocks.insert(block_id, pruned_block);
 
-        self.unseen_block_ids.insert(block_id);
+        self.unseen_uncle_ids.insert(block_id);
 
-        block.content.parent_ids.iter().for_each(|parent_id| {
-            self.unseen_block_ids.remove(parent_id);
+        block.content.uncle_ids.iter().for_each(|uncle_id| {
+            self.unseen_uncle_ids.remove(uncle_id);
         });
 
         // Adds a pointer to this block id for the given timeslot in the ledger
@@ -290,16 +293,16 @@ impl Ledger {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
             .as_millis() as u64;
-        // must get parents from the chain
-        // TODO: only get parents that are not at the same level
-        // TODO: create an empty vec then do memswap between unseen parent and unseen block ids
-        let unseen_parents: Vec<BlockId> = self.unseen_block_ids.drain().collect();
 
+        let unseen_uncles: Vec<ContentId> = self.unseen_uncle_ids.drain().collect();
         let proof_id = proof.get_id();
         let coinbase_tx = CoinbaseTx::new(BLOCK_REWARD, self.keys.public, proof_id);
 
+        // TODO: set the last content_id when we apply the block
+
         let mut content = Content {
-            parent_ids: unseen_parents,
+            parent_id: self.last_content_id,
+            uncle_ids: unseen_uncles,
             proof_id,
             proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
             timestamp,

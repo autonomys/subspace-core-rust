@@ -80,8 +80,8 @@ pub async fn run(
                     GossipMessage::BlockProposal { block } => {
                         let mut ledger = ledger.lock().await;
                         trace!(
-                            "Received a block via gossip, with {} parents",
-                            block.content.parent_ids.len()
+                            "Received a block via gossip, with {} uncles",
+                            block.content.uncle_ids.len()
                         );
                         let block_id = block.get_id();
 

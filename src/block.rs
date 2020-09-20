@@ -216,15 +216,16 @@ impl Proof {
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct Content {
-    /// ids of all parent blocks not yet seen
-    pub parent_ids: Vec<ContentId>,
     /// id of matching proof
     pub proof_id: ProofId,
+    /// id of all parent block that is head of the longest chain
+    pub parent_id: ContentId,
+    /// ids of all uncle blocks that have not yet been seen by the longest chain
+    pub uncle_ids: Vec<ContentId>,
     /// signature of the proof with same public key
     pub proof_signature: Vec<u8>,
     /// when this block was created (from Nodes local view)
     pub timestamp: u64,
-    // TODO: Should be a vec of TX IDs
     /// ids of all unseen transactions seen by this block
     pub tx_ids: Vec<TxId>,
     // TODO: account for farmers who sign the same proof with two different contents
