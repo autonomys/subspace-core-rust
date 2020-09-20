@@ -68,8 +68,10 @@ impl Inner {
             let lookback_eon_start_epoch_index =
                 current_epoch - EPOCHS_PER_EON * SOLUTION_RANGE_LOOKBACK_EONS;
             let lookback_eon_index = lookback_eon_start_epoch_index / EPOCHS_PER_EON;
+
+            let source_start_epoch_index = current_epoch - EPOCH_CLOSE_WAIT_TIME - EPOCHS_PER_EON;
             // Sum up block count from all epochs in a lookback eon
-            let block_count = (lookback_eon_start_epoch_index..)
+            let block_count = (source_start_epoch_index..)
                 .take(EPOCHS_PER_EON as usize)
                 .map(|epoch_index| self.epochs.get(&epoch_index).unwrap().get_block_count())
                 .sum::<u64>();
