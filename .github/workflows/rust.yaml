@@ -4,7 +4,7 @@ on:
   release:
     types: [ published ]
   push:
-    branches: [ updates ]
+    branches: [ master ]
   pull_request:
     branches: [ master ]
 
@@ -61,6 +61,6 @@ jobs:
             ghcr.io/subspace/subspace:${{ env.GITHUB_REF_SLUG }}
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache
-      - name: Push container image
-        run: |
-          docker push ghcr.io/subspace/subspace:${{ env.GITHUB_REF_SLUG }}
+#      - name: Push container image
+#        run: |
+#          docker push ghcr.io/subspace/subspace:${{ env.GITHUB_REF_SLUG }}
