@@ -2,7 +2,9 @@ use crate::block::Block;
 use crate::console::AppState;
 use crate::farmer::{FarmerMessage, Solution};
 use crate::ledger::Ledger;
-use crate::network::messages::GossipMessage;
+use crate::network::messages::{
+    BlocksRequest, BlocksResponse, GossipMessage, RequestMessage, ResponseMessage,
+};
 use crate::network::{Network, NodeType};
 use crate::timer::EpochTracker;
 use crate::transaction::SimpleCreditTx;
@@ -94,7 +96,7 @@ pub async fn run(
 
         async_std::task::spawn(async move {
             let gossip_receiver = network.get_gossip_receiver().unwrap();
-            for (peer_addr, message) in gossip_receiver.recv().await {
+            while let Ok((peer_addr, message)) = gossip_receiver.recv().await {
                 match message {
                     GossipMessage::BlockProposal { block } => {
                         let mut ledger = ledger.lock().await;
@@ -197,9 +199,37 @@ pub async fn run(
             }
         });
     }
+
+    {
+        let network = network.clone();
+        let epoch_tracker = epoch_tracker.clone();
+        let ledger = Arc::clone(&ledger);
+
+        async_std::task::spawn(async move {
+            let requests_receiver = network.get_requests_receiver().unwrap();
+            while let Ok((peer_addr, message, response_sender)) = requests_receiver.recv().await {
+                let ledger = Arc::clone(&ledger);
+
+                async_std::task::spawn(async move {
+                    match message {
+                        RequestMessage::BlocksRequest(BlocksRequest { timeslot }) => {
+                            // TODO: check to make sure that the requested timeslot is not ahead of local timeslot
+                            let blocks = ledger.lock().await.get_blocks_by_timeslot(timeslot);
+
+                            drop(
+                                response_sender.send(ResponseMessage::BlocksResponse(
+                                    BlocksResponse { blocks },
+                                )),
+                            );
+                        }
+                    }
+                });
+            }
+        });
+    }
+
     let protocol_listener = async {
         info!("Main protocol loop is running...");
-        let is_farming = matches!(node_type, NodeType::Gateway | NodeType::Farmer);
 
         // if gateway init the genesis block set and then start the timer
         if node_type == NodeType::Gateway {
@@ -230,67 +260,7 @@ pub async fn run(
                             main_to_net_tx.send(message).await;
                         }
                         ProtocolMessage::BlocksResponse { blocks, timeslot } => {
-                            let mut ledger = ledger.lock().await;
-                            // TODO: this is mainly for testing, later this will be replaced by state chain sync
-                            // so there is no need for validating the block or timestamp
-
-                            // TODO: sort the blocks lexicographically (on client or server)
-
-                            // apply each block for the timeslot
-                            for block in blocks.into_iter() {
-                                ledger.apply_block_from_sync(block).await;
-                            }
-
-                            let next_timeslot_arrival_time = Duration::from_millis(
-                                ((timeslot + 1) * TIMESLOT_DURATION)
-                                    + ledger.genesis_timestamp as u64,
-                            );
-
-                            let time_now = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .expect("Time went backwards");
-
-                            if next_timeslot_arrival_time < time_now {
-                                // increment the epoch on boundary
-                                if (timeslot + 1) % TIMESLOTS_PER_EPOCH as u64 == 0 {
-                                    // create new epoch
-                                    let current_epoch = epoch_tracker.advance_epoch().await;
-
-                                    debug!(
-                                        "Closed randomness for epoch {} during sync",
-                                        current_epoch - 1
-                                    );
-
-                                    debug!(
-                                        "Created a new empty epoch during sync blocks for index {}",
-                                        current_epoch
-                                    );
-                                }
-                                // request the next timeslot
-                                main_to_net_tx
-                                    .send(ProtocolMessage::BlocksRequest {
-                                        timeslot: timeslot + 1,
-                                    })
-                                    .await;
-                            } else {
-                                // once we have all blocks, apply cached gossip
-                                // call sync and start timer
-                                info!("Applying cached blocks");
-                                match ledger.apply_cached_blocks(timeslot).await {
-                                    Ok(timeslot) => {
-                                        info!("Starting the timer from genesis time");
-
-                                        ledger.start_timer(
-                                            timer_to_solver_tx.clone(),
-                                            timeslot,
-                                            is_farming,
-                                        );
-                                    }
-                                    Err(_) => {
-                                        panic!("Unable to sync the ledger, invalid blocks!");
-                                    }
-                                }
-                            }
+                            // TODO: Remove
                         }
                         ProtocolMessage::BlockArrived {
                             block,
@@ -362,8 +332,82 @@ pub async fn run(
                 // start syncing the ledger at the genesis block
                 // this will start a sync loop that should complete when fully synced
                 // at that point node will simply listen and solve
-                task::sleep(Duration::from_secs(1)).await;
                 info!("New peer starting ledger sync with gateway");
+
+                let is_farming = matches!(node_type, NodeType::Gateway | NodeType::Farmer);
+
+                let mut timeslot = 0;
+                loop {
+                    match network.request_blocks(BlocksRequest { timeslot }).await {
+                        Ok(BlocksResponse { blocks }) => {
+                            let mut ledger = ledger.lock().await;
+                            // TODO: this is mainly for testing, later this will be replaced by state chain sync
+                            // so there is no need for validating the block or timestamp
+
+                            // TODO: sort the blocks lexicographically (on client or server)
+
+                            // apply each block for the timeslot
+                            for block in blocks.into_iter() {
+                                ledger.apply_block_from_sync(block).await;
+                            }
+
+                            let next_timeslot_arrival_time = Duration::from_millis(
+                                ((timeslot + 1) * TIMESLOT_DURATION)
+                                    + ledger.genesis_timestamp as u64,
+                            );
+
+                            let time_now = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .expect("Time went backwards");
+
+                            if next_timeslot_arrival_time < time_now {
+                                // increment the epoch on boundary
+                                if (timeslot + 1) % TIMESLOTS_PER_EPOCH as u64 == 0 {
+                                    // create new epoch
+                                    let current_epoch = epoch_tracker.advance_epoch().await;
+
+                                    debug!(
+                                        "Closed randomness for epoch {} during sync",
+                                        current_epoch - 1
+                                    );
+
+                                    debug!(
+                                        "Created a new empty epoch during sync blocks for index {}",
+                                        current_epoch
+                                    );
+                                }
+                                // request the next timeslot
+                                timeslot += 1;
+                            } else {
+                                // once we have all blocks, apply cached gossip
+                                // call sync and start timer
+                                info!("Applying cached blocks");
+                                match ledger.apply_cached_blocks(timeslot).await {
+                                    Ok(timeslot) => {
+                                        info!("Starting the timer from genesis time");
+
+                                        ledger.start_timer(
+                                            timer_to_solver_tx.clone(),
+                                            timeslot,
+                                            is_farming,
+                                        );
+                                    }
+                                    Err(_) => {
+                                        panic!("Unable to sync the ledger, invalid blocks!");
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            // TODO: Not panic, retry
+                            panic!(
+                                "Failed to request blocks for timeslot {}: {:?}",
+                                timeslot, error
+                            );
+                        }
+                    }
+                }
                 main_to_net_tx
                     .send(ProtocolMessage::BlocksRequest { timeslot: 0 })
                     .await;

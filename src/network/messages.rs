@@ -3,12 +3,13 @@ use crate::transaction::SimpleCreditTx;
 use bytes::buf::BufMutExt;
 use bytes::{Bytes, BytesMut};
 use log::*;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use static_assertions::_core::fmt;
 use static_assertions::_core::fmt::{Debug, Display};
 
-pub(crate) trait Request: Debug + ToBytes {
-    type Response: FromBytes;
+pub(crate) trait Request: Debug + Serialize {
+    type Response: DeserializeOwned;
 }
 
 pub(crate) trait ToBytes {
@@ -40,9 +41,23 @@ impl Display for GossipMessage {
     }
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BlocksRequest {
+    pub(crate) timeslot: u64,
+}
+
+impl Request for BlocksRequest {
+    type Response = BlocksResponse;
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BlocksResponse {
+    pub(crate) blocks: Vec<Block>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum RequestMessage {
-    BlocksRequest { timeslot: u64 },
+    BlocksRequest(BlocksRequest),
 }
 
 impl Display for RequestMessage {
@@ -57,10 +72,9 @@ impl Display for RequestMessage {
     }
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum ResponseMessage {
-    // TODO: Remove timeslot once proper request/response mechanism is implemented
-    BlocksResponse { timeslot: u64, blocks: Vec<Block> },
+    BlocksResponse(BlocksResponse),
 }
 
 impl Display for ResponseMessage {
@@ -75,7 +89,7 @@ impl Display for ResponseMessage {
     }
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum Message {
     Gossip(GossipMessage),
     Request { id: u32, message: RequestMessage },

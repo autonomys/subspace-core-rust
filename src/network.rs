@@ -2,7 +2,7 @@ pub(crate) mod messages;
 
 use crate::block::Block;
 use crate::manager::ProtocolMessage;
-use crate::network::messages::{FromBytes, ToBytes};
+use crate::network::messages::{BlocksRequest, BlocksResponse, FromBytes, ToBytes};
 use crate::transaction::SimpleCreditTx;
 use crate::{console, MAX_PEERS};
 use crate::{crypto, DEV_GATEWAY_ADDR};
@@ -276,6 +276,7 @@ fn read_messages(mut stream: TcpStream) -> Receiver<Result<Message, ()>> {
     messages_receiver
 }
 
+#[derive(Debug)]
 pub(crate) enum RequestError {
     ConnectionClosed,
     BadResponse,
@@ -289,7 +290,7 @@ type Response = Result<Vec<u8>, RequestError>;
 #[derive(Default)]
 struct RequestsContainer {
     next_id: u32,
-    handlers: HashMap<u32, async_oneshot::Sender<Vec<u8>>>,
+    handlers: HashMap<u32, async_oneshot::Sender<ResponseMessage>>,
 }
 
 struct Inner {
@@ -298,6 +299,20 @@ struct Inner {
     connections_handle: StdMutex<Option<JoinHandle<()>>>,
     gossip_sender: async_channel::Sender<(SocketAddr, GossipMessage)>,
     gossip_receiver: StdMutex<Option<async_channel::Receiver<(SocketAddr, GossipMessage)>>>,
+    request_sender: async_channel::Sender<(
+        SocketAddr,
+        RequestMessage,
+        async_oneshot::Sender<ResponseMessage>,
+    )>,
+    request_receiver: StdMutex<
+        Option<
+            async_channel::Receiver<(
+                SocketAddr,
+                RequestMessage,
+                async_oneshot::Sender<ResponseMessage>,
+            )>,
+        >,
+    >,
     requests_container: Arc<AsyncMutex<RequestsContainer>>,
     router: AsyncMutex<Router>,
 }
@@ -331,6 +346,11 @@ impl Network {
         let listener = TcpListener::bind(addr).await?;
         let (gossip_sender, gossip_receiver) =
             async_channel::bounded::<(SocketAddr, GossipMessage)>(32);
+        let (request_sender, request_receiver) = async_channel::bounded::<(
+            SocketAddr,
+            RequestMessage,
+            async_oneshot::Sender<ResponseMessage>,
+        )>(32);
         let requests_container = Arc::<AsyncMutex<RequestsContainer>>::default();
         let router = Router::new(node_id, listener.local_addr()?);
 
@@ -339,6 +359,8 @@ impl Network {
             connections_handle: StdMutex::default(),
             gossip_sender,
             gossip_receiver: StdMutex::new(Some(gossip_receiver)),
+            request_sender,
+            request_receiver: StdMutex::new(Some(request_receiver)),
             requests_container,
             router: AsyncMutex::new(router),
         });
@@ -387,23 +409,36 @@ impl Network {
         self.inner.router.lock().await.regossip(sender, message);
     }
 
-    pub(crate) async fn request<R>(&self, request: R) -> Result<R::Response, RequestError>
-    where
-        R: Request,
-    {
-        let data = self.request_internal(request.to_bytes()).await?;
+    pub(crate) async fn request_blocks(
+        &self,
+        request: BlocksRequest,
+    ) -> Result<BlocksResponse, RequestError> {
+        let response = self
+            .request_internal(RequestMessage::BlocksRequest(request))
+            .await?;
 
-        R::Response::from_bytes(&data).map_err(|error| {
-            debug!("Received bad response");
-
-            RequestError::BadResponse
-        })
+        match response {
+            ResponseMessage::BlocksResponse(response) => Ok(response),
+            _ => Err(RequestError::BadResponse),
+        }
     }
 
     pub(crate) fn get_gossip_receiver(
         &self,
     ) -> Option<async_channel::Receiver<(SocketAddr, GossipMessage)>> {
         self.inner.gossip_receiver.lock().unwrap().take()
+    }
+
+    pub(crate) fn get_requests_receiver(
+        &self,
+    ) -> Option<
+        async_channel::Receiver<(
+            SocketAddr,
+            RequestMessage,
+            async_oneshot::Sender<ResponseMessage>,
+        )>,
+    > {
+        self.inner.request_receiver.lock().unwrap().take()
     }
 
     pub(crate) async fn get_state(&self) -> console::AppState {
@@ -424,7 +459,11 @@ impl Network {
 
     async fn on_connected(self, peer_addr: SocketAddr, mut stream: TcpStream) {
         let (client_sender, mut client_receiver) = channel::<Bytes>(32);
-        self.inner.router.lock().await.add(peer_addr, client_sender);
+        self.inner
+            .router
+            .lock()
+            .await
+            .add(peer_addr, client_sender.clone());
 
         let mut messages_receiver = read_messages(stream.clone());
 
@@ -443,11 +482,40 @@ impl Network {
                     Message::Gossip(message) => {
                         drop(self.inner.gossip_sender.send((peer_addr, message)).await);
                     }
-                    message => {
-                        self.inner
-                            .broker_sender
-                            .send(NetworkEvent::InboundMessage { peer_addr, message })
-                            .await;
+                    Message::Request { id, message } => {
+                        let (response_sender, response_receiver) = async_oneshot::oneshot();
+                        drop(
+                            self.inner
+                                .request_sender
+                                .send((peer_addr, message, response_sender))
+                                .await,
+                        );
+                        {
+                            let client_sender = client_sender.clone();
+                            async_std::task::spawn(async move {
+                                if let Ok(message) = response_receiver.await {
+                                    drop(
+                                        client_sender
+                                            .send(Message::Response { id, message }.to_bytes())
+                                            .await,
+                                    );
+                                }
+                            });
+                        }
+                    }
+                    Message::Response { id, message } => {
+                        if let Some(response_sender) = self
+                            .inner
+                            .requests_container
+                            .lock()
+                            .await
+                            .handlers
+                            .remove(&id)
+                        {
+                            drop(response_sender.send(message));
+                        } else {
+                            debug!("Received response for unknown request {}", id);
+                        }
                     }
                 }
             }
@@ -458,11 +526,10 @@ impl Network {
     }
 
     /// Non-generic method to avoid significant duplication in final binary
-    async fn request_internal(&self, message: Bytes) -> Result<Vec<u8>, RequestError> {
-        if message.len() > MAX_MESSAGE_CONTENTS_LENGTH {
-            return Err(RequestError::MessageTooLong);
-        }
-
+    async fn request_internal(
+        &self,
+        message: RequestMessage,
+    ) -> Result<ResponseMessage, RequestError> {
         let router = self.inner.router.lock().await;
         let peer = match router.get_random_peer() {
             Some(peer) => peer,
@@ -472,7 +539,7 @@ impl Network {
         };
 
         let id;
-        let (result_sender, result_receiver) = async_oneshot::oneshot();
+        let (response_sender, response_receiver) = async_oneshot::oneshot();
         let requests_container = &self.inner.requests_container;
 
         {
@@ -482,7 +549,14 @@ impl Network {
 
             requests_container.next_id = requests_container.next_id.wrapping_add(1);
             // TODO: No one writes to this yet
-            requests_container.handlers.insert(id, result_sender);
+            requests_container.handlers.insert(id, response_sender);
+        }
+
+        let message = Message::Request { id, message }.to_bytes();
+        if message.len() > MAX_MESSAGE_CONTENTS_LENGTH {
+            requests_container.lock().await.handlers.remove(&id);
+
+            return Err(RequestError::MessageTooLong);
         }
 
         // TODO: Should be a better method for this (maybe without router)
@@ -491,7 +565,7 @@ impl Network {
 
         future::or(
             async move {
-                result_receiver
+                response_receiver
                     .await
                     .map_err(|_| RequestError::ConnectionClosed {})
             },
@@ -554,13 +628,13 @@ pub async fn run(
 
                             let router = network.inner.router.lock().await;
                             if let Some(peer) = router.get_random_peer() {
-                                router.send(
-                                    &peer,
-                                    Message::Request {
-                                        id: 0,
-                                        message: RequestMessage::BlocksRequest { timeslot },
-                                    },
-                                );
+                                // router.send(
+                                //     &peer,
+                                //     Message::Request {
+                                //         id: 0,
+                                //         message: RequestMessage::BlocksRequest { timeslot },
+                                //     },
+                                // );
                             } else {
                                 info!("Failed to request block at index {}: no peers", timeslot);
                             }
@@ -571,13 +645,13 @@ pub async fn run(
                             timeslot,
                         } => {
                             // send a block back to a peer that has requested it from you
-                            network.inner.router.lock().await.send(
-                                &node_addr,
-                                Message::Response {
-                                    id: 0,
-                                    message: ResponseMessage::BlocksResponse { timeslot, blocks },
-                                },
-                            );
+                            // network.inner.router.lock().await.send(
+                            //     &node_addr,
+                            //     Message::Response {
+                            //         id: 0,
+                            //         message: ResponseMessage::BlocksResponse { timeslot, blocks },
+                            //     },
+                            // );
                         }
                         _ => panic!(
                             "Network protocol listener has received an unknown protocol message!"
@@ -640,59 +714,61 @@ pub async fn run(
                             //
                             //     // if we still have too few peers, should we try another peer
                             // }
-                            Message::Request { id, message } => match message {
-                                RequestMessage::BlocksRequest { timeslot } => {
-                                    let net_to_main_tx = net_to_main_tx.clone();
-                                    let message = ProtocolMessage::BlocksRequestFrom {
-                                        node_addr: peer_addr,
-                                        timeslot,
-                                    };
-
-                                    async_std::task::spawn(async move {
-                                        net_to_main_tx.send(message).await;
-                                    });
-                                }
-                            },
+                            Message::Request { id, message } => {
+                                // match message {
+                                //     RequestMessage::BlocksRequest { timeslot } => {
+                                //         let net_to_main_tx = net_to_main_tx.clone();
+                                //         let message = ProtocolMessage::BlocksRequestFrom {
+                                //             node_addr: peer_addr,
+                                //             timeslot,
+                                //         };
+                                //
+                                //         async_std::task::spawn(async move {
+                                //             net_to_main_tx.send(message).await;
+                                //         });
+                                //     }
+                                // };
+                            }
                             Message::Response { id, message } => {
-                                match message {
-                                    ResponseMessage::BlocksResponse { timeslot, blocks } => {
-                                        // TODO: Handle the case where peer does not have the block
-                                        let net_to_main_tx = net_to_main_tx.clone();
-                                        async_std::task::spawn(async move {
-                                            net_to_main_tx
-                                                .send(ProtocolMessage::BlocksResponse {
-                                                    timeslot,
-                                                    blocks,
-                                                })
-                                                .await;
-                                        });
-
-                                        // if no block in response, request from a different peer
-                                        // match block {
-                                        //     Some(block) => {
-                                        //         let net_to_main_tx = net_to_main_tx.clone();
-
-                                        //         async_std::task::spawn(async move {
-                                        //             net_to_main_tx
-                                        //                 .send(ProtocolMessage::BlockResponse { block })
-                                        //                 .await;
-                                        //         });
-                                        //     }
-                                        //     None => {
-                                        //         info!("Peer did not have block at desired index, requesting from a different peer");
-
-                                        //         if let Some(new_peer) =
-                                        //             router.get_random_peer_excluding(peer_addr)
-                                        //         {
-                                        //             router.send(&new_peer, Message::BlockRequest { index });
-                                        //         } else {
-                                        //             info!("Failed to request block: no other peers found");
-                                        //         }
-                                        //         continue;
-                                        //     }
-                                        // }
-                                    }
-                                }
+                                // match message {
+                                //     ResponseMessage::BlocksResponse { timeslot, blocks } => {
+                                //         // TODO: Handle the case where peer does not have the block
+                                //         let net_to_main_tx = net_to_main_tx.clone();
+                                //         async_std::task::spawn(async move {
+                                //             net_to_main_tx
+                                //                 .send(ProtocolMessage::BlocksResponse {
+                                //                     timeslot,
+                                //                     blocks,
+                                //                 })
+                                //                 .await;
+                                //         });
+                                //
+                                //         // if no block in response, request from a different peer
+                                //         // match block {
+                                //         //     Some(block) => {
+                                //         //         let net_to_main_tx = net_to_main_tx.clone();
+                                //
+                                //         //         async_std::task::spawn(async move {
+                                //         //             net_to_main_tx
+                                //         //                 .send(ProtocolMessage::BlockResponse { block })
+                                //         //                 .await;
+                                //         //         });
+                                //         //     }
+                                //         //     None => {
+                                //         //         info!("Peer did not have block at desired index, requesting from a different peer");
+                                //
+                                //         //         if let Some(new_peer) =
+                                //         //             router.get_random_peer_excluding(peer_addr)
+                                //         //         {
+                                //         //             router.send(&new_peer, Message::BlockRequest { index });
+                                //         //         } else {
+                                //         //             info!("Failed to request block: no other peers found");
+                                //         //         }
+                                //         //         continue;
+                                //         //     }
+                                //         // }
+                                //     }
+                                // }
                             }
                         }
                     }
