@@ -406,7 +406,7 @@ impl Network {
 
     pub async fn connect_to(&self, peer_addr: SocketAddr) -> io::Result<()> {
         let stream = TcpStream::connect(peer_addr).await?;
-        async_std::task::spawn(self.clone().on_connected(peer_addr, stream));
+        self.clone().on_connected(peer_addr, stream).await;
 
         Ok(())
     }
@@ -430,53 +430,55 @@ impl Network {
             }
         });
 
-        while let Some(message) = messages_receiver.next().await {
-            if let Ok(message) = message {
-                match message {
-                    Message::Gossip(message) => {
-                        drop(self.inner.gossip_sender.send((peer_addr, message)).await);
-                    }
-                    Message::Request { id, message } => {
-                        let (response_sender, response_receiver) = async_oneshot::oneshot();
-                        drop(
-                            self.inner
-                                .request_sender
-                                .send((message, response_sender))
-                                .await,
-                        );
-                        {
-                            let client_sender = client_sender.clone();
-                            async_std::task::spawn(async move {
-                                if let Ok(message) = response_receiver.await {
-                                    drop(
-                                        client_sender
-                                            .send(Message::Response { id, message }.to_bytes())
-                                            .await,
-                                    );
-                                }
-                            });
+        async_std::task::spawn(async move {
+            while let Some(message) = messages_receiver.next().await {
+                if let Ok(message) = message {
+                    match message {
+                        Message::Gossip(message) => {
+                            drop(self.inner.gossip_sender.send((peer_addr, message)).await);
                         }
-                    }
-                    Message::Response { id, message } => {
-                        if let Some(response_sender) = self
-                            .inner
-                            .requests_container
-                            .lock()
-                            .await
-                            .handlers
-                            .remove(&id)
-                        {
-                            drop(response_sender.send(message));
-                        } else {
-                            debug!("Received response for unknown request {}", id);
+                        Message::Request { id, message } => {
+                            let (response_sender, response_receiver) = async_oneshot::oneshot();
+                            drop(
+                                self.inner
+                                    .request_sender
+                                    .send((message, response_sender))
+                                    .await,
+                            );
+                            {
+                                let client_sender = client_sender.clone();
+                                async_std::task::spawn(async move {
+                                    if let Ok(message) = response_receiver.await {
+                                        drop(
+                                            client_sender
+                                                .send(Message::Response { id, message }.to_bytes())
+                                                .await,
+                                        );
+                                    }
+                                });
+                            }
+                        }
+                        Message::Response { id, message } => {
+                            if let Some(response_sender) = self
+                                .inner
+                                .requests_container
+                                .lock()
+                                .await
+                                .handlers
+                                .remove(&id)
+                            {
+                                drop(response_sender.send(message));
+                            } else {
+                                debug!("Received response for unknown request {}", id);
+                            }
                         }
                     }
                 }
             }
-        }
 
-        self.inner.router.lock().await.remove(peer_addr);
-        info!("Broker has dropped a peer who disconnected");
+            self.inner.router.lock().await.remove(peer_addr);
+            info!("Broker has dropped a peer who disconnected");
+        });
     }
 
     /// Non-generic method to avoid significant duplication in final binary
