@@ -523,11 +523,39 @@ mod tests {
     use crate::crypto;
     use async_std::path::PathBuf;
     use rand::prelude::*;
+    use std::fs;
+
+    struct TargetDirectory {
+        path: PathBuf,
+    }
+
+    impl Drop for TargetDirectory {
+        fn drop(&mut self) {
+            drop(fs::remove_dir_all(&self.path));
+        }
+    }
+
+    impl Deref for TargetDirectory {
+        type Target = PathBuf;
+
+        fn deref(&self) -> &Self::Target {
+            &self.path
+        }
+    }
+
+    impl TargetDirectory {
+        fn new() -> Self {
+            let path = PathBuf::from("target").join("test");
+
+            fs::create_dir_all(&path).unwrap();
+
+            Self { path }
+        }
+    }
 
     #[async_std::test]
     async fn test_basic() {
-        let path = PathBuf::from("target").join("test");
-        std::fs::create_dir_all(&path).unwrap();
+        let path = TargetDirectory::new();
 
         let piece = crypto::generate_random_piece();
         let tag = rand::thread_rng().gen::<u64>();
