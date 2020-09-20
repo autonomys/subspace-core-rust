@@ -10,8 +10,7 @@ use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use futures_lite::future;
 use log::*;
 use messages::{
-    BlocksRequest, BlocksResponse, FromBytes, GossipMessage, Message, RequestMessage,
-    ResponseMessage, ToBytes,
+    BlocksRequest, BlocksResponse, GossipMessage, Message, RequestMessage, ResponseMessage,
 };
 use rand::prelude::*;
 use std::collections::{HashMap, HashSet};
