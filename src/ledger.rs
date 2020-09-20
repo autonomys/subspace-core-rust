@@ -34,22 +34,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 */
 
 /*
-   As new blocks are received
-   Validate each new block and all included txs
-   Stage each block and tx for commitment
-   When the epoch is closed and randomness is derived
-   Order the blocks and confirm
-   Order the txs and confirm
-   Need to track confirmation depth for each block until it reaches confirmed level
-   But first just make it work in the honest setting
-
-   Next step will be to apply to the state buffer
-
-   1. Block is received over the network
-   2. Block is validated and added to blocks db
-   3. Block is ordered when epoch closes -> ordered_blocks_by_timeslot
-   4. Block is confirmed when depth is achieved (later)
-
+   For each new block received:
+    Validate each new block and all included txs, save the block, regossip the block
+   When the timeslot closes:
+    Order all blocks received
+    For each block referenced:
+        Track confirmations for the epoch
+        Apply the block
+        Order all txs
+        For each tx: apply
+        Then encode state
+   When the epoch closes:
+    Derive randomness from the root of the longest chain (first block in epoch)
 */
 
 pub struct Ledger {
@@ -60,7 +56,6 @@ pub struct Ledger {
     pub genesis_piece_hash: [u8; 32],
     pub blocks: HashMap<BlockId, Block>,
     pub unseen_block_ids: HashSet<BlockId>,
-    // TODO: add ordered confirmed_blocks_by_block_height
     pub ordered_blocks_by_timeslot: HashMap<u64, Vec<BlockId>>,
     pub cached_blocks_for_timeslot: BTreeMap<u64, Vec<BlockId>>,
     pub epoch_tracker: EpochTracker,
@@ -160,14 +155,13 @@ impl Ledger {
 
                 let proof_id = proof.get_id();
                 let coinbase_tx = CoinbaseTx::new(BLOCK_REWARD, self.keys.public, proof_id);
-                let tx_ids = coinbase_tx.get_id().to_vec();
 
                 let mut content = Content {
                     parent_ids: vec![parent_id],
                     proof_id,
                     proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
                     timestamp,
-                    tx_ids,
+                    tx_ids: vec![coinbase_tx.get_id()],
                     signature: Vec::new(),
                 };
 
@@ -213,71 +207,17 @@ impl Ledger {
         );
     }
 
-    // pub fn apply_coinbase_tx(&mut self, tx: CoinbaseTx, proof: &Proof) -> bool {
-    //     // validate
-    //     if !tx.is_valid(proof) {
-    //         return false;
-    //     }
-    //
-    //     // stage s.t. the tx is applied when the block is ordered
-    //
-    //     // store in tx database
-    //     self.txs.insert(tx.get_id(), Transaction::Coinbase(tx));
-    //
-    //     true
-    // }
-
-    /// Validates a new tx and adds to the mempool
-    /// Returns true if valid and staged
-    // pub fn validate_and_stage_tx(&mut self, tx: SimpleCreditTx) -> bool {
-    //     let tx_id = tx.get_id();
-    //
-    //     // check to see if the tx is already in the mempool
-    //     if self.tx_mempool.contains_key(&tx_id) {
-    //         return false;
-    //     }
-    //
-    //     // get the from account state
-    //     let from_account_state = self.balances.get(&tx.from_address);
-    //
-    //     // is the tx valid
-    //     if !tx.is_valid(from_account_state) {
-    //         return false;
-    //     }
-    //
-    //     // add to the mem pool
-    //     self.tx_mempool.insert(tx_id, tx);
-    //
-    //     true
-    // }
-
-    /// Attempts to apply a tx included in a new block to the ledger
-    /// Returns true if the transaction could be applied
-    // pub fn apply_credit_tx(&mut self, tx: TxId) -> bool {
-    //     true
-    // }
-    //
-    // async fn stage_block(&mut self, block: &Block) {
-    //     // prune the block
-    //
-    //     // add to blocks db
-    //
-    //     // update unseen block ids
-    //
-    //     // add block to epoch
-    //
-    //     // ...
-    //
-    //     // epoch is confirmed (how do we even know)
-    //     // epoch sends a message to manager
-    //     // manager calls ledger and applies all of the blocks
-    //     // ledger then has to apply them one block at a time
-    //     // while being careful to not duplicate transactions
-    // }
-
+    // TODO: change the name to something like save block
     /// Apply block to the ledger
     async fn apply_block(&mut self, block: &Block) {
         let block_id = block.get_id();
+
+        // save the coinbase tx
+        self.txs.insert(
+            block.coinbase_tx.get_id(),
+            Transaction::Coinbase(block.coinbase_tx.clone()),
+        );
+
         let mut pruned_block = block.clone();
         pruned_block.prune();
         // TODO: Everything that happens here may need to be reversed if `add_block_to_epoch()` at
@@ -301,11 +241,6 @@ impl Ledger {
         // Weight: actual blocks / expected blocks (eon)
         // smaller the range the higher the quality
         //
-
-        // validate the genesis tx
-        // apply the genesis tx
-        // add to the tx database
-        // prune from the block
 
         // TODO: Why not genesis block, why is different?
         // if not a genesis block, count block reward
@@ -362,14 +297,13 @@ impl Ledger {
 
         let proof_id = proof.get_id();
         let coinbase_tx = CoinbaseTx::new(BLOCK_REWARD, self.keys.public, proof_id);
-        let tx_ids = coinbase_tx.get_id().to_vec();
 
         let mut content = Content {
             parent_ids: unseen_parents,
-            proof_id: proof.get_id(),
+            proof_id,
             proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
             timestamp,
-            tx_ids,
+            tx_ids: vec![coinbase_tx.get_id()],
             signature: Vec::new(),
         };
         content.signature = self.keys.sign(&content.get_id()).to_bytes().to_vec();
@@ -379,8 +313,6 @@ impl Ledger {
             content,
             data: Some(data),
         };
-
-        // from here, code is shared with validate_and_apply block
 
         // get correct randomness for this block
         let epoch = self

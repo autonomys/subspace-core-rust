@@ -1,4 +1,4 @@
-use crate::transaction::CoinbaseTx;
+use crate::transaction::{CoinbaseTx, TxId};
 use crate::{crypto, sloth, utils, BlockId, ContentId, ProofId, Tag, ENCODING_LAYERS_TEST};
 use ed25519_dalek::{PublicKey, Signature};
 use log::error;
@@ -82,6 +82,18 @@ impl Block {
             .is_err()
         {
             error!("Invalid block, content signature is invalid!");
+            return false;
+        }
+
+        // is coinbase tx valid
+        if !self.coinbase_tx.is_valid(&self.proof) {
+            error!("Invalid block, coinbase tx is invalid!");
+            return false;
+        }
+
+        // is coinbase first tx in the block
+        if self.coinbase_tx.get_id() != self.content.tx_ids[0] {
+            error!("Invalid block, coinbase tx is not the first tx referenced in content!");
             return false;
         }
 
@@ -214,7 +226,7 @@ pub struct Content {
     pub timestamp: u64,
     // TODO: Should be a vec of TX IDs
     /// ids of all unseen transactions seen by this block
-    pub tx_ids: Vec<u8>,
+    pub tx_ids: Vec<TxId>,
     // TODO: account for farmers who sign the same proof with two different contents
     /// signature of the content with same public key
     pub signature: Vec<u8>,

@@ -85,14 +85,6 @@ impl Inner {
                 //     * (TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64)
                 //     .round() as u64;
 
-                // let mut range_multiplier: f64 =
-                //     (TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64 / block_count as f64;
-                //
-                // if range_multiplier > 1f64 {
-                //     range_multiplier *= 0.5f64;
-                // } else {
-                // }
-
                 let solution_range = (lookback_solution_range as f64
                     * ((TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64 / block_count as f64))
                     .round() as u64;
@@ -102,6 +94,8 @@ impl Inner {
             } else {
                 lookback_solution_range
             };
+
+            // TODO: change to back to solution range to make dynamic
             self.eon_to_solution_range.insert(
                 lookback_eon_index + SOLUTION_RANGE_LOOKBACK_EONS,
                 lookback_solution_range,

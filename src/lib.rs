@@ -41,7 +41,7 @@ pub const PRIME_SIZE_BYTES: usize = PRIME_SIZE_BITS / 8;
 pub const IV_SIZE: usize = 32;
 pub const PIECE_SIZE: usize = 4096;
 pub const PIECE_COUNT: usize = 256;
-pub const REPLICATION_FACTOR: usize = 2560;
+pub const REPLICATION_FACTOR: usize = 256;
 pub const PLOT_SIZE: usize = PIECE_COUNT * REPLICATION_FACTOR;
 pub const BLOCKS_PER_ENCODING: usize = PIECE_SIZE / PRIME_SIZE_BYTES;
 pub const ENCODING_LAYERS_TEST: usize = 1;
@@ -80,26 +80,3 @@ const_assert!(SOLUTION_RANGE_LOOKBACK_EONS > EPOCH_CLOSE_WAIT_TIME);
 
 pub const EPOCH_GRACE_PERIOD: Duration =
     Duration::from_millis(TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION);
-
-// Three cases
-// 1. Start from genesis (above) -- have to include in at least the genesis block
-// 2. Sync before boundary -- pull from block -- but verify on subsequent boundaries
-// 3. After boundary -- deterministic
-
-// 2^64
-
-// range = +/- 2^64 / number of encodings / 2
-// this will lead to one block per timeslot o.a.
-// if the number of blocks increases the range should get smaller
-// for each doubling of the space pledged the number of blocks will double
-// if the number of blocks decreases the range should get wider
-// for each halving of the space pledged, the number of blocks will halve
-// an eon is 2048 blocks
-// we count the number of blocks for each eon
-// if the number of blocks is too high we decrease the range
-// if the number of blocks is too low we increase the range
-
-// start counting the number of blocks
-// every 2048 timeslots
-// adjust the solution range, accordingly
-// start a new eon
