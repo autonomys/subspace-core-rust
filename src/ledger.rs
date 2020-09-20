@@ -58,7 +58,7 @@ pub struct Ledger {
     pub last_content_id: ContentId,
     pub unseen_content_ids: HashSet<BlockId>,
     pub seen_content_ids: HashSet<BlockId>,
-    pub ordered_blocks_by_timeslot: HashMap<u64, Vec<ProofId>>,
+    pub ordered_blocks_by_timeslot: HashMap<u64, Vec<BlockId>>,
     pub cached_blocks_for_timeslot: BTreeMap<u64, Vec<BlockId>>,
     pub epoch_tracker: EpochTracker,
     pub timer_is_running: bool,
@@ -164,7 +164,7 @@ impl Ledger {
                     parent_id: self.last_content_id,
                     uncle_ids: vec![],
                     proof_id,
-                    proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
+                    proof_signature: self.keys.sign(&proof_id).to_bytes().to_vec(),
                     timestamp,
                     tx_ids: vec![coinbase_tx.get_id()],
                     signature: Vec::new(),
@@ -184,7 +184,7 @@ impl Ledger {
                     data: Some(data),
                 };
 
-                // apply the block to the ledger
+                // prepare the block for application to the ledger
                 self.stage_block(&block).await;
 
                 self.last_content_id = block.content.get_id();
@@ -202,6 +202,8 @@ impl Ledger {
 
                 //TODO: this should wait for the correct time to arrive rather than waiting for a fixed amount of time
                 async_std::task::sleep(Duration::from_millis(timestamp - time_now as u64)).await;
+
+                // TODO: call apply block here directly
             }
         }
 
@@ -212,7 +214,7 @@ impl Ledger {
         );
     }
 
-    /// Prepare the block for insertion once we have an ordering
+    /// Prepare the block for application once it is "seen" by some other block
     async fn stage_block(&mut self, block: &Block) {
         // TODO: what if two blocks reference the same proof, they will still have different block ids ...
         // TODO: may want to reference by proof_id instead
@@ -231,16 +233,22 @@ impl Ledger {
         //  concurrently
         self.blocks.insert(block_id, pruned_block);
 
-        // switch parent from unseen to seen
-        // TODO: what if parent was not in unseen blocks?
-        self.unseen_content_ids.remove(&block.content.parent_id);
-        self.seen_content_ids.insert(block.content.parent_id);
+        // TODO: Allow the genesis block to pass this check
 
-        // switch uncles form unseen to seen
-        // TODO: what if an uncle is not in unseen blocks?
-        block.content.uncle_ids.iter().for_each(|uncle_id| {
-            self.unseen_content_ids.remove(uncle_id);
-            self.seen_content_ids.insert(*uncle_id);
+        // collect parent and uncle pointers as seen_content_ids
+        let mut seen_content_ids = block.content.uncle_ids.clone();
+        seen_content_ids.push(block.content.parent_id);
+        seen_content_ids.iter().for_each(|content_id| {
+            // flag all referenced blocks for application at end of timeslot
+            if self.unseen_content_ids.contains(content_id.as_ref()) {
+                self.unseen_content_ids.remove(content_id);
+                self.seen_content_ids.insert(*content_id);
+            } else {
+                if !self.seen_content_ids.contains(content_id.as_ref()) {
+                    // TODO: this should instead discard the block or wait for its parents
+                    panic!("Cannot stage block that references an unknown content block");
+                }
+            }
         });
 
         // Adds a pointer to this proof id for the given timeslot in the ledger
@@ -323,6 +331,8 @@ impl Ledger {
         let unseen_uncles: Vec<ContentId> = self.unseen_content_ids.drain().collect();
         let proof_id = proof.get_id();
         let coinbase_tx = CoinbaseTx::new(BLOCK_REWARD, self.keys.public, proof_id);
+
+        // TODO: add all new transactions in the mempool
 
         // TODO: set the last content_id when we apply the block
 
@@ -415,6 +425,8 @@ impl Ledger {
         ) {
             return false;
         }
+
+        // TODO: validate all transactions for this block
 
         // apply the block to the ledger
         self.stage_block(&block).await;
