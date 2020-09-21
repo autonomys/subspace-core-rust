@@ -169,7 +169,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         .map(|value| value == "1".to_string())
         .unwrap_or_default()
     {
-        rpc_server = Some(rpc::run());
+        rpc_server = Some(rpc::run(node_id));
     }
 
     if is_farming {

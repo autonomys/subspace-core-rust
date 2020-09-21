@@ -1,21 +1,31 @@
-use crate::DEV_WS_ADDR;
+use crate::{NodeID, DEV_WS_ADDR};
 use jsonrpc_core::IoHandler;
 use jsonrpc_ws_server::{Server, ServerBuilder};
 
-mod hello {
+mod rpc {
+    use crate::NodeID;
     use jsonrpc_core::Result;
     use jsonrpc_derive::rpc;
 
     #[rpc]
     pub trait Rpc {
-        #[rpc(name = "say_hello")]
-        fn say_hello(&self) -> Result<String>;
+        #[rpc(name = "get_node_id")]
+        fn get_node_id(&self) -> Result<String>;
     }
 
-    pub struct RpcImpl;
+    pub struct RpcImpl {
+        node_id: NodeID,
+    }
+
     impl Rpc for RpcImpl {
-        fn say_hello(&self) -> Result<String> {
-            Ok("hello".into())
+        fn get_node_id(&self) -> Result<String> {
+            Ok(hex::encode(&self.node_id))
+        }
+    }
+
+    impl RpcImpl {
+        pub fn new(node_id: NodeID) -> Self {
+            Self { node_id }
         }
     }
 }
@@ -85,12 +95,13 @@ mod hello {
 //     }
 // }
 
-use hello::Rpc as HelloRpc;
+use rpc::Rpc as HelloRpc;
 // use sub::Rpc as SubRpc;
 
-pub fn run() -> Server {
+pub fn run(node_id: NodeID) -> Server {
     let mut io = IoHandler::new();
-    io.extend_with(hello::RpcImpl.to_delegate());
+    let rpc = rpc::RpcImpl::new(node_id);
+    io.extend_with(rpc.to_delegate());
     // io.extend_with(sub::RpcImpl::default().to_delegate());
 
     let server = ServerBuilder::new(io)
