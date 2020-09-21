@@ -1,17 +1,16 @@
 use crate::network::messages::GossipMessage;
 use crate::network::Network;
 use crate::{NodeID, DEV_WS_ADDR};
-use async_channel::Sender;
-use futures::lock::Mutex as AsyncMutex;
-use futures::{executor, future, StreamExt};
+use futures::{executor, future};
 use jsonrpc_core::{MetaIoHandler, Middleware, Params, Value};
-use jsonrpc_pubsub::{PubSubHandler, PubSubMetadata, Session, Subscriber, SubscriptionId};
+use jsonrpc_pubsub::{PubSubHandler, PubSubMetadata, Session, Sink, Subscriber, SubscriptionId};
+use jsonrpc_ws_server::tokio::prelude::task;
 use jsonrpc_ws_server::{RequestContext, Server, ServerBuilder};
 use log::*;
 use static_assertions::_core::sync::atomic::AtomicUsize;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 fn add_subscriptions<T, S>(io: &mut PubSubHandler<T, S>, network: Network)
 where
@@ -19,44 +18,32 @@ where
     S: Middleware<T>,
 {
     let next_subscription_id = Arc::new(AtomicUsize::new(1));
-    let subscribers = Arc::<AsyncMutex<HashMap<SubscriptionId, Sender<Params>>>>::default();
+    let sinks = Arc::<Mutex<HashMap<SubscriptionId, Sink>>>::default();
     io.add_subscription(
         "blocks",
         ("subscribe_blocks", {
-            let subscribers = Arc::clone(&subscribers);
+            let sinks = Arc::clone(&sinks);
 
             move |_params: Params, _meta, subscriber: Subscriber| {
                 debug!("subscribe_blocks");
-                let subscribers = Arc::clone(&subscribers);
+                let sinks = Arc::clone(&sinks);
 
                 let subscription_id = SubscriptionId::Number(
                     next_subscription_id.fetch_add(1, Ordering::SeqCst) as u64,
                 );
                 let sink = subscriber.assign_id(subscription_id.clone()).unwrap();
 
-                executor::block_on(async move {
-                    let (sender, mut receiver) = async_channel::unbounded::<Params>();
-                    subscribers.lock().await.insert(subscription_id, sender);
-                    async_std::task::spawn(async move {
-                        while let Some(params) = receiver.next().await {
-                            if !sink.notify(params).is_ok() {
-                                break;
-                            }
-                        }
-                    });
-                });
+                sinks.lock().unwrap().insert(subscription_id, sink);
             }
         }),
         ("unsubscribe_blocks", {
-            let subscribers = Arc::clone(&subscribers);
+            let sinks = Arc::clone(&sinks);
 
             move |subscription_id: SubscriptionId, _meta| {
                 debug!("unsubscribe_blocks");
-                let subscribers = Arc::clone(&subscribers);
+                let sinks = Arc::clone(&sinks);
 
-                executor::block_on(async move {
-                    subscribers.lock().await.remove(&subscription_id);
-                });
+                sinks.lock().unwrap().remove(&subscription_id);
 
                 future::ok(Value::Bool(true))
             }
@@ -64,16 +51,17 @@ where
     );
 
     executor::block_on(network.connect_gossip(move |message| {
-        let subscribers = Arc::clone(&subscribers);
+        let sinks = Arc::clone(&sinks);
 
         match message {
             GossipMessage::BlockProposal { block } => {
+                // TODO: Serialization for numbers may lose u64 precision, also bytes are ugly, we
+                //  probably want to have them as hex.
+                //  https://openethereum.github.io/wiki/JSONRPC
                 let params = Params::Array(vec![serde_json::to_value(block.clone()).unwrap()]);
-                async_std::task::spawn(async move {
-                    for subscriber in subscribers.lock().await.values() {
-                        drop(subscriber.send(params.clone()).await);
-                    }
-                });
+                for sink in sinks.lock().unwrap().values() {
+                    drop(sink.notify(params.clone()));
+                }
             }
             GossipMessage::TxProposal { tx: _ } => {
                 // TODO
