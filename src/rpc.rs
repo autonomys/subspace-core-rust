@@ -4,7 +4,6 @@ use crate::{NodeID, DEV_WS_ADDR};
 use futures::{executor, future};
 use jsonrpc_core::{MetaIoHandler, Middleware, Params, Value};
 use jsonrpc_pubsub::{PubSubHandler, PubSubMetadata, Session, Sink, Subscriber, SubscriptionId};
-use jsonrpc_ws_server::tokio::prelude::task;
 use jsonrpc_ws_server::{RequestContext, Server, ServerBuilder};
 use log::*;
 use static_assertions::_core::sync::atomic::AtomicUsize;
@@ -50,7 +49,7 @@ where
         }),
     );
 
-    executor::block_on(network.connect_gossip(move |message| {
+    executor::block_on(network.on_gossip(move |message| {
         let sinks = Arc::clone(&sinks);
 
         match message {
