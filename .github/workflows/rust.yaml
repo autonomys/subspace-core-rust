@@ -4,7 +4,7 @@ on:
   release:
     types: [ published ]
   push:
-    branches: [ master ]
+    branches: [ updates ]
   pull_request:
     branches: [ master ]
 
