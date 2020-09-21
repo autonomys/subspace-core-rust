@@ -652,9 +652,12 @@ mod tests {
                 );
 
                 gateway_network
-                    .gossip(GossipMessage::BlockProposal {
-                        block: fake_block(),
-                    })
+                    .regossip(
+                        &"127.0.0.1:0".parse().unwrap(),
+                        GossipMessage::BlockProposal {
+                            block: fake_block(),
+                        },
+                    )
                     .await;
                 assert_eq!(
                     2,
