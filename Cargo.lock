@@ -2000,6 +2000,7 @@ dependencies = [
  "jsonrpc-core",
  "jsonrpc-core-client",
  "jsonrpc-derive",
+ "jsonrpc-pubsub",
  "jsonrpc-ws-server",
  "log",
  "merkle-tree-binary",

@@ -183,4 +183,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         // listen and farm
         join!(main);
     }
+
+    // RPC server will stop when this is dropped
+    drop(rpc_server);
 }

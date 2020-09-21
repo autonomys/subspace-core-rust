@@ -24,6 +24,7 @@ jsonrpc-core = {git = "https://github.com/paritytech/jsonrpc.git"}
 # Just to make jsonrpc-derive to compiler, remove later
 jsonrpc-core-client = {git = "https://github.com/paritytech/jsonrpc.git"}
 jsonrpc-derive = {git = "https://github.com/paritytech/jsonrpc.git"}
+jsonrpc-pubsub = {git = "https://github.com/paritytech/jsonrpc.git"}
 jsonrpc-ws-server = {git = "https://github.com/paritytech/jsonrpc.git"}
 log = "0.4.0"
 merkle-tree-binary = { git = "https://github.com/subspace/merkle-tree-binary.rs" }
