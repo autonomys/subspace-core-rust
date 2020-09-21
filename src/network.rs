@@ -272,8 +272,14 @@ struct RequestsContainer {
     handlers: HashMap<u32, async_oneshot::Sender<ResponseMessage>>,
 }
 
+#[derive(Default)]
+struct Handlers {
+    gossip: AsyncMutex<Vec<Box<dyn Fn(&GossipMessage) + Send>>>,
+}
+
 struct Inner {
     connections_handle: StdMutex<Option<JoinHandle<()>>>,
+    handlers: Handlers,
     gossip_sender: async_channel::Sender<(SocketAddr, GossipMessage)>,
     gossip_receiver: StdMutex<Option<async_channel::Receiver<(SocketAddr, GossipMessage)>>>,
     request_sender: async_channel::Sender<(RequestMessage, async_oneshot::Sender<ResponseMessage>)>,
@@ -313,8 +319,10 @@ impl Network {
         let requests_container = Arc::<AsyncMutex<RequestsContainer>>::default();
         let router = Router::new(node_id, listener.local_addr()?);
 
+        let handlers = Handlers::default();
         let inner = Arc::new(Inner {
             connections_handle: StdMutex::default(),
+            handlers,
             gossip_sender,
             gossip_receiver: StdMutex::new(Some(gossip_receiver)),
             request_sender,
@@ -359,11 +367,17 @@ impl Network {
 
     /// Send a message to all peers
     pub(crate) async fn gossip(&self, message: GossipMessage) {
+        for callback in self.inner.handlers.gossip.lock().await.iter() {
+            callback(&message);
+        }
         self.inner.router.lock().await.gossip(message);
     }
 
     /// Send a message to all but one peer (who sent you the message)
     pub(crate) async fn regossip(&self, sender: &SocketAddr, message: GossipMessage) {
+        for callback in self.inner.handlers.gossip.lock().await.iter() {
+            callback(&message);
+        }
         self.inner.router.lock().await.regossip(sender, message);
     }
 
@@ -396,6 +410,15 @@ impl Network {
 
     pub(crate) async fn get_state(&self) -> console::AppState {
         self.inner.router.lock().await.get_state()
+    }
+
+    pub async fn connect_gossip<F: Fn(&GossipMessage) + Send + 'static>(&self, callback: F) {
+        self.inner
+            .handlers
+            .gossip
+            .lock()
+            .await
+            .push(Box::new(callback));
     }
 
     fn downgrade(&self) -> NetworkWeak {

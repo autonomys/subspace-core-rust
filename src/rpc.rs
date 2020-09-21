@@ -1,110 +1,99 @@
+use crate::network::messages::GossipMessage;
+use crate::network::Network;
 use crate::{NodeID, DEV_WS_ADDR};
-use jsonrpc_core::IoHandler;
-use jsonrpc_ws_server::{Server, ServerBuilder};
+use async_channel::Sender;
+use futures::lock::Mutex as AsyncMutex;
+use futures::{executor, future, StreamExt};
+use jsonrpc_core::{MetaIoHandler, Middleware, Params, Value};
+use jsonrpc_pubsub::{PubSubHandler, PubSubMetadata, Session, Subscriber, SubscriptionId};
+use jsonrpc_ws_server::{RequestContext, Server, ServerBuilder};
+use log::*;
+use static_assertions::_core::sync::atomic::AtomicUsize;
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
-mod rpc {
-    use crate::NodeID;
-    use jsonrpc_core::Result;
-    use jsonrpc_derive::rpc;
+fn add_subscriptions<T, S>(io: &mut PubSubHandler<T, S>, network: Network)
+where
+    T: PubSubMetadata,
+    S: Middleware<T>,
+{
+    let next_subscription_id = Arc::new(AtomicUsize::new(1));
+    let subscribers = Arc::<AsyncMutex<HashMap<SubscriptionId, Sender<Params>>>>::default();
+    io.add_subscription(
+        "blocks",
+        ("subscribe_blocks", {
+            let subscribers = Arc::clone(&subscribers);
 
-    #[rpc]
-    pub trait Rpc {
-        #[rpc(name = "get_node_id")]
-        fn get_node_id(&self) -> Result<String>;
-    }
+            move |_params: Params, _meta, subscriber: Subscriber| {
+                debug!("subscribe_blocks");
+                let subscribers = Arc::clone(&subscribers);
 
-    pub struct RpcImpl {
-        node_id: NodeID,
-    }
+                let subscription_id = SubscriptionId::Number(
+                    next_subscription_id.fetch_add(1, Ordering::SeqCst) as u64,
+                );
+                let sink = subscriber.assign_id(subscription_id.clone()).unwrap();
 
-    impl Rpc for RpcImpl {
-        fn get_node_id(&self) -> Result<String> {
-            Ok(hex::encode(&self.node_id))
+                executor::block_on(async move {
+                    let (sender, mut receiver) = async_channel::unbounded::<Params>();
+                    subscribers.lock().await.insert(subscription_id, sender);
+                    async_std::task::spawn(async move {
+                        while let Some(params) = receiver.next().await {
+                            // TODO: This is probably not very efficient to serialize every time
+                            if !sink.notify(params).is_ok() {
+                                break;
+                            }
+                        }
+                    });
+                });
+            }
+        }),
+        ("unsubscribe_blocks", {
+            let subscribers = Arc::clone(&subscribers);
+
+            move |subscription_id: SubscriptionId, _meta| {
+                debug!("unsubscribe_blocks");
+                let subscribers = Arc::clone(&subscribers);
+
+                executor::block_on(async move {
+                    subscribers.lock().await.remove(&subscription_id);
+                });
+
+                future::ok(Value::Bool(true))
+            }
+        }),
+    );
+
+    executor::block_on(network.connect_gossip(move |message| {
+        let subscribers = Arc::clone(&subscribers);
+
+        match message {
+            GossipMessage::BlockProposal { block } => {
+                let params = Params::Array(vec![serde_json::to_value(block.clone()).unwrap()]);
+                async_std::task::spawn(async move {
+                    for subscriber in subscribers.lock().await.values() {
+                        drop(subscriber.send(params.clone()).await);
+                    }
+                });
+            }
+            GossipMessage::TxProposal { tx: _ } => {
+                // TODO
+            }
         }
-    }
-
-    impl RpcImpl {
-        pub fn new(node_id: NodeID) -> Self {
-            Self { node_id }
-        }
-    }
+    }));
 }
 
-// mod sub {
-//     use jsonrpc_core::{Error, ErrorCode, Result};
-//     use jsonrpc_derive::rpc;
-//     use jsonrpc_pubsub::{
-//         typed::{Sink, Subscriber},
-//         PubSubHandler, Session, SubscriptionId,
-//     };
-//     use std::collections::HashMap;
-//     use std::sync::atomic::{AtomicUsize, Ordering};
-//     use std::sync::{Arc, RwLock};
-//
-//     #[rpc]
-//     pub trait Rpc {
-//         type Metadata;
-//
-//         /// Hello subscription
-//         #[pubsub(subscription = "hello", subscribe, name = "hello_subscribe")]
-//         fn subscribe(&self, _: Self::Metadata, _: Subscriber<String>, param: u64);
-//
-//         /// Unsubscribe from hello subscription.
-//         #[pubsub(subscription = "hello", unsubscribe, name = "hello_unsubscribe")]
-//         fn unsubscribe(&self, _: Option<Self::Metadata>, _: SubscriptionId) -> Result<bool>;
-//     }
-//
-//     #[derive(Default)]
-//     pub struct RpcImpl {
-//         uid: AtomicUsize,
-//         active: Arc<RwLock<HashMap<SubscriptionId, Sink<String>>>>,
-//     }
-//     impl Rpc for RpcImpl {
-//         type Metadata = Arc<Session>;
-//
-//         fn subscribe(&self, _meta: Self::Metadata, subscriber: Subscriber<String>, param: u64) {
-//             if param != 10 {
-//                 subscriber
-//                     .reject(Error {
-//                         code: ErrorCode::InvalidParams,
-//                         message: "Rejecting subscription - invalid parameters provided.".into(),
-//                         data: None,
-//                     })
-//                     .unwrap();
-//                 return;
-//             }
-//
-//             let id = self.uid.fetch_add(1, Ordering::SeqCst);
-//             let sub_id = SubscriptionId::Number(id as u64);
-//             let sink = subscriber.assign_id(sub_id.clone()).unwrap();
-//             self.active.write().unwrap().insert(sub_id, sink);
-//         }
-//
-//         fn unsubscribe(&self, _meta: Option<Self::Metadata>, id: SubscriptionId) -> Result<bool> {
-//             let removed = self.active.write().unwrap().remove(&id);
-//             if removed.is_some() {
-//                 Ok(true)
-//             } else {
-//                 Err(Error {
-//                     code: ErrorCode::InvalidParams,
-//                     message: "Invalid subscription.".into(),
-//                     data: None,
-//                 })
-//             }
-//         }
-//     }
-// }
-
-use rpc::Rpc as HelloRpc;
-// use sub::Rpc as SubRpc;
-
-pub fn run(node_id: NodeID) -> Server {
-    let mut io = IoHandler::new();
-    let rpc = rpc::RpcImpl::new(node_id);
-    io.extend_with(rpc.to_delegate());
-    // io.extend_with(sub::RpcImpl::default().to_delegate());
+pub fn run(node_id: NodeID, network: Network) -> Server {
+    let mut io = PubSubHandler::new(MetaIoHandler::default());
+    io.add_sync_method("get_node_id", move |_params: Params| {
+        Ok(Value::String(hex::encode(&node_id)))
+    });
+    add_subscriptions(&mut io, network);
 
     let server = ServerBuilder::new(io)
+        .session_meta_extractor(|context: &RequestContext| {
+            Some(Arc::new(Session::new(context.sender())))
+        })
         .start(&DEV_WS_ADDR.parse().unwrap())
         .expect("Server must start with no issues");
 

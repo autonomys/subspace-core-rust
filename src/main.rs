@@ -157,7 +157,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         genesis_piece_hash,
         ledger,
         any_to_main_rx,
-        network,
+        network.clone(),
         main_to_main_tx,
         state_sender,
         timer_to_farmer_tx,
@@ -169,7 +169,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         .map(|value| value == "1".to_string())
         .unwrap_or_default()
     {
-        rpc_server = Some(rpc::run(node_id));
+        rpc_server = Some(rpc::run(node_id, network));
     }
 
     if is_farming {
