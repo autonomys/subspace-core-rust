@@ -1,5 +1,6 @@
 pub(crate) mod messages;
 
+use crate::block::Block;
 use crate::{console, MAX_PEERS};
 use async_std::net::{TcpListener, TcpStream};
 use async_std::sync::{channel, Receiver, Sender};
@@ -9,9 +10,7 @@ use futures::lock::Mutex as AsyncMutex;
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use futures_lite::future;
 use log::*;
-use messages::{
-    BlocksRequest, BlocksResponse, GossipMessage, Message, RequestMessage, ResponseMessage,
-};
+use messages::{BlocksRequest, GossipMessage, Message, RequestMessage, ResponseMessage};
 use rand::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
@@ -272,8 +271,14 @@ struct RequestsContainer {
     handlers: HashMap<u32, async_oneshot::Sender<ResponseMessage>>,
 }
 
+#[derive(Default)]
+struct Handlers {
+    gossip: AsyncMutex<Vec<Box<dyn Fn(&GossipMessage) + Send>>>,
+}
+
 struct Inner {
     connections_handle: StdMutex<Option<JoinHandle<()>>>,
+    handlers: Handlers,
     gossip_sender: async_channel::Sender<(SocketAddr, GossipMessage)>,
     gossip_receiver: StdMutex<Option<async_channel::Receiver<(SocketAddr, GossipMessage)>>>,
     request_sender: async_channel::Sender<(RequestMessage, async_oneshot::Sender<ResponseMessage>)>,
@@ -282,6 +287,7 @@ struct Inner {
     >,
     requests_container: Arc<AsyncMutex<RequestsContainer>>,
     router: AsyncMutex<Router>,
+    node_addr: SocketAddr,
 }
 
 impl Drop for Inner {
@@ -311,16 +317,20 @@ impl Network {
         let (request_sender, request_receiver) =
             async_channel::bounded::<(RequestMessage, async_oneshot::Sender<ResponseMessage>)>(32);
         let requests_container = Arc::<AsyncMutex<RequestsContainer>>::default();
-        let router = Router::new(node_id, listener.local_addr()?);
+        let node_addr = listener.local_addr()?;
+        let router = Router::new(node_id, node_addr);
 
+        let handlers = Handlers::default();
         let inner = Arc::new(Inner {
             connections_handle: StdMutex::default(),
+            handlers,
             gossip_sender,
             gossip_receiver: StdMutex::new(Some(gossip_receiver)),
             request_sender,
             request_receiver: StdMutex::new(Some(request_receiver)),
             requests_container,
             router: AsyncMutex::new(router),
+            node_addr,
         });
 
         let network = Self { inner };
@@ -357,26 +367,33 @@ impl Network {
         Ok(network)
     }
 
+    pub fn address(&self) -> SocketAddr {
+        self.inner.node_addr
+    }
+
     /// Send a message to all peers
     pub(crate) async fn gossip(&self, message: GossipMessage) {
+        for callback in self.inner.handlers.gossip.lock().await.iter() {
+            callback(&message);
+        }
         self.inner.router.lock().await.gossip(message);
     }
 
     /// Send a message to all but one peer (who sent you the message)
     pub(crate) async fn regossip(&self, sender: &SocketAddr, message: GossipMessage) {
+        for callback in self.inner.handlers.gossip.lock().await.iter() {
+            callback(&message);
+        }
         self.inner.router.lock().await.regossip(sender, message);
     }
 
-    pub(crate) async fn request_blocks(
-        &self,
-        request: BlocksRequest,
-    ) -> Result<BlocksResponse, RequestError> {
+    pub(crate) async fn request_blocks(&self, timeslot: u64) -> Result<Vec<Block>, RequestError> {
         let response = self
-            .request_internal(RequestMessage::BlocksRequest(request))
+            .request_internal(RequestMessage::BlocksRequest(BlocksRequest { timeslot }))
             .await?;
 
         match response {
-            ResponseMessage::BlocksResponse(response) => Ok(response),
+            ResponseMessage::BlocksResponse(response) => Ok(response.blocks),
             // _ => Err(RequestError::BadResponse),
         }
     }
@@ -396,6 +413,15 @@ impl Network {
 
     pub(crate) async fn get_state(&self) -> console::AppState {
         self.inner.router.lock().await.get_state()
+    }
+
+    pub async fn on_gossip<F: Fn(&GossipMessage) + Send + 'static>(&self, callback: F) {
+        self.inner
+            .handlers
+            .gossip
+            .lock()
+            .await
+            .push(Box::new(callback));
     }
 
     fn downgrade(&self) -> NetworkWeak {
@@ -543,5 +569,223 @@ struct NetworkWeak {
 impl NetworkWeak {
     fn upgrade(&self) -> Option<Network> {
         self.inner.upgrade().map(|inner| Network { inner })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::{Block, Content, Proof};
+    use crate::network::messages::BlocksResponse;
+    use crate::transaction::{AccountAddress, CoinbaseTx};
+    use crate::{ContentId, ProofId, Tag};
+    use futures::executor;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn fake_block() -> Block {
+        Block {
+            data: None,
+            proof: Proof {
+                randomness: ProofId::default(),
+                epoch: 0,
+                timeslot: 0,
+                public_key: [0u8; 32],
+                tag: Tag::default(),
+                nonce: 0,
+                piece_index: 0,
+                solution_range: 0,
+            },
+            content: Content {
+                proof_id: ProofId::default(),
+                parent_id: ContentId::default(),
+                uncle_ids: vec![],
+                proof_signature: vec![],
+                timestamp: 0,
+                tx_ids: vec![],
+                signature: vec![],
+            },
+            coinbase_tx: CoinbaseTx {
+                reward: 0,
+                to_address: AccountAddress::default(),
+                proof_id: ProofId::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn test_create() {
+        executor::block_on(async {
+            Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("Network failed to start");
+        });
+    }
+
+    #[test]
+    fn test_gossip_regossip_callback() {
+        executor::block_on(async {
+            let gateway_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("Network failed to start");
+
+            {
+                let callback_called = Arc::new(AtomicUsize::new(0));
+
+                {
+                    let callback_called = Arc::clone(&callback_called);
+                    gateway_network
+                        .on_gossip(move |_message: &GossipMessage| {
+                            callback_called.fetch_add(1, Ordering::SeqCst);
+                        })
+                        .await;
+                }
+
+                gateway_network
+                    .gossip(GossipMessage::BlockProposal {
+                        block: fake_block(),
+                    })
+                    .await;
+                assert_eq!(
+                    1,
+                    callback_called.load(Ordering::SeqCst),
+                    "Failed to fire gossip callback",
+                );
+
+                gateway_network
+                    .regossip(
+                        &"127.0.0.1:0".parse().unwrap(),
+                        GossipMessage::BlockProposal {
+                            block: fake_block(),
+                        },
+                    )
+                    .await;
+                assert_eq!(
+                    2,
+                    callback_called.load(Ordering::SeqCst),
+                    "Failed to fire gossip callback",
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_gossip_regossip() {
+        executor::block_on(async {
+            let gateway_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("Network failed to start");
+            let mut gateway_gossip = gateway_network.get_gossip_receiver().unwrap();
+
+            let peer_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("Network failed to start");
+
+            peer_network
+                .connect_to(gateway_network.address())
+                .await
+                .expect("Failed to connect to gateway");
+
+            {
+                let callback_called = Arc::new(AtomicUsize::new(0));
+
+                {
+                    let callback_called = Arc::clone(&callback_called);
+                    gateway_network
+                        .on_gossip(move |_message: &GossipMessage| {
+                            callback_called.fetch_add(1, Ordering::SeqCst);
+                        })
+                        .await;
+                }
+
+                {
+                    let peer_network = peer_network.clone();
+                    async_std::task::spawn(async move {
+                        peer_network
+                            .gossip(GossipMessage::BlockProposal {
+                                block: fake_block(),
+                            })
+                            .await;
+                    });
+                }
+
+                assert!(
+                    matches!(
+                        gateway_gossip.next().await,
+                        Some((_, GossipMessage::BlockProposal { .. }))
+                    ),
+                    "Expected block proposal gossip massage",
+                );
+
+                {
+                    let peer_network = peer_network.clone();
+                    async_std::task::spawn(async move {
+                        peer_network
+                            .regossip(
+                                &"127.0.0.1:0".parse().unwrap(),
+                                GossipMessage::BlockProposal {
+                                    block: fake_block(),
+                                },
+                            )
+                            .await;
+                    });
+                }
+
+                assert!(
+                    matches!(
+                        gateway_gossip.next().await,
+                        Some((_, GossipMessage::BlockProposal { .. }))
+                    ),
+                    "Expected block proposal gossip massage",
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_request_response() {
+        executor::block_on(async {
+            let gateway_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("Network failed to start");
+            let mut gateway_requests = gateway_network.get_requests_receiver().unwrap();
+
+            let peer_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("Network failed to start");
+
+            peer_network
+                .connect_to(gateway_network.address())
+                .await
+                .expect("Failed to connect to gateway");
+
+            {
+                let (response_sender, response_receiver) = async_oneshot::oneshot::<Vec<Block>>();
+                {
+                    let peer_network = peer_network.clone();
+                    async_std::task::spawn(async move {
+                        let blocks = peer_network.request_blocks(0).await.unwrap();
+                        response_sender.send(blocks).unwrap();
+                    });
+                }
+
+                {
+                    let (request, sender) = gateway_requests.next().await.unwrap();
+                    assert!(
+                        matches!(request, RequestMessage::BlocksRequest(..)),
+                        "Expected blocks request",
+                    );
+
+                    sender
+                        .send(ResponseMessage::BlocksResponse(BlocksResponse {
+                            blocks: vec![fake_block()],
+                        }))
+                        .unwrap();
+                }
+
+                let blocks = response_receiver.await.unwrap();
+
+                assert_eq!(vec![fake_block()], blocks, "Bad blocks response");
+            }
+        });
     }
 }

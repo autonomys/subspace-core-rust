@@ -1,6 +1,6 @@
 use crate::timer::Epoch;
 use crate::{
-    ProofId, CHALLENGE_LOOKBACK_EPOCHS, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME, PIECE_SIZE,
+    BlockId, CHALLENGE_LOOKBACK_EPOCHS, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME, PIECE_SIZE,
     SOLUTION_RANGE_LOOKBACK_EONS, TIMESLOTS_PER_EPOCH,
 };
 use async_std::sync::Mutex;
@@ -68,37 +68,40 @@ impl Inner {
             let lookback_eon_start_epoch_index =
                 current_epoch - EPOCHS_PER_EON * SOLUTION_RANGE_LOOKBACK_EONS;
             let lookback_eon_index = lookback_eon_start_epoch_index / EPOCHS_PER_EON;
-            // Sum up block count from all epochs in a lookback eon
-            let block_count = (lookback_eon_start_epoch_index..)
-                .take(EPOCHS_PER_EON as usize)
+
+            let last_closed_epoch_index = current_epoch - EPOCH_CLOSE_WAIT_TIME;
+            // Sum up block count from all epochs starting with lookback eon and til last closed
+            // epoch
+            let block_count = (lookback_eon_start_epoch_index..=last_closed_epoch_index)
                 .map(|epoch_index| self.epochs.get(&epoch_index).unwrap().get_block_count())
                 .sum::<u64>();
-            // Get solution range of the previous eon (fallback to eon 0 if necessary in case of first
-            // few eons)
+            // Get solution range of the lookback eon (fallback to eon 0 if necessary in case of
+            // first few eons)
             let lookback_solution_range = *self
                 .eon_to_solution_range
                 .get(&lookback_eon_index)
                 .expect("No solution range for current eon, this should never happen");
             // Re-adjust previous solution range based on new block count
             let solution_range = if block_count > 0 {
-                // let solution_range = (lookback_solution_range as f64 / block_count as f64
-                //     * (TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64)
-                //     .round() as u64;
-
-                let solution_range = (lookback_solution_range as f64
-                    * ((TIMESLOTS_PER_EPOCH * EPOCHS_PER_EON) as f64 / block_count as f64))
+                let new_solution_range = (lookback_solution_range as f64 / block_count as f64
+                    * (TIMESLOTS_PER_EPOCH
+                        * (last_closed_epoch_index - lookback_eon_start_epoch_index + 1))
+                        as f64)
                     .round() as u64;
 
+                // Apply 10% of the change to lookback solution range
+                let solution_range = lookback_solution_range as i64
+                    + (new_solution_range as i64 - lookback_solution_range as i64) / 100 * 10;
+
                 // Should divide by 2 without remainder
-                solution_range / 2 * 2
+                solution_range as u64 / 2 * 2
             } else {
                 lookback_solution_range
             };
 
-            // TODO: change to back to solution range to make dynamic
             self.eon_to_solution_range.insert(
                 lookback_eon_index + SOLUTION_RANGE_LOOKBACK_EONS,
-                lookback_solution_range,
+                solution_range,
             );
 
             let bytes_pledged = (u64::MAX / lookback_solution_range) * PIECE_SIZE as u64;
@@ -169,7 +172,7 @@ impl EpochTracker {
         &self,
         epoch_index: u64,
         timeslot: u64,
-        proof_id: ProofId,
+        block_id: BlockId,
         // distance_from_challenge: u64,
         solution_range: u64,
     ) {
@@ -185,6 +188,6 @@ impl EpochTracker {
             .epochs
             .get_mut(&epoch_index)
             .unwrap()
-            .add_block_to_timeslot(timeslot, proof_id);
+            .add_block_to_timeslot(timeslot, block_id);
     }
 }

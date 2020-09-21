@@ -39,11 +39,35 @@ Benches single block encode/decode time and full piece encode/decode time for ea
 `RUST_LOG=info cargo run peer`
 
 ### Environment variables
-* `SUBSPACE_DIR` can be used to specify alternative default location for plot to be created in
+
+#### SUBSPACE_DIR
+`SUBSPACE_DIR` can be used to specify alternative default location for plot to be created in
 
 Each node needs a different directory for testing -- example
 
 `export SUBSPACE_DIR=~/Desktop/plots/subspace/peer0`
+
+#### RUN_WS_RPC
+`RUN_WS_RPC=1` will cause RPC server to be started on port `8880`.
+
+https://www.npmjs.com/package/wscat can be used to test RPC:
+```
+wscat -c 127.0.0.1:8880
+```
+
+Supported RPC commands:
+```
+> {"method":"get_node_id","params":[],"id":1,"jsonrpc":"2.0"}
+< {"jsonrpc":"2.0","result":"32d4bcea26b8b2fa9182f7b23abe6a0b53ce32684a8176b085da9d8cdea9bef3","id":1}
+```
+```
+> {"method":"subscribe_blocks","id":2,"jsonrpc":"2.0"}
+< {"jsonrpc":"2.0","result":1,"id":2}
+```
+```
+> {"method":"unsubscribe_blocks","params":[1],"id":3,"jsonrpc":"2.0"}
+< {"method":"unsubscribe_blocks","params":[1],"id":3,"jsonrpc":"2.0"}
+```
 
 ### Cleanup
 Remove `config.json`, `plot.bin`, `plot-map` and `plot-tags` at the location where client stores filed (printed during startup).
