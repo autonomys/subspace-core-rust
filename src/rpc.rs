@@ -39,7 +39,6 @@ where
                     subscribers.lock().await.insert(subscription_id, sender);
                     async_std::task::spawn(async move {
                         while let Some(params) = receiver.next().await {
-                            // TODO: This is probably not very efficient to serialize every time
                             if !sink.notify(params).is_ok() {
                                 break;
                             }
@@ -90,6 +89,7 @@ pub fn run(node_id: NodeID, network: Network) -> Server {
     });
     add_subscriptions(&mut io, network);
 
+    // TODO: CORS origins
     let server = ServerBuilder::new(io)
         .session_meta_extractor(|context: &RequestContext| {
             Some(Arc::new(Session::new(context.sender())))
