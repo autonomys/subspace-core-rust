@@ -157,12 +157,20 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         genesis_piece_hash,
         ledger,
         any_to_main_rx,
-        network,
+        network.clone(),
         main_to_main_tx,
         state_sender,
         timer_to_farmer_tx,
         epoch_tracker,
     );
+
+    let mut rpc_server = None;
+    if std::env::var("RUN_WS_RPC")
+        .map(|value| value == "1".to_string())
+        .unwrap_or_default()
+    {
+        rpc_server = Some(rpc::run(node_id, network));
+    }
 
     if is_farming {
         // plot, slow...
@@ -175,4 +183,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         // listen and farm
         join!(main);
     }
+
+    // RPC server will stop when this is dropped
+    drop(rpc_server);
 }

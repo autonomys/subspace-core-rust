@@ -325,6 +325,8 @@ pub async fn run(
                         .await
                     {
                         Ok(BlocksResponse { blocks }) => {
+                    match network.request_blocks(timeslot).await {
+                        Ok(blocks) => {
                             let mut ledger = ledger.lock().await;
                             // TODO: this is mainly for testing, later this will be replaced by state chain sync
                             // so there is no need for validating the block or timestamp

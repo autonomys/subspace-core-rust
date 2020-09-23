@@ -19,6 +19,7 @@ pub mod network;
 pub mod plot;
 pub mod plotter;
 pub mod pseudo_wallet;
+pub mod rpc;
 pub mod sloth;
 pub mod timer;
 pub mod transaction;
@@ -53,6 +54,7 @@ pub const MAX_PEERS: usize = 8;
 pub const CONFIRMATION_DEPTH: usize = 6;
 pub const DEV_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";
+pub const DEV_WS_ADDR: &str = "127.0.0.1:8880";
 pub const CONSOLE: bool = false;
 pub const BLOCK_REWARD: u64 = 1;
 // TODO: build duration object here and only define once
@@ -64,7 +66,7 @@ pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 4;
 pub const EPOCH_CLOSE_WAIT_TIME: u64 = 2;
 pub const TIMESLOTS_PER_EPOCH: u64 = 1;
 
-pub const EPOCHS_PER_EON: u64 = 10;
+pub const EPOCHS_PER_EON: u64 = 2;
 pub const SOLUTION_RANGE_LOOKBACK_EONS: u64 = 3;
 
 // Assertions about acceptable values for above parameters:

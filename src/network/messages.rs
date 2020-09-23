@@ -8,7 +8,7 @@ use static_assertions::_core::fmt;
 use static_assertions::_core::fmt::{Debug, Display};
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
-pub(crate) enum GossipMessage {
+pub enum GossipMessage {
     BlockProposal { block: Block },
     TxProposal { tx: SimpleCreditTx },
 }
