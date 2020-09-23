@@ -47,6 +47,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
     Case 4: Late blocks (seen by all in the next round)
     Case 5: Unseen pointers (seen by some in the round, some in the next)
 
+    Next Steps
+    - call apply blocks in timer (ensure they are being applied)
+    - figure out why farmer dies on sync
+    - apply cached blocks during sync (test)
+    - derive randomness
+
 */
 
 pub type BlockHeight = u64;
@@ -115,7 +121,7 @@ impl Ledger {
         }
     }
 
-    pub fn get_blocks_by_height(&self, height: u64) -> Vec<Block> {
+    pub fn get_applied_blocks_by_height(&self, height: u64) -> Vec<Block> {
         self.applied_blocks_by_height
             .get(&height)
             .map(|proof_ids| {
@@ -252,7 +258,7 @@ impl Ledger {
     }
 
     /// Prepare the block for application once it is "seen" by some other block
-    async fn stage_block(&mut self, block: &Block) {
+    pub async fn stage_block(&mut self, block: &Block) {
         // save the coinbase tx
         self.txs.insert(
             block.coinbase_tx.get_id(),
@@ -264,6 +270,28 @@ impl Ledger {
         // TODO: Everything that happens here may need to be reversed if `add_block_to_epoch()` at
         //  the end fails, which implies that this function should have a lock and not be called
         //  concurrently
+
+        let proof_id = block.proof.get_id();
+
+        // check if cached and remove from pending gossip
+        if self.metablocks.contains_key(&proof_id) {
+            // remove from pending gossip
+            let mut is_empty = false;
+            self.cached_proof_ids_by_timeslot
+                .entry(block.proof.timeslot)
+                .and_modify(|proof_ids| {
+                    proof_ids
+                        .iter()
+                        .position(|prf_id| *prf_id == proof_id)
+                        .map(|index| proof_ids.remove(index));
+                    is_empty = proof_ids.is_empty();
+                });
+            if is_empty {
+                self.cached_proof_ids_by_timeslot
+                    .remove(&block.proof.timeslot);
+            }
+        }
+
         let metablock = self.metablocks.stage(pruned_block);
 
         // skip the genesis block
@@ -289,6 +317,8 @@ impl Ledger {
                         panic!("Cannot stage block that references an unknown content block");
                     }
                 });
+        } else {
+            self.genesis_timestamp = block.content.timestamp;
         }
 
         let pending_block = PendingBlock {
@@ -313,7 +343,7 @@ impl Ledger {
     }
 
     /// order all seen blocks and apply transactions
-    async fn apply_referenced_blocks(&mut self) {
+    pub async fn apply_referenced_blocks(&mut self) {
         // apply highest block first, then smallest proof
         for (block_height, pending_blocks) in self.pending_blocks_by_height.clone().iter().rev() {
             for (proof_id, pending_block) in pending_blocks.iter() {
@@ -336,8 +366,6 @@ impl Ledger {
 
                     // TODO: apply block to state buffer
 
-                    // apply all txs that have not been applied (may be duplicates)
-
                     // apply the coinbase tx
                     match self.txs.get(&block.content.tx_ids[0]).unwrap() {
                         Transaction::Coinbase(tx) => {
@@ -357,8 +385,6 @@ impl Ledger {
 
                     // apply remaining credit txs
                     for tx_id in block.content.tx_ids.iter().skip(1) {
-                        // make sure the first is a coinbase tx
-
                         match self.txs.get(tx_id).unwrap() {
                             Transaction::Credit(tx) => {
                                 // check if the tx has already been applied
@@ -471,7 +497,6 @@ impl Ledger {
             hex::encode(&longest_content_id[0..8])
         );
 
-        // TODO: this is not correct
         // get all other unseen blocks as uncles
         let unseen_uncles = self
             .pending_blocks_by_height
@@ -586,48 +611,18 @@ impl Ledger {
             return false;
         }
 
-        // TODO: validate all transactions for this block
+        // TODO: ensure the block is on the longest chain
 
-        // apply the block to the ledger
+        // TODO: ensure the block does not reference uncles twice (how?)
+
+        // TODO: validate all transactions for this block (coinbase and credit)
+
+        // apply the block to the ledger`
         self.stage_block(&block).await;
 
         // TODO: apply children of this block that were depending on it
 
         true
-    }
-
-    // TODO: Where is validation???
-    /// validate a block received via sync from another node
-    pub async fn apply_block_from_sync(&mut self, block: Block) {
-        if self.genesis_timestamp == 0 {
-            self.genesis_timestamp = block.content.timestamp;
-        }
-        let block_id = block.get_id();
-        // apply the block to the ledger
-        self.stage_block(&block).await;
-
-        // check if the block is in pending gossip and remove
-        {
-            let mut is_empty = false;
-            self.cached_proof_ids_by_timeslot
-                .entry(block.proof.timeslot)
-                .and_modify(|block_ids| {
-                    block_ids
-                        .iter()
-                        .position(|blk_id| *blk_id == block_id)
-                        .map(|index| block_ids.remove(index));
-                    is_empty = block_ids.is_empty();
-                });
-            if is_empty {
-                self.cached_proof_ids_by_timeslot
-                    .remove(&block.proof.timeslot);
-            }
-        }
-
-        debug!(
-            "Applied new block during sync at timeslot: {}",
-            block.proof.timeslot
-        );
     }
 
     /// validate and apply a cached block from gossip after syncing the ledger

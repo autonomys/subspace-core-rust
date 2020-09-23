@@ -387,9 +387,14 @@ impl Network {
         self.inner.router.lock().await.regossip(sender, message);
     }
 
-    pub(crate) async fn request_blocks(&self, timeslot: u64) -> Result<Vec<Block>, RequestError> {
+    pub(crate) async fn request_blocks(
+        &self,
+        block_height: u64,
+    ) -> Result<Vec<Block>, RequestError> {
         let response = self
-            .request_internal(RequestMessage::BlocksRequest(BlocksRequest { timeslot }))
+            .request_internal(RequestMessage::BlocksRequest(BlocksRequest {
+                block_height,
+            }))
             .await?;
 
         match response {

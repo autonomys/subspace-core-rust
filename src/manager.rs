@@ -214,7 +214,10 @@ pub async fn run(
                     match message {
                         RequestMessage::BlocksRequest(BlocksRequest { block_height }) => {
                             // TODO: check to make sure that the requested timeslot is not ahead of local timeslot
-                            let blocks = ledger.lock().await.get_blocks_by_height(block_height);
+                            let blocks = ledger
+                                .lock()
+                                .await
+                                .get_applied_blocks_by_height(block_height);
 
                             drop(
                                 response_sender.send(ResponseMessage::BlocksResponse(
@@ -316,27 +319,48 @@ pub async fn run(
 
                 let is_farming = matches!(node_type, NodeType::Gateway | NodeType::Farmer);
 
-                let mut timeslot = 0;
+                let mut timeslot: u64 = 0;
+                let mut block_height = 0;
                 loop {
-                    match network
-                        .request_blocks(BlocksRequest {
-                            block_height: timeslot,
-                        })
-                        .await
-                    {
-                        Ok(BlocksResponse { blocks }) => {
-                    match network.request_blocks(timeslot).await {
+                    match network.request_blocks(block_height).await {
                         Ok(blocks) => {
                             let mut ledger = ledger.lock().await;
                             // TODO: this is mainly for testing, later this will be replaced by state chain sync
                             // so there is no need for validating the block or timestamp
 
-                            // TODO: sort the blocks lexicographically (on client or server)
+                            // first get all applied_blocks_by_height
+                            // then get all pending_blocks_by_height
+                            // then sync all gossip
+                            // have to advance timeslots, epochs, and derive randomness
 
-                            // apply each block for the timeslot
-                            for block in blocks.into_iter() {
-                                ledger.apply_block_from_sync(block).await;
+                            let block_timeslot = blocks[0].proof.timeslot;
+                            while timeslot < block_timeslot {
+                                // advance epochs
+                                if (timeslot + 1) % TIMESLOTS_PER_EPOCH as u64 == 0 {
+                                    // create new epoch
+                                    let current_epoch = epoch_tracker.advance_epoch().await;
+
+                                    debug!(
+                                        "Closed randomness for epoch {} during sync",
+                                        current_epoch - 1
+                                    );
+
+                                    debug!(
+                                        "Created a new empty epoch during sync blocks for index {}",
+                                        current_epoch
+                                    );
+                                }
+                                // advance timeslot
+                                timeslot += 1;
                             }
+
+                            // stage each block for the block_height
+                            for block in blocks.into_iter() {
+                                ledger.stage_block(&block).await;
+                            }
+
+                            // apply all referenced blocks
+                            ledger.apply_referenced_blocks().await;
 
                             let next_timeslot_arrival_time = Duration::from_millis(
                                 ((timeslot + 1) * TIMESLOT_DURATION)
@@ -363,13 +387,18 @@ pub async fn run(
                                         current_epoch
                                     );
                                 }
-                                // request the next timeslot
+                                // increment the timeslot
                                 timeslot += 1;
+
+                                // request the next block height
+                                block_height += 1;
                             } else {
                                 // once we have all blocks, apply cached gossip
+                                // TODO: have to also handle blocks that are staged but not applied yet
+
                                 // call sync and start timer
                                 info!("Applying cached blocks");
-                                match ledger.apply_cached_blocks(timeslot).await {
+                                match ledger.apply_cached_blocks(block_height).await {
                                     Ok(timeslot) => {
                                         info!("Starting the timer from genesis time");
 
@@ -389,8 +418,8 @@ pub async fn run(
                         Err(error) => {
                             // TODO: Not panic, retry
                             panic!(
-                                "Failed to request blocks for timeslot {}: {:?}",
-                                timeslot, error
+                                "Failed to request blocks for block_height {}: {:?}",
+                                block_height, error
                             );
                         }
                     }

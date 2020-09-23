@@ -116,15 +116,17 @@ impl MetaBlocks {
                 // TODO: handle fraud proof and burning plot
                 panic!("Two contents are being used for the same proof!")
             }
-        } else {
-            self.blocks.insert(proof_id, metablock.clone());
-            self.content_to_proof_map.insert(content_id, proof_id);
-            debug!(
-                "Staged block with content_id: {} and proof_id: {}",
-                hex::encode(&content_id[0..8]),
-                hex::encode(&proof_id[0..8])
-            );
         }
+
+        // if we have a cached block, this will update status to staged
+
+        self.blocks.insert(proof_id, metablock.clone());
+        self.content_to_proof_map.insert(content_id, proof_id);
+        debug!(
+            "Staged block with content_id: {} and proof_id: {}",
+            hex::encode(&content_id[0..8]),
+            hex::encode(&proof_id[0..8])
+        );
 
         metablock
     }
