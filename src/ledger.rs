@@ -1,13 +1,13 @@
 use crate::block::{Block, Content, Data, Proof};
 use crate::farmer::{FarmerMessage, Solution};
 use crate::timer::EpochTracker;
-use crate::transaction::{
-    AccountAddress, AccountState, CoinbaseTx, Transaction, TransactionState, TxId,
-};
+use crate::transaction::{AccountAddress, AccountState, CoinbaseTx, Transaction, TxId};
 use crate::{
     crypto, sloth, timer, BlockId, ContentId, ProofId, Tag, BLOCK_REWARD,
     CHALLENGE_LOOKBACK_EPOCHS, PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
+
+use crate::metablocks::MetaBlocks;
 use async_std::sync::Sender;
 use log::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -19,8 +19,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
  *
  * Fix: self-adjusting difficulty
  * Track chain quality
- * Decide on how to track parent links between blocks
- *
  * Ensure that commits to the ledger are fully atomic
  *
  * TESTING
@@ -34,37 +32,48 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 */
 
 /*
-   For each new block received:
-    Validate each new block and all included txs, save the block, regossip the block
-   When the timeslot closes:
-    Order all blocks received
-    For each block referenced:
-        Track confirmations for the epoch
-        Apply the block
-        Order all txs
-        For each tx: apply
-        Then encode state
-   When the epoch closes:
-    Derive randomness from the root of the longest chain (first block in epoch)
+    X 1. Replace block_id with proof_id throughout
+    X 2. Solve blocks (choose correct parent)
+    X 3. Stage blocks
+    X 4. Apply blocks (order then apply tx to balances)
+    5. Derive randomness for next epoch
+    6. Sync in the happy path
+    X 7. Apply transactions
+    8. Sync with late blocks
+
+    Case 1: Single block in each timeslot (some may be skipped)
+    Case 2: Multiple blocks in each timeslot
+    Case 3: Multiple blocks in successive timeslots
+    Case 4: Late blocks (seen by all in the next round)
+    Case 5: Unseen pointers (seen by some in the round, some in the next)
+
 */
+
+pub type BlockHeight = u64;
+
+#[derive(Debug, Clone)]
+pub struct PendingBlock {
+    content_id: ContentId,
+    // TODO: maybe don't need here since we have BlockStatus
+    is_referenced: bool,
+}
 
 pub struct Ledger {
     pub balances: HashMap<AccountAddress, AccountState>,
+    pub metablocks: MetaBlocks,
+    pub pending_blocks_by_height: BTreeMap<BlockHeight, BTreeMap<ProofId, PendingBlock>>,
+    pub applied_blocks_by_height: BTreeMap<BlockHeight, Vec<ProofId>>,
+    // pub ordered_proof_ids_by_timeslot: HashMap<u64, Vec<ProofId>>,
+    pub cached_proof_ids_by_timeslot: BTreeMap<u64, Vec<ProofId>>,
     pub txs: HashMap<TxId, Transaction>,
-    pub tx_mempool: HashMap<TxId, TransactionState>,
-    pub genesis_timestamp: u64,
-    pub genesis_piece_hash: [u8; 32],
-    pub blocks: HashMap<BlockId, Block>,
-    pub last_content_id: ContentId,
-    pub unseen_content_ids: HashSet<BlockId>,
-    pub seen_content_ids: HashSet<BlockId>,
-    pub ordered_blocks_by_timeslot: HashMap<u64, Vec<BlockId>>,
-    pub cached_blocks_for_timeslot: BTreeMap<u64, Vec<BlockId>>,
+    pub tx_mempool: HashSet<TxId>,
     pub epoch_tracker: EpochTracker,
     pub timer_is_running: bool,
     pub quality: u32,
     pub keys: ed25519_dalek::Keypair,
     pub sloth: sloth::Sloth,
+    pub genesis_timestamp: u64,
+    pub genesis_piece_hash: [u8; 32],
     pub merkle_root: Vec<u8>,
     pub merkle_proofs: Vec<Vec<u8>>,
     pub tx_payload: Vec<u8>,
@@ -86,14 +95,13 @@ impl Ledger {
         // TODO: all of these data structures need to be periodically truncated
         Ledger {
             balances: HashMap::new(),
-            blocks: HashMap::new(),
+            metablocks: MetaBlocks::new(),
             txs: HashMap::new(),
-            tx_mempool: HashMap::new(),
-            ordered_blocks_by_timeslot: HashMap::new(),
-            cached_blocks_for_timeslot: BTreeMap::new(),
-            last_content_id: ContentId::default(),
-            unseen_content_ids: HashSet::new(),
-            seen_content_ids: HashSet::new(),
+            tx_mempool: HashSet::new(),
+            applied_blocks_by_height: BTreeMap::new(),
+            // ordered_proof_ids_by_timeslot: HashMap::new(),
+            cached_proof_ids_by_timeslot: BTreeMap::new(),
+            pending_blocks_by_height: BTreeMap::new(),
             genesis_timestamp: 0,
             timer_is_running: false,
             quality: 0,
@@ -107,14 +115,13 @@ impl Ledger {
         }
     }
 
-    /// Retrieve all blocks for a timeslot, return an empty vec if no blocks
-    pub fn get_blocks_by_timeslot(&self, timeslot: u64) -> Vec<Block> {
-        self.ordered_blocks_by_timeslot
-            .get(&timeslot)
-            .map(|blocks| {
-                blocks
+    pub fn get_blocks_by_height(&self, height: u64) -> Vec<Block> {
+        self.applied_blocks_by_height
+            .get(&height)
+            .map(|proof_ids| {
+                proof_ids
                     .iter()
-                    .map(|block_id| self.blocks.get(block_id).unwrap().clone())
+                    .map(|proof_id| self.metablocks.blocks.get(proof_id).unwrap().block.clone())
                     .collect()
             })
             .unwrap_or_default()
@@ -128,7 +135,7 @@ impl Ledger {
             .as_millis() as u64;
 
         let mut timestamp = self.genesis_timestamp as u64;
-        // let mut parent_id: BlockId = [0u8; 32];
+        let mut parent_id: BlockId = [0u8; 32];
 
         for _ in 0..CHALLENGE_LOOKBACK_EPOCHS {
             let current_epoch_index = self.epoch_tracker.advance_epoch().await;
@@ -161,7 +168,7 @@ impl Ledger {
                 let coinbase_tx = CoinbaseTx::new(BLOCK_REWARD, self.keys.public, proof_id);
 
                 let mut content = Content {
-                    parent_id: self.last_content_id,
+                    parent_id,
                     uncle_ids: vec![],
                     proof_id,
                     proof_signature: self.keys.sign(&proof_id).to_bytes().to_vec(),
@@ -187,11 +194,11 @@ impl Ledger {
                 // prepare the block for application to the ledger
                 self.stage_block(&block).await;
 
-                self.last_content_id = block.content.get_id();
+                parent_id = block.content.get_id();
 
                 debug!(
-                    "Applied a genesis block to ledger with id {}",
-                    hex::encode(&self.last_content_id[0..8])
+                    "Applied a genesis block to ledger with content id {}",
+                    hex::encode(&parent_id[0..8])
                 );
                 let time_now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -203,7 +210,8 @@ impl Ledger {
                 //TODO: this should wait for the correct time to arrive rather than waiting for a fixed amount of time
                 async_std::task::sleep(Duration::from_millis(timestamp - time_now as u64)).await;
 
-                // TODO: call apply block here directly
+                // order blocks and apply transactions
+                self.apply_referenced_blocks().await;
             }
         }
 
@@ -214,12 +222,37 @@ impl Ledger {
         );
     }
 
+    /// Searches for a pending block and references it, if not yet referenced
+    /// returns false if the pending block is not found
+    pub fn reference_pending_block(&mut self, proof_id: &ProofId) -> bool {
+        for pending_blocks in self.pending_blocks_by_height.values_mut() {
+            match pending_blocks.get_mut(proof_id) {
+                Some(pending_block) => {
+                    self.metablocks.reference(*proof_id);
+                    pending_block.is_referenced = true;
+                    return true;
+                }
+                None => {}
+            };
+        }
+
+        false
+    }
+
+    pub fn apply_pending_block(&mut self, proof_id: &ProofId, block_height: &u64) {
+        self.metablocks.apply(*proof_id);
+        let pending_blocks = self
+            .pending_blocks_by_height
+            .get_mut(&block_height)
+            .unwrap();
+        pending_blocks.remove(proof_id);
+        if pending_blocks.len() == 0 {
+            self.pending_blocks_by_height.remove(&block_height);
+        }
+    }
+
     /// Prepare the block for application once it is "seen" by some other block
     async fn stage_block(&mut self, block: &Block) {
-        // TODO: what if two blocks reference the same proof, they will still have different block ids ...
-        // TODO: may want to reference by proof_id instead
-        let block_id = block.get_id();
-
         // save the coinbase tx
         self.txs.insert(
             block.coinbase_tx.get_id(),
@@ -231,75 +264,169 @@ impl Ledger {
         // TODO: Everything that happens here may need to be reversed if `add_block_to_epoch()` at
         //  the end fails, which implies that this function should have a lock and not be called
         //  concurrently
-        self.blocks.insert(block_id, pruned_block);
+        let metablock = self.metablocks.stage(pruned_block);
 
-        // TODO: Allow the genesis block to pass this check
+        // skip the genesis block
+        if block.proof.timeslot != 0 {
+            // collect parent and uncle pointers seen by this block
+            let mut content_ids_seen_by_this_block = block.content.uncle_ids.clone();
+            content_ids_seen_by_this_block.push(block.content.parent_id);
 
-        // collect parent and uncle pointers as seen_content_ids
-        let mut seen_content_ids = block.content.uncle_ids.clone();
-        seen_content_ids.push(block.content.parent_id);
-        seen_content_ids.iter().for_each(|content_id| {
-            // flag all referenced blocks for application at end of timeslot
-            if self.unseen_content_ids.contains(content_id.as_ref()) {
-                self.unseen_content_ids.remove(content_id);
-                self.seen_content_ids.insert(*content_id);
-            } else {
-                if !self.seen_content_ids.contains(content_id.as_ref()) {
-                    // TODO: this should instead discard the block or wait for its parents
-                    panic!("Cannot stage block that references an unknown content block");
-                }
-            }
-        });
+            // attempt to reference each pending block seen
+            content_ids_seen_by_this_block
+                .iter()
+                .map(|content_id| {
+                    self.metablocks
+                        .get_proof_id_from_content_id(*content_id)
+                        .clone()
+                })
+                .collect::<Vec<ProofId>>()
+                .iter()
+                .for_each(|proof_id| {
+                    // if it doesn't show as a pending block panic
+                    if !self.reference_pending_block(&proof_id) {
+                        // TODO: this should instead discard the block or wait for its parents
+                        panic!("Cannot stage block that references an unknown content block");
+                    }
+                });
+        }
 
-        // Adds a pointer to this proof id for the given timeslot in the ledger
-        // Sorts on each insertion
-        self.ordered_blocks_by_timeslot
-            .entry(block.proof.timeslot)
-            .and_modify(|block_ids| {
-                block_ids.push(block.get_id());
-                block_ids.sort();
+        let pending_block = PendingBlock {
+            content_id: metablock.content_id,
+            is_referenced: false,
+        };
+
+        // add the block to pending blocks
+        self.pending_blocks_by_height
+            .entry(metablock.height)
+            .and_modify(|pending_blocks| {
+                pending_blocks.insert(metablock.content_id, pending_block.clone());
             })
-            .or_insert(vec![block.get_id()]);
+            .or_insert({
+                let mut btreemap = BTreeMap::new();
+                btreemap.insert(metablock.proof_id, pending_block);
+                btreemap
+            });
 
-        self.epoch_tracker
-            .add_block_to_epoch(
-                block.proof.epoch,
-                block.proof.timeslot,
-                block.get_id(),
-                block.proof.solution_range,
-            )
-            .await;
+        // Adds a pointer to this block id for the given timeslot in the ledger
+        // Sorts on each insertion
     }
 
-    fn apply_seen_blocks(&mut self, block_id: BlockId) {
+    /// order all seen blocks and apply transactions
+    async fn apply_referenced_blocks(&mut self) {
+        // apply highest block first, then smallest proof
+        for (block_height, pending_blocks) in self.pending_blocks_by_height.clone().iter().rev() {
+            for (proof_id, pending_block) in pending_blocks.iter() {
+                if pending_block.is_referenced == true {
+                    // get the block
+                    let metablock = self.metablocks.blocks.get(proof_id).unwrap().clone();
+                    let block = metablock.block;
 
-        // for each block in seen_block_ids
-        // apply the block
-        // remove from seen_blocks
+                    // change state to applied and remove from pending blocks
+                    self.apply_pending_block(proof_id, block_height);
 
-        // TODO: look through all the blocks in this timeslot and take the smallest that references the longest chain
+                    // add to applied blocks by height
+                    self.applied_blocks_by_height
+                        .entry(metablock.height)
+                        .and_modify(|proof_ids| {
+                            proof_ids.push(*proof_id);
+                            proof_ids.sort();
+                        })
+                        .or_insert(vec![*proof_id]);
 
-        // apply all txs
-        // first the coinbase
-        // then all credit tx
+                    // TODO: apply block to state buffer
 
-        // TODO: Why not genesis block, why is different?
-        // if not a genesis block, count block reward
-        // if block.proof.randomness != self.genesis_piece_hash {
-        //     // update balances, get or add account
-        //     self.balances
-        //         .entry(crypto::digest_sha_256(&block.proof.public_key))
-        //         .and_modify(|account_state| account_state.balance += 1)
-        //         .or_insert(AccountState {
-        //             balance: 1,
-        //             nonce: 0,
-        //         });
-        // }
+                    // apply all txs that have not been applied (may be duplicates)
 
-        // TODO: update chain quality
-        // Weight: actual blocks / expected blocks (eon)
-        // smaller the range the higher the quality
-        //
+                    // apply the coinbase tx
+                    match self.txs.get(&block.content.tx_ids[0]).unwrap() {
+                        Transaction::Coinbase(tx) => {
+                            // create or update account state
+                            self.balances
+                                .entry(tx.to_address)
+                                .and_modify(|account_state| account_state.balance += BLOCK_REWARD)
+                                .or_insert(AccountState {
+                                    nonce: 0,
+                                    balance: BLOCK_REWARD,
+                                });
+
+                            // TODO: add to state, may remove from tx db here
+                        }
+                        _ => panic!("The first tx must be a coinbase tx"),
+                    };
+
+                    // apply remaining credit txs
+                    for tx_id in block.content.tx_ids.iter().skip(1) {
+                        // make sure the first is a coinbase tx
+
+                        match self.txs.get(tx_id).unwrap() {
+                            Transaction::Credit(tx) => {
+                                // check if the tx has already been applied
+                                if !self.tx_mempool.contains(tx_id) {
+                                    warn!("Transaction has already been referenced by a previous block, skipping");
+                                    continue;
+                                }
+
+                                // ensure the tx is still valid
+                                let sender_account_state =
+                                    self.balances.get(&tx.from_address).expect(
+                                        "Existence of account state has already been validated",
+                                    );
+
+                                if sender_account_state.balance < tx.amount {
+                                    error!("Invalid transaction, from account state has insufficient funds, transaction will not be applied");
+                                    continue;
+                                }
+
+                                if sender_account_state.nonce >= tx.nonce {
+                                    error!("Invalid transaction, tx nonce has already been used, transaction will not be applied");
+                                    continue;
+                                }
+
+                                // debit the sender
+                                self.balances
+                                    .entry(tx.from_address)
+                                    .and_modify(|account_state| account_state.balance -= tx.amount);
+
+                                // credit  the receiver
+                                self.balances
+                                    .entry(tx.to_address)
+                                    .and_modify(|account_state| account_state.balance += tx.amount)
+                                    .or_insert(AccountState {
+                                        nonce: 0,
+                                        balance: tx.amount,
+                                    });
+
+                                // TODO: pay tx fee to farmer
+
+                                // remove from mem pool
+                                self.tx_mempool.remove(tx_id);
+
+                                // TODO: apply tx to state buffer, may remove from tx db here...
+                            }
+                            _ => panic!("Only the first tx may be a coinbase tx"),
+                        };
+                    }
+
+                    // add to epoch tracker
+                    self.epoch_tracker
+                        .add_block_to_epoch(
+                            block.proof.epoch,
+                            block.proof.timeslot,
+                            *proof_id,
+                            block.proof.solution_range,
+                        )
+                        .await;
+
+                    // TODO: update chain quality
+                }
+            }
+        }
+    }
+
+    /// roll back a block and all tx in the event of a fork and re-org
+    async fn _revert_referenced_block(&mut self) {
+        // TODO: complete this to handle forks and re-orgs
     }
 
     /// create a new block locally from a valid farming solution
@@ -328,24 +455,58 @@ impl Ledger {
             .expect("Time went backwards")
             .as_millis() as u64;
 
-        let unseen_uncles: Vec<ContentId> = self.unseen_content_ids.drain().collect();
+        // for the largest block height, take the smallest proof as parent block
+        let (_, pending_block) = self
+            .pending_blocks_by_height
+            .last_key_value()
+            .expect("There should always be at least one pending level")
+            .1
+            .first_key_value()
+            .expect("There should always be at least on pending block for each level");
+
+        let longest_content_id = pending_block.content_id;
+
+        debug!(
+            "Parent content id for locally created block is: {}",
+            hex::encode(&longest_content_id[0..8])
+        );
+
+        // TODO: this is not correct
+        // get all other unseen blocks as uncles
+        let unseen_uncles = self
+            .pending_blocks_by_height
+            .values()
+            .map(|pending_blocks| pending_blocks.values())
+            .flatten()
+            .filter(|pending_block| pending_block.is_referenced == false)
+            .map(|pending_block| pending_block.content_id)
+            .filter(|content_id| content_id != &longest_content_id)
+            .collect();
+
+        // create the coinbase tx
         let proof_id = proof.get_id();
         let coinbase_tx = CoinbaseTx::new(BLOCK_REWARD, self.keys.public, proof_id);
+        let mut tx_ids = vec![coinbase_tx.get_id()];
 
-        // TODO: add all new transactions in the mempool
-
-        // TODO: set the last content_id when we apply the block
+        // add all txs in the mempool, sorted by hash
+        let mut pending_tx_ids: Vec<TxId> = self.tx_mempool.iter().cloned().collect();
+        pending_tx_ids.sort();
+        for tx_id in pending_tx_ids.into_iter() {
+            tx_ids.push(tx_id);
+        }
 
         let mut content = Content {
-            parent_id: self.last_content_id,
+            parent_id: longest_content_id,
             uncle_ids: unseen_uncles,
             proof_id,
             proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
             timestamp,
-            tx_ids: vec![coinbase_tx.get_id()],
+            tx_ids,
             signature: Vec::new(),
         };
+
         content.signature = self.keys.sign(&content.get_id()).to_bytes().to_vec();
+
         let block = Block {
             proof,
             coinbase_tx,
@@ -376,10 +537,8 @@ impl Ledger {
         );
         assert!(is_valid, "Local block must always be valid");
 
-        // apply the block to the ledger
+        // stage the block for application once it is referenced
         self.stage_block(&block).await;
-
-        // TODO: collect all blocks for a slot, then order blocks, then order tx
 
         block
     }
@@ -387,15 +546,16 @@ impl Ledger {
     /// cache a block received via gossip ahead of the current epoch
     pub fn cache_remote_block(&mut self, block: Block) {
         // cache the block
-        let block_id = block.get_id();
         // TODO: Does this need to be inserted here at all?
-        self.blocks.insert(block_id, block.clone());
+        self.metablocks.cache(block.clone());
+
+        let proof_id = block.proof.get_id();
 
         // add to cached blocks tracker
-        self.cached_blocks_for_timeslot
+        self.cached_proof_ids_by_timeslot
             .entry(block.proof.timeslot)
-            .and_modify(|block_ids| block_ids.push(block_id))
-            .or_insert(vec![block_id]);
+            .and_modify(|proof_ids| proof_ids.push(proof_id))
+            .or_insert(vec![proof_id]);
     }
 
     /// validate and apply a block received via gossip
@@ -431,8 +591,6 @@ impl Ledger {
         // apply the block to the ledger
         self.stage_block(&block).await;
 
-        // TODO: collect all blocks for a slot, then order blocks, then order tx
-
         // TODO: apply children of this block that were depending on it
 
         true
@@ -451,7 +609,7 @@ impl Ledger {
         // check if the block is in pending gossip and remove
         {
             let mut is_empty = false;
-            self.cached_blocks_for_timeslot
+            self.cached_proof_ids_by_timeslot
                 .entry(block.proof.timeslot)
                 .and_modify(|block_ids| {
                     block_ids
@@ -461,7 +619,7 @@ impl Ledger {
                     is_empty = block_ids.is_empty();
                 });
             if is_empty {
-                self.cached_blocks_for_timeslot
+                self.cached_proof_ids_by_timeslot
                     .remove(&block.proof.timeslot);
             }
         }
@@ -508,16 +666,16 @@ impl Ledger {
     /// Returns last (potentially unfinished) timeslot
     pub async fn apply_cached_blocks(&mut self, timeslot: u64) -> Result<u64, ()> {
         for current_timeslot in timeslot.. {
-            if let Some(block_ids) = self.cached_blocks_for_timeslot.remove(&current_timeslot) {
-                for block_id in block_ids.iter() {
-                    let cached_block = self.blocks.get(block_id).unwrap().clone();
+            if let Some(proof_ids) = self.cached_proof_ids_by_timeslot.remove(&current_timeslot) {
+                for proof_id in proof_ids.iter() {
+                    let cached_block = self.metablocks.blocks.get(proof_id).unwrap().block.clone();
                     if !self.validate_and_apply_cached_block(cached_block).await {
                         return Err(());
                     }
                 }
             }
 
-            if self.cached_blocks_for_timeslot.is_empty() {
+            if self.cached_proof_ids_by_timeslot.is_empty() {
                 return Ok(current_timeslot);
             }
 

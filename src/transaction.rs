@@ -5,20 +5,13 @@ use log::error;
 use serde::{Deserialize, Serialize};
 
 /*
-   Create a coinbase tx for each new block (starting with genesis)
-   Coinbase tx must be included with the block when it is gossiped
-   Include in the tx content (by id) -- should be the first
-   Ensure block validation now validates the genesis tx
    Generate some random credit txs
    Validate, gossip, and add to the mempool
    Include transaction ids in new block
    As new blocks are staged (local or remote)
    For each tx, switch to pending state in mempool (so as not to include again)
-
-   As epochs are confimred
    Order the blocks and txs
    Apply transactions to balances (including coinbase)
-
    Handle forks in the proof chain
    Handle forks in the content chain
    Store the merkle root of account state in the state block
@@ -48,19 +41,19 @@ pub struct AccountState {
 }
 
 /// The state of a non-coinbase tx, as tracked in the memory pool
-pub enum TransactionState {
-    /// Recently published and valid, will soon be published in a new block
-    Announced,
-    /// Has been seen in at least one valid content block
-    Published,
-    /// The content block has achieved a depth of k
-    Confirmed,
-}
+// pub enum TransactionState {
+//     /// Recently published and valid, will soon be published in a new block
+//     Staged,
+//     /// Has been included in at least one valid content block
+//     Applied,
+//     /// The content block has achieved a depth of k
+//     Confirmed,
+// }
 
 /// Dynamic transaction type that allows all types to be stored in the same hash map
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub enum Transaction {
-    /// A special purpose trancation that assigns the block reward
+    /// A special purpose transaction that assigns the block reward
     Coinbase(CoinbaseTx),
     /// A standard transaction that sends credits from account A -> account B
     Credit(SimpleCreditTx),
@@ -213,7 +206,6 @@ impl SimpleCreditTx {
         }
 
         // is the signature valid
-
         let mut unsigned_tx = self.clone();
         unsigned_tx.signature = Vec::new();
 

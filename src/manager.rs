@@ -7,6 +7,7 @@ use crate::network::messages::{
 };
 use crate::network::{Network, NodeType};
 use crate::timer::EpochTracker;
+use crate::transaction::Transaction;
 use crate::{
     CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
@@ -83,11 +84,11 @@ pub async fn run(
                             "Received a block via gossip, with {} uncles",
                             block.content.uncle_ids.len()
                         );
-                        
-                        // TODO: need to reference block by proof not by full block
-                        let block_id = block.get_id();
 
-                        if ledger.blocks.contains_key(&block_id) {
+                        // TODO: need to reference block by proof not by full block
+                        let proof_id = block.proof.get_id();
+
+                        if ledger.metablocks.contains_key(&proof_id) {
                             warn!("Received a block proposal via gossip for known block, ignoring");
                             continue;
                         }
@@ -170,8 +171,27 @@ pub async fn run(
                         }
                     }
                     GossipMessage::TxProposal { tx } => {
-                        // TODO: Handle this
+                        let tx_id = tx.get_id();
+                        let mut ledger = ledger.lock().await;
 
+                        // check to see if we already have the tx
+                        if ledger.txs.contains_key(&tx_id) {
+                            warn!("Received a duplicate tx via gossip, ignoring");
+                            continue;
+                        }
+
+                        // validate the tx
+                        let from_account_state = ledger.balances.get(&tx.from_address);
+                        if !tx.is_valid(from_account_state) {
+                            warn!("Received an invalid tx via gossip, ignoring");
+                            continue;
+                        }
+
+                        // add to tx database and mempool
+                        ledger.txs.insert(tx_id, Transaction::Credit(tx.clone()));
+                        ledger.tx_mempool.insert(tx_id);
+
+                        // re-gossip transaction
                         network
                             .regossip(&peer_addr, GossipMessage::TxProposal { tx })
                             .await;
@@ -192,9 +212,9 @@ pub async fn run(
 
                 async_std::task::spawn(async move {
                     match message {
-                        RequestMessage::BlocksRequest(BlocksRequest { timeslot }) => {
+                        RequestMessage::BlocksRequest(BlocksRequest { block_height }) => {
                             // TODO: check to make sure that the requested timeslot is not ahead of local timeslot
-                            let blocks = ledger.lock().await.get_blocks_by_timeslot(timeslot);
+                            let blocks = ledger.lock().await.get_blocks_by_height(block_height);
 
                             drop(
                                 response_sender.send(ResponseMessage::BlocksResponse(
@@ -298,7 +318,12 @@ pub async fn run(
 
                 let mut timeslot = 0;
                 loop {
-                    match network.request_blocks(BlocksRequest { timeslot }).await {
+                    match network
+                        .request_blocks(BlocksRequest {
+                            block_height: timeslot,
+                        })
+                        .await
+                    {
                         Ok(BlocksResponse { blocks }) => {
                             let mut ledger = ledger.lock().await;
                             // TODO: this is mainly for testing, later this will be replaced by state chain sync
