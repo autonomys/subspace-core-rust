@@ -9,7 +9,8 @@ use crate::network::{Network, NodeType};
 use crate::timer::EpochTracker;
 use crate::transaction::Transaction;
 use crate::{
-    CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+    timer, CHALLENGE_LOOKBACK_EPOCHS, CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE,
+    TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
@@ -56,6 +57,27 @@ impl Display for ProtocolMessage {
     }
 }
 
+pub type SharedLedger = Arc<Mutex<Ledger>>;
+
+/// start the timer after syncing the ledger
+pub fn start_timer(
+    timer_to_farmer_tx: Sender<FarmerMessage>,
+    is_farming: bool,
+    epoch_tracker: EpochTracker,
+    genesis_timestamp: u64,
+    next_timeslot: u64,
+    ledger: SharedLedger,
+) {
+    async_std::task::spawn(timer::run(
+        timer_to_farmer_tx,
+        epoch_tracker,
+        is_farming,
+        genesis_timestamp,
+        next_timeslot,
+        ledger,
+    ));
+}
+
 /// Starts the manager process, a broker loop that acts as the central async message hub for the node
 pub async fn run(
     node_type: NodeType,
@@ -65,10 +87,10 @@ pub async fn run(
     network: Network,
     main_to_main_tx: Sender<ProtocolMessage>,
     state_sender: crossbeam_channel::Sender<AppState>,
-    timer_to_solver_tx: Sender<FarmerMessage>,
+    timer_to_farmer_tx: Sender<FarmerMessage>,
     epoch_tracker: EpochTracker,
 ) {
-    let ledger = Arc::new(Mutex::new(ledger));
+    let ledger: SharedLedger = Arc::new(Mutex::new(ledger));
     {
         let network = network.clone();
         let epoch_tracker = epoch_tracker.clone();
@@ -237,11 +259,19 @@ pub async fn run(
         // if gateway init the genesis block set and then start the timer
         if node_type == NodeType::Gateway {
             // init ledger from genesis
-            ledger
-                .lock()
-                .await
-                .init_from_genesis(timer_to_solver_tx.clone())
-                .await;
+            let genesis_timestamp = ledger.lock().await.init_from_genesis().await;
+
+            ledger.lock().await.timer_is_running = true;
+
+            // start the timer
+            start_timer(
+                timer_to_farmer_tx.clone(),
+                true,
+                epoch_tracker.clone(),
+                genesis_timestamp,
+                CHALLENGE_LOOKBACK_EPOCHS * TIMESLOTS_PER_EPOCH,
+                Arc::clone(&ledger),
+            );
         }
 
         loop {
@@ -324,7 +354,7 @@ pub async fn run(
                 loop {
                     match network.request_blocks(block_height).await {
                         Ok(blocks) => {
-                            let mut ledger = ledger.lock().await;
+                            let mut locked_ledger = ledger.lock().await;
                             // TODO: this is mainly for testing, later this will be replaced by state chain sync
                             // so there is no need for validating the block or timestamp
 
@@ -356,15 +386,15 @@ pub async fn run(
 
                             // stage each block for the block_height
                             for block in blocks.into_iter() {
-                                ledger.stage_block(&block).await;
+                                locked_ledger.stage_block(&block).await;
                             }
 
                             // apply all referenced blocks
-                            ledger.apply_referenced_blocks().await;
+                            locked_ledger.apply_referenced_blocks().await;
 
                             let next_timeslot_arrival_time = Duration::from_millis(
                                 ((timeslot + 1) * TIMESLOT_DURATION)
-                                    + ledger.genesis_timestamp as u64,
+                                    + locked_ledger.genesis_timestamp as u64,
                             );
 
                             let time_now = SystemTime::now()
@@ -398,14 +428,20 @@ pub async fn run(
 
                                 // call sync and start timer
                                 info!("Applying cached blocks");
-                                match ledger.apply_cached_blocks(block_height).await {
+                                match locked_ledger.apply_cached_blocks(block_height).await {
                                     Ok(timeslot) => {
                                         info!("Starting the timer from genesis time");
 
-                                        ledger.start_timer(
-                                            timer_to_solver_tx.clone(),
-                                            timeslot,
+                                        locked_ledger.timer_is_running = true;
+
+                                        // start the timer
+                                        start_timer(
+                                            timer_to_farmer_tx.clone(),
                                             is_farming,
+                                            epoch_tracker.clone(),
+                                            locked_ledger.genesis_timestamp,
+                                            timeslot,
+                                            Arc::clone(&ledger),
                                         );
                                     }
                                     Err(_) => {

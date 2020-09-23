@@ -1,14 +1,13 @@
 use crate::block::{Block, Content, Data, Proof};
-use crate::farmer::{FarmerMessage, Solution};
+use crate::farmer::Solution;
 use crate::timer::EpochTracker;
 use crate::transaction::{AccountAddress, AccountState, CoinbaseTx, Transaction, TxId};
 use crate::{
-    crypto, sloth, timer, BlockId, ContentId, ProofId, Tag, BLOCK_REWARD,
-    CHALLENGE_LOOKBACK_EPOCHS, PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+    crypto, sloth, BlockId, ContentId, ProofId, Tag, BLOCK_REWARD, CHALLENGE_LOOKBACK_EPOCHS,
+    PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 
 use crate::metablocks::MetaBlocks;
-use async_std::sync::Sender;
 use log::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
@@ -48,7 +47,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
     Case 5: Unseen pointers (seen by some in the round, some in the next)
 
     Next Steps
-    - call apply blocks in timer (ensure they are being applied)
+    X call apply blocks in timer (ensure they are being applied)
     - figure out why farmer dies on sync
     - apply cached blocks during sync (test)
     - derive randomness
@@ -67,6 +66,7 @@ pub struct PendingBlock {
 pub struct Ledger {
     pub balances: HashMap<AccountAddress, AccountState>,
     pub metablocks: MetaBlocks,
+    pub staged_blocks: HashSet<(BlockHeight, ProofId, ContentId)>,
     pub pending_blocks_by_height: BTreeMap<BlockHeight, BTreeMap<ProofId, PendingBlock>>,
     pub applied_blocks_by_height: BTreeMap<BlockHeight, Vec<ProofId>>,
     // pub ordered_proof_ids_by_timeslot: HashMap<u64, Vec<ProofId>>,
@@ -104,6 +104,7 @@ impl Ledger {
             metablocks: MetaBlocks::new(),
             txs: HashMap::new(),
             tx_mempool: HashSet::new(),
+            staged_blocks: HashSet::new(),
             applied_blocks_by_height: BTreeMap::new(),
             // ordered_proof_ids_by_timeslot: HashMap::new(),
             cached_proof_ids_by_timeslot: BTreeMap::new(),
@@ -134,7 +135,7 @@ impl Ledger {
     }
 
     /// Start a new chain from genesis as a gateway node
-    pub async fn init_from_genesis(&mut self, timer_to_solver_tx: Sender<FarmerMessage>) {
+    pub async fn init_from_genesis(&mut self) -> u64 {
         self.genesis_timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
@@ -221,11 +222,13 @@ impl Ledger {
             }
         }
 
-        self.start_timer(
-            timer_to_solver_tx,
-            CHALLENGE_LOOKBACK_EPOCHS * TIMESLOTS_PER_EPOCH as u64,
-            true,
-        );
+        // self.start_timer(
+        //     timer_to_solver_tx,
+        //     CHALLENGE_LOOKBACK_EPOCHS * TIMESLOTS_PER_EPOCH as u64,
+        //     true,
+        // );
+
+        self.genesis_timestamp
     }
 
     /// Searches for a pending block and references it, if not yet referenced
@@ -314,6 +317,10 @@ impl Ledger {
                     // if it doesn't show as a pending block panic
                     if !self.reference_pending_block(&proof_id) {
                         // TODO: this should instead discard the block or wait for its parents
+                        debug!(
+                            "Proof_id for parent or uncle reference is: {}",
+                            hex::encode(&proof_id[0..8])
+                        );
                         panic!("Cannot stage block that references an unknown content block");
                     }
                 });
@@ -321,22 +328,9 @@ impl Ledger {
             self.genesis_timestamp = block.content.timestamp;
         }
 
-        let pending_block = PendingBlock {
-            content_id: metablock.content_id,
-            is_referenced: false,
-        };
-
-        // add the block to pending blocks
-        self.pending_blocks_by_height
-            .entry(metablock.height)
-            .and_modify(|pending_blocks| {
-                pending_blocks.insert(metablock.content_id, pending_block.clone());
-            })
-            .or_insert({
-                let mut btreemap = BTreeMap::new();
-                btreemap.insert(metablock.proof_id, pending_block);
-                btreemap
-            });
+        // TODO: this should not be added until the end of the time slot
+        self.staged_blocks
+            .insert((metablock.height, metablock.proof_id, metablock.content_id));
 
         // Adds a pointer to this block id for the given timeslot in the ledger
         // Sorts on each insertion
@@ -344,6 +338,27 @@ impl Ledger {
 
     /// order all seen blocks and apply transactions
     pub async fn apply_referenced_blocks(&mut self) {
+        // first add all new pending blocks
+        // if we add them immediately they will reference each other
+        for (block_height, proof_id, content_id) in self.staged_blocks.drain().into_iter() {
+            let pending_block = PendingBlock {
+                content_id,
+                is_referenced: false,
+            };
+
+            // add the block to pending blocks
+            self.pending_blocks_by_height
+                .entry(block_height)
+                .and_modify(|pending_blocks| {
+                    pending_blocks.insert(proof_id, pending_block.clone());
+                })
+                .or_insert({
+                    let mut btreemap = BTreeMap::new();
+                    btreemap.insert(proof_id, pending_block);
+                    btreemap
+                });
+        }
+
         // apply highest block first, then smallest proof
         for (block_height, pending_blocks) in self.pending_blocks_by_height.clone().iter().rev() {
             for (proof_id, pending_block) in pending_blocks.iter() {
@@ -364,6 +379,11 @@ impl Ledger {
                         })
                         .or_insert(vec![*proof_id]);
 
+                    warn!(
+                        "Applied block with proof_id: {} to the ledger",
+                        hex::encode(&proof_id[0..8])
+                    );
+
                     // TODO: apply block to state buffer
 
                     // apply the coinbase tx
@@ -377,6 +397,8 @@ impl Ledger {
                                     nonce: 0,
                                     balance: BLOCK_REWARD,
                                 });
+
+                            warn!("Applied a coinbase tx to balances");
 
                             // TODO: add to state, may remove from tx db here
                         }
@@ -611,6 +633,8 @@ impl Ledger {
             return false;
         }
 
+        // TODO: ensure the parent and all uncles are from an earlier timeslot
+
         // TODO: ensure the block is on the longest chain
 
         // TODO: ensure the block does not reference uncles twice (how?)
@@ -688,24 +712,6 @@ impl Ledger {
         }
 
         Ok(timeslot)
-    }
-
-    /// start the timer after syncing the ledger
-    pub fn start_timer(
-        &mut self,
-        timer_to_farmer_tx: Sender<FarmerMessage>,
-        elapsed_timeslots: u64,
-        is_farming: bool,
-    ) {
-        self.timer_is_running = true;
-
-        async_std::task::spawn(timer::run(
-            timer_to_farmer_tx,
-            self.epoch_tracker.clone(),
-            elapsed_timeslots,
-            is_farming,
-            self.genesis_timestamp,
-        ));
     }
 
     /// Retrieve the balance for a given node id
