@@ -48,9 +48,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     Next Steps
     X call apply blocks in timer (ensure they are being applied)
-    - figure out why farmer dies on sync
+    X figure out why farmer dies on sync
     - apply cached blocks during sync (test)
     - derive randomness
+    - how to verify a claim that a parent is on the longest chain?
 
 */
 
@@ -69,6 +70,7 @@ pub struct Ledger {
     pub staged_blocks: HashSet<(BlockHeight, ProofId, ContentId)>,
     pub pending_blocks_by_height: BTreeMap<BlockHeight, BTreeMap<ProofId, PendingBlock>>,
     pub applied_blocks_by_height: BTreeMap<BlockHeight, Vec<ProofId>>,
+    pub blocks_on_longest_chain: HashSet<ProofId>,
     // pub ordered_proof_ids_by_timeslot: HashMap<u64, Vec<ProofId>>,
     pub cached_proof_ids_by_timeslot: BTreeMap<u64, Vec<ProofId>>,
     pub txs: HashMap<TxId, Transaction>,
@@ -106,6 +108,7 @@ impl Ledger {
             tx_mempool: HashSet::new(),
             staged_blocks: HashSet::new(),
             applied_blocks_by_height: BTreeMap::new(),
+            blocks_on_longest_chain: HashSet::new(),
             // ordered_proof_ids_by_timeslot: HashMap::new(),
             cached_proof_ids_by_timeslot: BTreeMap::new(),
             pending_blocks_by_height: BTreeMap::new(),
@@ -145,7 +148,10 @@ impl Ledger {
         let mut parent_id: BlockId = [0u8; 32];
 
         for _ in 0..CHALLENGE_LOOKBACK_EPOCHS {
-            let current_epoch_index = self.epoch_tracker.advance_epoch().await;
+            let current_epoch_index = self
+                .epoch_tracker
+                .advance_epoch(&self.blocks_on_longest_chain)
+                .await;
             let current_epoch = self.epoch_tracker.get_epoch(current_epoch_index).await;
             info!(
                 "Advanced to epoch {} during genesis init",
@@ -299,6 +305,12 @@ impl Ledger {
 
         // skip the genesis block
         if block.proof.timeslot != 0 {
+            // TODO: how do we know the parent is actually on the longest chain?
+            let parent_proof_id = self
+                .metablocks
+                .get_proof_id_from_content_id(block.content.parent_id);
+            self.blocks_on_longest_chain.insert(parent_proof_id);
+
             // collect parent and uncle pointers seen by this block
             let mut content_ids_seen_by_this_block = block.content.uncle_ids.clone();
             content_ids_seen_by_this_block.push(block.content.parent_id);
@@ -332,8 +344,16 @@ impl Ledger {
         self.staged_blocks
             .insert((metablock.height, metablock.proof_id, metablock.content_id));
 
-        // Adds a pointer to this block id for the given timeslot in the ledger
-        // Sorts on each insertion
+        // add to epoch tracker
+        self.epoch_tracker
+            .add_block_to_epoch(
+                block.proof.epoch,
+                metablock.height,
+                proof_id,
+                block.proof.solution_range,
+                &self.blocks_on_longest_chain,
+            )
+            .await;
     }
 
     /// order all seen blocks and apply transactions
@@ -455,16 +475,6 @@ impl Ledger {
                             _ => panic!("Only the first tx may be a coinbase tx"),
                         };
                     }
-
-                    // add to epoch tracker
-                    self.epoch_tracker
-                        .add_block_to_epoch(
-                            block.proof.epoch,
-                            block.proof.timeslot,
-                            *proof_id,
-                            block.proof.solution_range,
-                        )
-                        .await;
 
                     // TODO: update chain quality
                 }
@@ -633,6 +643,8 @@ impl Ledger {
             return false;
         }
 
+        // TODO: ensure that we have the parent and all uncles
+
         // TODO: ensure the parent and all uncles are from an earlier timeslot
 
         // TODO: ensure the block is on the longest chain
@@ -700,7 +712,10 @@ impl Ledger {
 
             if current_timeslot % TIMESLOTS_PER_EPOCH as u64 == 0 {
                 // create the new epoch
-                let current_epoch = self.epoch_tracker.advance_epoch().await;
+                let current_epoch = self
+                    .epoch_tracker
+                    .advance_epoch(&self.blocks_on_longest_chain)
+                    .await;
 
                 debug!(
                     "Closed randomness for epoch {} during apply cached blocks",

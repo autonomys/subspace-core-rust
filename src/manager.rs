@@ -364,11 +364,20 @@ pub async fn run(
                             // have to advance timeslots, epochs, and derive randomness
 
                             let block_timeslot = blocks[0].proof.timeslot;
+
+                            // TODO: handle the case where there are no blocks for a level
+                            // this means that parent is at some future timeslot
+                            // but how do we advance to that timeslot?
+
+                            // if no blocks at level, then also include the current_timeslot?
+
                             while timeslot < block_timeslot {
                                 // advance epochs
                                 if (timeslot + 1) % TIMESLOTS_PER_EPOCH as u64 == 0 {
                                     // create new epoch
-                                    let current_epoch = epoch_tracker.advance_epoch().await;
+                                    let current_epoch = epoch_tracker
+                                        .advance_epoch(&locked_ledger.blocks_on_longest_chain)
+                                        .await;
 
                                     debug!(
                                         "Closed randomness for epoch {} during sync",
@@ -405,7 +414,9 @@ pub async fn run(
                                 // increment the epoch on boundary
                                 if (timeslot + 1) % TIMESLOTS_PER_EPOCH as u64 == 0 {
                                     // create new epoch
-                                    let current_epoch = epoch_tracker.advance_epoch().await;
+                                    let current_epoch = epoch_tracker
+                                        .advance_epoch(&locked_ledger.blocks_on_longest_chain)
+                                        .await;
 
                                     debug!(
                                         "Closed randomness for epoch {} during sync",

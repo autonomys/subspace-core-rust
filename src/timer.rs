@@ -39,13 +39,16 @@ pub async fn run(
         .await;
 
         // apply all blocks that were referenced in the previous round (happy path)
-        ledger.lock().await.apply_referenced_blocks().await;
+        let mut locked_ledger = ledger.lock().await;
+        locked_ledger.apply_referenced_blocks().await;
 
         // We are looking to epoch boundary, but also trying not to go ahead of clock
         if next_timeslot % TIMESLOTS_PER_EPOCH == 0
             && (current_epoch_index < next_timeslot / TIMESLOTS_PER_EPOCH)
         {
-            current_epoch_index = epoch_tracker.advance_epoch().await;
+            current_epoch_index = epoch_tracker
+                .advance_epoch(&locked_ledger.blocks_on_longest_chain)
+                .await;
 
             debug!(
                 "Timer is creating a new empty epoch at index {}",
