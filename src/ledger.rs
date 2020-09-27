@@ -35,10 +35,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
     X 2. Solve blocks (choose correct parent)
     X 3. Stage blocks
     X 4. Apply blocks (order then apply tx to balances)
-    5. Derive randomness for next epoch
-    6. Sync in the happy path
+    X 5. Derive randomness for next epoch
+    ~ 6. Sync in the happy path
     X 7. Apply transactions
-    8. Sync with late blocks
+    ~ 8. Sync with late blocks
+    9. Finish remote block validation
 
     Case 1: Single block in each timeslot (some may be skipped)
     Case 2: Multiple blocks in each timeslot
@@ -47,12 +48,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
     Case 5: Unseen pointers (seen by some in the round, some in the next)
 
     Next Steps
-    X call apply blocks in timer (ensure they are being applied)
+    X call apply blocks in timer (nsure they are being applied)
     X figure out why farmer dies on sync
-    - apply cached blocks during sync (test)
-    - derive randomness
+    X derive randomness
+    X revise sync process (double-check)
+    X draw a new reference diagram for better understanding
+    - verify blocks received via gossip
     - how to verify a claim that a parent is on the longest chain?
-
+    - apply cached blocks during sync (test)
 */
 
 pub type BlockHeight = u64;
@@ -64,14 +67,17 @@ pub struct PendingBlock {
     is_referenced: bool,
 }
 
+// TODO: can we sync blocks by epoch
+// TODO: can we have a relational database for blocks and block states? maybe dgraph
+
 pub struct Ledger {
     pub balances: HashMap<AccountAddress, AccountState>,
     pub metablocks: MetaBlocks,
     pub staged_blocks: HashSet<(BlockHeight, ProofId, ContentId)>,
+    // proof_id_by_timeslot
     pub pending_blocks_by_height: BTreeMap<BlockHeight, BTreeMap<ProofId, PendingBlock>>,
     pub applied_blocks_by_height: BTreeMap<BlockHeight, Vec<ProofId>>,
     pub blocks_on_longest_chain: HashSet<ProofId>,
-    // pub ordered_proof_ids_by_timeslot: HashMap<u64, Vec<ProofId>>,
     pub cached_proof_ids_by_timeslot: BTreeMap<u64, Vec<ProofId>>,
     pub txs: HashMap<TxId, Transaction>,
     pub tx_mempool: HashSet<TxId>,
@@ -109,7 +115,6 @@ impl Ledger {
             staged_blocks: HashSet::new(),
             applied_blocks_by_height: BTreeMap::new(),
             blocks_on_longest_chain: HashSet::new(),
-            // ordered_proof_ids_by_timeslot: HashMap::new(),
             cached_proof_ids_by_timeslot: BTreeMap::new(),
             pending_blocks_by_height: BTreeMap::new(),
             genesis_timestamp: 0,
@@ -125,8 +130,10 @@ impl Ledger {
         }
     }
 
-    pub fn get_applied_blocks_by_height(&self, height: u64) -> Vec<Block> {
-        self.applied_blocks_by_height
+    /// returns either all applied or pending blocks for a given level
+    pub fn get_blocks_by_height(&self, height: u64) -> Vec<Block> {
+        let applied_blocks: Vec<Block> = self
+            .applied_blocks_by_height
             .get(&height)
             .map(|proof_ids| {
                 proof_ids
@@ -134,7 +141,32 @@ impl Ledger {
                     .map(|proof_id| self.metablocks.blocks.get(proof_id).unwrap().block.clone())
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        if applied_blocks.len() == 0 {
+            // if no pending blocks at that level, fetch from pending blocks
+            match self.pending_blocks_by_height.get(&height) {
+                Some(pending_blocks) => {
+                    return pending_blocks
+                        .keys()
+                        .map(|proof_id| self.metablocks.blocks.get(proof_id).unwrap().block.clone())
+                        .collect();
+                }
+                None => {
+                    // if no pending blocks, fetch any staged blocks at the requested height
+                    return self
+                        .staged_blocks
+                        .iter()
+                        .filter(|(block_height, _, _)| block_height == &height)
+                        .map(|(_, proof_id, _)| {
+                            self.metablocks.blocks.get(proof_id).unwrap().block.clone()
+                        })
+                        .collect();
+                }
+            }
+        } else {
+            return applied_blocks;
+        }
     }
 
     /// Start a new chain from genesis as a gateway node
@@ -145,7 +177,7 @@ impl Ledger {
             .as_millis() as u64;
 
         let mut timestamp = self.genesis_timestamp as u64;
-        let mut parent_id: BlockId = [0u8; 32];
+        let mut parent_id: ContentId = [0u8; 32];
 
         for _ in 0..CHALLENGE_LOOKBACK_EPOCHS {
             let current_epoch_index = self
@@ -228,12 +260,6 @@ impl Ledger {
             }
         }
 
-        // self.start_timer(
-        //     timer_to_solver_tx,
-        //     CHALLENGE_LOOKBACK_EPOCHS * TIMESLOTS_PER_EPOCH as u64,
-        //     true,
-        // );
-
         self.genesis_timestamp
     }
 
@@ -309,6 +335,8 @@ impl Ledger {
             let parent_proof_id = self
                 .metablocks
                 .get_proof_id_from_content_id(block.content.parent_id);
+
+            // add parent to longest chain since it is now referenced
             self.blocks_on_longest_chain.insert(parent_proof_id);
 
             // collect parent and uncle pointers seen by this block
@@ -340,7 +368,7 @@ impl Ledger {
             self.genesis_timestamp = block.content.timestamp;
         }
 
-        // TODO: this should not be added until the end of the time slot
+        // these blocks will not be created as pending until the end of the timeslot, but before the referenced blocks are applied
         self.staged_blocks
             .insert((metablock.height, metablock.proof_id, metablock.content_id));
 
@@ -406,6 +434,7 @@ impl Ledger {
 
                     // TODO: apply block to state buffer
 
+                    // TODO: make this cleaner with a single for loop
                     // apply the coinbase tx
                     match self.txs.get(&block.content.tx_ids[0]).unwrap() {
                         Transaction::Coinbase(tx) => {
@@ -577,9 +606,6 @@ impl Ledger {
             .get_lookback_epoch(block.proof.epoch)
             .await;
 
-        // let challenge_timeslot =
-        //     block.proof.timeslot - CHALLENGE_LOOKBACK * TIMESLOTS_PER_EPOCH;
-
         if !epoch.is_closed {
             panic!("Epoch being used for randomness is still open!");
         }
@@ -608,6 +634,7 @@ impl Ledger {
 
         let proof_id = block.proof.get_id();
 
+        // TODO: should be timeslot seen in, not the timeslot of the block (but timer hasn't started...)
         // add to cached blocks tracker
         self.cached_proof_ids_by_timeslot
             .entry(block.proof.timeslot)
@@ -647,9 +674,9 @@ impl Ledger {
 
         // TODO: ensure the parent and all uncles are from an earlier timeslot
 
-        // TODO: ensure the block is on the longest chain
+        // TODO: ensure the block's parent is the head of the longest chain
 
-        // TODO: ensure the block does not reference uncles twice (how?)
+        // TODO: ensure the block does not reference uncles that have already been referenced
 
         // TODO: validate all transactions for this block (coinbase and credit)
 
@@ -746,44 +773,3 @@ impl Ledger {
         }
     }
 }
-
-// #[cfg(test)]
-// mod tests {
-
-//     use super::*;
-//     use std::time::{SystemTime, UNIX_EPOCH};
-
-//     // #[test]
-//     // fn block() {
-//     //     let tx_payload = crypto::generate_random_piece().to_vec();
-//     //     let block = Block::new(
-//     //         SystemTime::now()
-//     //             .duration_since(UNIX_EPOCH)
-//     //             .expect("Time went backwards")
-//     //             .as_millis(),
-//     //         crypto::random_bytes_32(),
-//     //         crypto::random_bytes_32(),
-//     //         crypto::random_bytes_32(),
-//     //         crypto::random_bytes_32(),
-//     //         [0u8; 64].to_vec(),
-//     //         tx_payload,
-//     //     );
-//     //     let block_id = block.get_id();
-//     //     let block_vec = block.to_bytes();
-//     //     let block_copy = Block::from_bytes(&block_vec).unwrap();
-//     //     let block_copy_id = block_copy.get_id();
-//     //     assert_eq!(block_id, block_copy_id);
-//     // }
-
-//     // #[test]
-//     // fn auxiliary_data() {
-//     //     let encoding = crypto::generate_random_piece();
-//     //     let (merkle_proofs, _) = crypto::build_merkle_tree();
-//     //     let proof = Proof::new(encoding, merkle_proofs[17].clone(), 17u64, 245u64);
-//     //     let proof_id = proof.get_id();
-//     //     let proof_vec = proof.to_bytes();
-//     //     let proof_copy = Proof::from_bytes(&proof_vec).unwrap();
-//     //     let proof_copy_id = proof_copy.get_id();
-//     //     assert_eq!(proof_id, proof_copy_id);
-//     // }
-// }

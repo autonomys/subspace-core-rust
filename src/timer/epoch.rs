@@ -1,3 +1,4 @@
+use crate::ledger::BlockHeight;
 use crate::utils;
 use crate::BlockId;
 use crate::EpochChallenge;
@@ -13,7 +14,7 @@ pub struct Epoch {
     pub is_closed: bool,
     /// timeslot indices and vec of block ids, some will be empty, some one, some many
     timeslots: HashMap<u64, Vec<BlockId>>,
-    block_heights: BTreeMap<u64, Vec<ProofId>>,
+    block_heights: BTreeMap<BlockHeight, Vec<ProofId>>,
     /// challenges derived from randomness at closure, one per timeslot
     challenges: Vec<SlotChallenge>,
     /// overall randomness for this epoch
@@ -73,6 +74,7 @@ impl Epoch {
         debug!("Adding block at block height");
         self.block_heights
             .entry(block_height)
+            // TODO: should be sorted on entry
             .and_modify(|proof_ids| proof_ids.push(proof_id))
             .or_insert(vec![proof_id]);
     }
@@ -107,11 +109,13 @@ impl Epoch {
         let mut deepest_proof = ProofId::default();
 
         // TODO: this will fail in the unlikely but possible event that there are no valid blocks in an epoch
+        // TODO: think more about ways this could fail with an attack or late blocks and handle
         for proof_id in self.block_heights.first_key_value().unwrap().1.into_iter() {
             if blocks_on_longest_chain.contains(proof_id) {
                 deepest_proof = *proof_id;
                 break;
             }
+            // TODO: add expect if not found
         }
 
         self.randomness = crypto::digest_sha_256(&deepest_proof);

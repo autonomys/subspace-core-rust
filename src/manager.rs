@@ -236,10 +236,7 @@ pub async fn run(
                     match message {
                         RequestMessage::BlocksRequest(BlocksRequest { block_height }) => {
                             // TODO: check to make sure that the requested timeslot is not ahead of local timeslot
-                            let blocks = ledger
-                                .lock()
-                                .await
-                                .get_applied_blocks_by_height(block_height);
+                            let blocks = ledger.lock().await.get_blocks_by_height(block_height);
 
                             drop(
                                 response_sender.send(ResponseMessage::BlocksResponse(
@@ -354,52 +351,53 @@ pub async fn run(
                 loop {
                     match network.request_blocks(block_height).await {
                         Ok(blocks) => {
+                            // TODO: may be able to work with timeslot since we are not creating blocks
                             let mut locked_ledger = ledger.lock().await;
                             // TODO: this is mainly for testing, later this will be replaced by state chain sync
                             // so there is no need for validating the block or timestamp
 
-                            // first get all applied_blocks_by_height
-                            // then get all pending_blocks_by_height
-                            // then sync all gossip
-                            // have to advance timeslots, epochs, and derive randomness
+                            // first retrieves all applied blocks (ledger.applied_blocks_by_height)
+                            // then retrieves all pending blocks (ledger.pending_blocks_by_height)
+                            // finally retrieves all staged blocks (ledger.staged_blocks)
+                            // if no blocks we whould be at (or near) the current timeslot
+                            // will continue returning no blocks until we reach the current timeslot
 
-                            let block_timeslot = blocks[0].proof.timeslot;
+                            // TODO: keep track of pending blocks in the console to see how long they remain pending
 
-                            // TODO: handle the case where there are no blocks for a level
-                            // this means that parent is at some future timeslot
-                            // but how do we advance to that timeslot?
+                            if blocks.len() > 0 {
+                                let block_timeslot = blocks[0].proof.timeslot;
 
-                            // if no blocks at level, then also include the current_timeslot?
+                                // skip forward to the timeslot for the next block height
+                                while timeslot < block_timeslot {
+                                    // advance epochs
+                                    if (timeslot + 1) % TIMESLOTS_PER_EPOCH as u64 == 0 {
+                                        // create new epoch
+                                        let current_epoch = epoch_tracker
+                                            .advance_epoch(&locked_ledger.blocks_on_longest_chain)
+                                            .await;
 
-                            while timeslot < block_timeslot {
-                                // advance epochs
-                                if (timeslot + 1) % TIMESLOTS_PER_EPOCH as u64 == 0 {
-                                    // create new epoch
-                                    let current_epoch = epoch_tracker
-                                        .advance_epoch(&locked_ledger.blocks_on_longest_chain)
-                                        .await;
+                                        debug!(
+                                            "Closed randomness for epoch {} during sync",
+                                            current_epoch - 1
+                                        );
 
-                                    debug!(
-                                        "Closed randomness for epoch {} during sync",
-                                        current_epoch - 1
-                                    );
-
-                                    debug!(
-                                        "Created a new empty epoch during sync blocks for index {}",
-                                        current_epoch
-                                    );
+                                        debug!(
+                                            "Created a new empty epoch during sync blocks for index {}",
+                                            current_epoch
+                                        );
+                                    }
+                                    // advance timeslot
+                                    timeslot += 1;
                                 }
-                                // advance timeslot
-                                timeslot += 1;
-                            }
 
-                            // stage each block for the block_height
-                            for block in blocks.into_iter() {
-                                locked_ledger.stage_block(&block).await;
-                            }
+                                // stage each block for the block_height
+                                for block in blocks.into_iter() {
+                                    locked_ledger.stage_block(&block).await;
+                                }
 
-                            // apply all referenced blocks
-                            locked_ledger.apply_referenced_blocks().await;
+                                // apply all referenced blocks
+                                locked_ledger.apply_referenced_blocks().await;
+                            }
 
                             let next_timeslot_arrival_time = Duration::from_millis(
                                 ((timeslot + 1) * TIMESLOT_DURATION)
@@ -410,6 +408,7 @@ pub async fn run(
                                 .duration_since(UNIX_EPOCH)
                                 .expect("Time went backwards");
 
+                            // check if we have arrived at the next timeslot
                             if next_timeslot_arrival_time < time_now {
                                 // increment the epoch on boundary
                                 if (timeslot + 1) % TIMESLOTS_PER_EPOCH as u64 == 0 {
@@ -435,7 +434,6 @@ pub async fn run(
                                 block_height += 1;
                             } else {
                                 // once we have all blocks, apply cached gossip
-                                // TODO: have to also handle blocks that are staged but not applied yet
 
                                 // call sync and start timer
                                 info!("Applying cached blocks");
