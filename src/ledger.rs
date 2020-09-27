@@ -357,11 +357,10 @@ impl Ledger {
                     // if it doesn't show as a pending block panic
                     if !self.reference_pending_block(&proof_id) {
                         // TODO: this should instead discard the block or wait for its parents
-                        debug!(
-                            "Proof_id for parent or uncle reference is: {}",
-                            hex::encode(&proof_id[0..8])
+                        panic!(
+                            "Cannot stage block that references an unknown content block with proof id {}",
+                            hex::encode(&proof_id[0..8]),
                         );
-                        panic!("Cannot stage block that references an unknown content block");
                     }
                 });
         } else {

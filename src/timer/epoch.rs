@@ -71,7 +71,7 @@ impl Epoch {
             );
             return;
         }
-        debug!("Adding block at block height");
+        debug!("Adding block at block height {}", block_height);
         self.block_heights
             .entry(block_height)
             // TODO: should be sorted on entry
