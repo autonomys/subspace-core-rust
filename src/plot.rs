@@ -459,8 +459,8 @@ mod tests {
     }
 
     impl TargetDirectory {
-        fn new() -> Self {
-            let path = PathBuf::from("target").join("test");
+        fn new(test_name: &str) -> Self {
+            let path = PathBuf::from("target").join(test_name);
 
             fs::create_dir_all(&path).unwrap();
 
@@ -470,19 +470,111 @@ mod tests {
 
     #[async_std::test]
     async fn test_read_write() {
-        let path = TargetDirectory::new();
+        env_logger::init();
+        let path = TargetDirectory::new("read_write");
 
         let piece = crypto::generate_random_piece();
-        let tag = rand::thread_rng().gen::<u64>();
+        let nonce = rand::thread_rng().gen::<u64>();
         let index = 0;
 
         let plot = Plot::open_or_create(&path).await.unwrap();
         assert_eq!(true, plot.is_empty().await);
-        plot.write(piece, tag, index).await.unwrap();
+        plot.write(piece, nonce, index).await.unwrap();
         assert_eq!(false, plot.is_empty().await);
         let extracted_piece = plot.read(index).await.unwrap();
 
         assert_eq!(piece[..], extracted_piece[..]);
+
+        drop(plot);
+
+        async_std::task::sleep(Duration::from_millis(100)).await;
+
+        // Make sure it is still not empty on reopen
+        let plot = Plot::open_or_create(&path).await.unwrap();
+        assert_eq!(false, plot.is_empty().await);
+        drop(plot);
+
+        // Let plot to destroy gracefully, otherwise may get "pure virtual method called
+        // terminate called without an active exception" message
+        async_std::task::sleep(Duration::from_millis(100)).await;
+    }
+
+    #[async_std::test]
+    async fn test_find_by_tag() {
+        env_logger::init();
+        let path = TargetDirectory::new("find_by_tag");
+
+        let plot = Plot::open_or_create(&path).await.unwrap();
+        for index in 0..1024 {
+            let piece = crypto::generate_random_piece();
+            let nonce = rand::thread_rng().gen::<u64>();
+            plot.write(piece, nonce, index).await.unwrap();
+        }
+
+        {
+            let target = [0u8, 0, 0, 0, 0, 0, 0, 1];
+            let solution_range =
+                u64::from_be_bytes([0u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+            let solutions = plot.find_by_range(target, solution_range).await.unwrap();
+            // This is probabilistic, but should be fine most of the time
+            assert!(!solutions.is_empty());
+            // Wraps around
+            let lower = u64::from_be_bytes(target).wrapping_sub(solution_range / 2);
+            let upper = u64::from_be_bytes(target) + solution_range / 2;
+            for (solution, _) in solutions {
+                let solution = u64::from_be_bytes(solution);
+                assert!(
+                    solution >= lower || solution <= upper,
+                    "Solution {:?} must be over wrapped lower edge {:?} or under upper edge {:?}",
+                    solution.to_be_bytes(),
+                    lower.to_be_bytes(),
+                    upper.to_be_bytes(),
+                );
+            }
+        }
+
+        {
+            let target = [0xff_u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe];
+            let solution_range =
+                u64::from_be_bytes([0u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+            let solutions = plot.find_by_range(target, solution_range).await.unwrap();
+            // This is probabilistic, but should be fine most of the time
+            assert!(!solutions.is_empty());
+            // Wraps around
+            let lower = u64::from_be_bytes(target) - solution_range / 2;
+            let upper = u64::from_be_bytes(target).wrapping_add(solution_range / 2);
+            for (solution, _) in solutions {
+                let solution = u64::from_be_bytes(solution);
+                assert!(
+                    solution >= lower || solution <= upper,
+                    "Solution {:?} must be over lower edge {:?} or under wrapped upper edge {:?}",
+                    solution.to_be_bytes(),
+                    lower.to_be_bytes(),
+                    upper.to_be_bytes(),
+                );
+            }
+        }
+
+        {
+            let target = [0xef_u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+            let solution_range =
+                u64::from_be_bytes([0u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+            let solutions = plot.find_by_range(target, solution_range).await.unwrap();
+            // This is probabilistic, but should be fine most of the time
+            assert!(!solutions.is_empty());
+            let lower = u64::from_be_bytes(target) - solution_range / 2;
+            let upper = u64::from_be_bytes(target) + solution_range / 2;
+            for (solution, _) in solutions {
+                let solution = u64::from_be_bytes(solution);
+                assert!(
+                    solution >= lower && solution <= upper,
+                    "Solution {:?} must be over lower edge {:?} and under upper edge {:?}",
+                    solution.to_be_bytes(),
+                    lower.to_be_bytes(),
+                    upper.to_be_bytes(),
+                );
+            }
+        }
 
         drop(plot);
 
