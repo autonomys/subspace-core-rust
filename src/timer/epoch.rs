@@ -108,14 +108,17 @@ impl Epoch {
     pub(super) fn close_new(&mut self, blocks_on_longest_chain: &HashSet<ProofId>) {
         let mut deepest_proof = ProofId::default();
 
-        // TODO: this will fail in the unlikely but possible event that there are no valid blocks in an epoch
+        // TODO: there is a rare case when there are no valid blocks in an epoch
         // TODO: think more about ways this could fail with an attack or late blocks and handle
-        for proof_id in self.block_heights.first_key_value().unwrap().1.into_iter() {
-            if blocks_on_longest_chain.contains(proof_id) {
-                deepest_proof = *proof_id;
-                break;
+        let first_block_top_height = self.block_heights.first_key_value();
+        if let Some((_, proof_ids)) = first_block_top_height {
+            for proof_id in proof_ids {
+                if blocks_on_longest_chain.contains(proof_id) {
+                    deepest_proof = *proof_id;
+                    break;
+                }
+                // TODO: add expect if not found
             }
-            // TODO: add expect if not found
         }
 
         self.randomness = crypto::digest_sha_256(&deepest_proof);
