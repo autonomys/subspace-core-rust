@@ -455,8 +455,13 @@ impl Network {
         async_std::task::spawn(async move {
             while let Some(bytes) = client_receiver.next().await {
                 let length = bytes.len() as u16;
-                stream.write_all(&length.to_le_bytes()).await.unwrap();
-                stream.write_all(&bytes).await.unwrap();
+                let result: io::Result<()> = try {
+                    stream.write_all(&length.to_le_bytes()).await?;
+                    stream.write_all(&bytes).await?
+                };
+                if result.is_err() {
+                    break;
+                }
             }
         });
 
