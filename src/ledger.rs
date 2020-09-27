@@ -3,7 +3,7 @@ use crate::farmer::Solution;
 use crate::timer::EpochTracker;
 use crate::transaction::{AccountAddress, AccountState, CoinbaseTx, Transaction, TxId};
 use crate::{
-    crypto, sloth, BlockId, ContentId, ProofId, Tag, BLOCK_REWARD, CHALLENGE_LOOKBACK_EPOCHS,
+    crypto, sloth, ContentId, ProofId, Tag, BLOCK_REWARD, CHALLENGE_LOOKBACK_EPOCHS,
     PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 
