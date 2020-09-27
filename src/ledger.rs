@@ -427,7 +427,7 @@ impl Ledger {
                         })
                         .or_insert(vec![*proof_id]);
 
-                    warn!(
+                    debug!(
                         "Applied block with proof_id: {} to the ledger",
                         hex::encode(&proof_id[0..8])
                     );
@@ -447,7 +447,7 @@ impl Ledger {
                                     balance: BLOCK_REWARD,
                                 });
 
-                            warn!("Applied a coinbase tx to balances");
+                            debug!("Applied a coinbase tx to balances");
 
                             // TODO: add to state, may remove from tx db here
                         }
