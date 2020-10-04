@@ -530,6 +530,12 @@ impl Network {
 
                     let mut stream = stream.unwrap();
                     if let Some(network) = network_weak.upgrade() {
+                        if network.inner.peers_store.lock().await
+                            >= network.inner.max_connected_peers
+                        {
+                            // Ignore connection, we've reached a limit for connected peers
+                            continue;
+                        }
                         async_std::task::spawn(async move {
                             if let Some(peer_addr) =
                                 exchange_peer_addr(node_addr, &mut stream).await
