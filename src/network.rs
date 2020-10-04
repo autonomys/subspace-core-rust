@@ -193,6 +193,23 @@ async fn exchange_peer_addr(own_addr: SocketAddr, stream: &mut TcpStream) -> Opt
     }
 }
 
+fn request_more_peers(network_weak: NetworkWeak, connected_peer: ConnectedPeer) {
+    async_std::task::spawn(async move {
+        if let Some(network) = network_weak.upgrade() {
+            match network.request_peers(connected_peer).await {
+                Ok(peers) => {
+                    for peer in peers {
+                        drop(network.connect_to(peer).await);
+                    }
+                }
+                Err(error) => {
+                    debug!("Failed to get peers from new peer: {:?}", error);
+                }
+            }
+        }
+    });
+}
+
 async fn on_connected(
     network: Network,
     peer_addr: SocketAddr,
@@ -214,14 +231,23 @@ async fn on_connected(
         peers_store
             .connections
             .insert(peer_addr, connected_peer.clone());
+
         // if peers is low, add to peers
         // later explicitly ask to reduce churn
         if peers_store.peers.len() < network.inner.max_peers {
             peers_store.peers.insert(peer_addr);
-        }
 
+            // Get more peers if needed
+            if peers_store.connections.len() < network.inner.min_peers {
+                request_more_peers(network.downgrade(), connected_peer.clone());
+            }
+        }
         connected_peer
     };
+
+    for callback in network.inner.handlers.connected_peer.lock().await.iter() {
+        callback(&connected_peer);
+    }
 
     let mut messages_receiver = read_messages(stream.clone());
 
@@ -239,8 +265,18 @@ async fn on_connected(
         }
     });
 
+    let network_weak = network.downgrade();
     async_std::task::spawn(async move {
         while let Some(message) = messages_receiver.next().await {
+            // TODO: This is probably suboptimal, we can probably get rid of it if we have special
+            //  method to disconnect from all peers
+            let network = match network_weak.upgrade() {
+                Some(network) => network,
+                None => {
+                    // Network instance was destroyed
+                    return;
+                }
+            };
             if let Ok(message) = message {
                 match message {
                     Message::Gossip(message) => {
@@ -329,11 +365,13 @@ async fn on_connected(
             }
         }
 
-        let mut peers_store = network.inner.peers_store.lock().await;
+        if let Some(network) = network_weak.upgrade() {
+            let mut peers_store = network.inner.peers_store.lock().await;
 
-        peers_store.connections.remove(&peer_addr);
-        peers_store.peers.remove(&peer_addr);
-        info!("Broker has dropped a peer who disconnected");
+            peers_store.connections.remove(&peer_addr);
+            peers_store.peers.remove(&peer_addr);
+            info!("Broker has dropped a peer who disconnected");
+        }
     });
 
     Ok(connected_peer)
@@ -1058,6 +1096,74 @@ mod tests {
                 .expect("Should return peers");
 
             assert_eq!(vec![peer_network_2.address()], peers, "Bad list of peers");
+        });
+    }
+
+    #[test]
+    fn test_peers_discovery() {
+        init();
+        executor::block_on(async {
+            let gateway_network =
+                Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap(), 1, 2)
+                    .await
+                    .expect("Network failed to start");
+
+            let peer_network_1 =
+                Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap(), 1, 2)
+                    .await
+                    .expect("Network failed to start");
+
+            peer_network_1
+                .connect_to(gateway_network.address())
+                .await
+                .expect("Failed to connect to gateway");
+
+            let peer_network_2 =
+                Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap(), 2, 2)
+                    .await
+                    .expect("Network failed to start");
+
+            let connected_peers = Arc::new(AtomicUsize::new(0));
+            let (all_peers_connected_sender, all_peers_connected_receiver) =
+                async_oneshot::oneshot::<()>();
+            {
+                let connected_peers = Arc::clone(&connected_peers);
+                let all_peers_connected_sender = StdMutex::new(Some(all_peers_connected_sender));
+                peer_network_2
+                    .on_connected_peer(move |_connected_peer| {
+                        if connected_peers.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                            drop(
+                                all_peers_connected_sender
+                                    .lock()
+                                    .unwrap()
+                                    .take()
+                                    .unwrap()
+                                    .send(()),
+                            );
+                        }
+                    })
+                    .await;
+            }
+
+            peer_network_2
+                .connect_to(gateway_network.address())
+                .await
+                .expect("Failed to connect to gateway");
+
+            let result_fut = future::or(
+                async move {
+                    drop(all_peers_connected_receiver.await);
+
+                    Ok(())
+                },
+                async {
+                    async_io::Timer::after(Duration::from_secs(3)).await;
+
+                    Err(())
+                },
+            );
+
+            assert!(result_fut.await.is_ok(), "Failed to connect to other peer");
         });
     }
 }
