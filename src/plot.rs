@@ -468,9 +468,13 @@ mod tests {
         }
     }
 
+    fn init() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
+
     #[async_std::test]
     async fn test_read_write() {
-        env_logger::init();
+        init();
         let path = TargetDirectory::new("read_write");
 
         let piece = crypto::generate_random_piece();
@@ -501,7 +505,7 @@ mod tests {
 
     #[async_std::test]
     async fn test_find_by_tag() {
-        env_logger::init();
+        init();
         let path = TargetDirectory::new("find_by_tag");
 
         let plot = Plot::open_or_create(&path).await.unwrap();

@@ -234,14 +234,13 @@ pub async fn run(
 
                 async_std::task::spawn(async move {
                     match message {
-                        RequestMessage::BlocksRequest(BlocksRequest { block_height }) => {
+                        RequestMessage::Blocks(BlocksRequest { block_height }) => {
                             // TODO: check to make sure that the requested timeslot is not ahead of local timeslot
                             let blocks = ledger.lock().await.get_blocks_by_height(block_height);
 
                             drop(
-                                response_sender.send(ResponseMessage::BlocksResponse(
-                                    BlocksResponse { blocks },
-                                )),
+                                response_sender
+                                    .send(ResponseMessage::Blocks(BlocksResponse { blocks })),
                             );
                         }
                     }

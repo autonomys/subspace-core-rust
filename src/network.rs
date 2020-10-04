@@ -1,6 +1,7 @@
 pub(crate) mod messages;
 
 use crate::block::Block;
+use crate::network::messages::{InternalRequestMessage, InternalResponseMessage};
 use crate::{console, MAX_PEERS};
 use async_std::net::{TcpListener, TcpStream};
 use async_std::sync::{channel, Receiver, Sender};
@@ -146,6 +147,52 @@ fn read_messages(mut stream: TcpStream) -> Receiver<Result<Message, ()>> {
     messages_receiver
 }
 
+async fn exchange_peer_addr(own_addr: SocketAddr, stream: &mut TcpStream) -> Option<SocketAddr> {
+    // TODO: Timeout for this function
+    let own_addr_string = own_addr.to_string();
+    if let Err(error) = stream
+        .write(&[own_addr_string.as_bytes().len() as u8])
+        .await
+    {
+        warn!("Failed to write node address length: {}", error);
+        return None;
+    }
+    if let Err(error) = stream.write(own_addr_string.as_bytes()).await {
+        warn!("Failed to write node address: {}", error);
+        return None;
+    }
+
+    let mut peer_addr_len = [0];
+    if let Err(error) = stream.read_exact(&mut peer_addr_len).await {
+        warn!("Failed to read node address length: {}", error);
+        return None;
+    }
+    let mut peer_addr_bytes = vec![0; peer_addr_len[0] as usize];
+    if let Err(error) = stream.read_exact(&mut peer_addr_bytes).await {
+        warn!("Failed to read node address: {}", error);
+        return None;
+    }
+
+    let peer_addr_string = match String::from_utf8(peer_addr_bytes) {
+        Ok(peer_addr_string) => peer_addr_string,
+        Err(error) => {
+            warn!("Failed to parse node address from bytes: {}", error);
+            return None;
+        }
+    };
+
+    match peer_addr_string.parse() {
+        Ok(peer_addr) => Some(peer_addr),
+        Err(error) => {
+            warn!(
+                "Failed to parse node address {}: {}",
+                peer_addr_string, error
+            );
+            return None;
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum RequestError {
     ConnectionClosed,
@@ -155,10 +202,18 @@ pub(crate) enum RequestError {
     TimedOut,
 }
 
-#[derive(Default)]
-struct RequestsContainer {
+struct RequestsContainer<T> {
     next_id: u32,
-    handlers: HashMap<u32, async_oneshot::Sender<ResponseMessage>>,
+    handlers: HashMap<u32, async_oneshot::Sender<T>>,
+}
+
+impl<T> Default for RequestsContainer<T> {
+    fn default() -> Self {
+        Self {
+            next_id: 0,
+            handlers: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -166,10 +221,16 @@ struct Handlers {
     gossip: AsyncMutex<Vec<Box<dyn Fn(&GossipMessage) + Send>>>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ConnectedPeer {
+    addr: SocketAddr,
+    sender: Sender<Bytes>,
+}
+
 #[derive(Default)]
 struct Peers {
     /// Active established connections
-    connections: HashMap<SocketAddr, Sender<Bytes>>,
+    connections: HashMap<SocketAddr, ConnectedPeer>,
     /// All known peers
     peers: HashSet<SocketAddr>,
 }
@@ -185,7 +246,8 @@ struct Inner {
     request_receiver: StdMutex<
         Option<async_channel::Receiver<(RequestMessage, async_oneshot::Sender<ResponseMessage>)>>,
     >,
-    requests_container: Arc<AsyncMutex<RequestsContainer>>,
+    requests_container: Arc<AsyncMutex<RequestsContainer<ResponseMessage>>>,
+    internal_requests_container: Arc<AsyncMutex<RequestsContainer<InternalResponseMessage>>>,
     node_addr: SocketAddr,
 }
 
@@ -215,7 +277,6 @@ impl Network {
             async_channel::bounded::<(SocketAddr, GossipMessage)>(32);
         let (request_sender, request_receiver) =
             async_channel::bounded::<(RequestMessage, async_oneshot::Sender<ResponseMessage>)>(32);
-        let requests_container = Arc::<AsyncMutex<RequestsContainer>>::default();
         let node_addr = listener.local_addr()?;
 
         let handlers = Handlers::default();
@@ -228,7 +289,8 @@ impl Network {
             gossip_receiver: StdMutex::new(Some(gossip_receiver)),
             request_sender,
             request_receiver: StdMutex::new(Some(request_receiver)),
-            requests_container,
+            requests_container: Arc::default(),
+            internal_requests_container: Arc::default(),
             node_addr,
         });
 
@@ -245,10 +307,15 @@ impl Network {
                 while let Some(stream) = connections.next().await {
                     info!("New inbound TCP connection initiated");
 
-                    let stream = stream.unwrap();
-                    let peer_addr = stream.peer_addr().unwrap();
+                    let mut stream = stream.unwrap();
                     if let Some(network) = network_weak.upgrade() {
-                        async_std::task::spawn(network.on_connected(peer_addr, stream));
+                        async_std::task::spawn(async move {
+                            if let Some(peer_addr) =
+                                exchange_peer_addr(node_addr, &mut stream).await
+                            {
+                                network.on_connected(peer_addr, stream).await;
+                            };
+                        });
                     } else {
                         break;
                     }
@@ -278,15 +345,20 @@ impl Network {
 
         let message = Message::Gossip(message);
         let bytes = message.to_bytes();
-        for (node_addr, client_sender) in self.inner.peers_store.lock().await.connections.iter() {
-            trace!("Sending a {} message to {}", message, node_addr);
-            {
-                let client_sender = client_sender.clone();
-                let bytes = bytes.clone();
-                async_std::task::spawn(async move {
-                    client_sender.send(bytes).await;
-                });
-            }
+        for connected_peer in self
+            .inner
+            .peers_store
+            .lock()
+            .await
+            .connections
+            .values()
+            .cloned()
+        {
+            trace!("Sending a {} message to {}", message, connected_peer.addr);
+            let bytes = bytes.clone();
+            async_std::task::spawn(async move {
+                connected_peer.sender.send(bytes).await;
+            });
         }
     }
 
@@ -298,16 +370,21 @@ impl Network {
 
         let message = Message::Gossip(message);
         let bytes = message.to_bytes();
-        for (node_addr, client_sender) in self.inner.peers_store.lock().await.connections.iter() {
-            if node_addr != sender {
-                trace!("Sending a {} message to {}", message, node_addr);
-                {
-                    let client_sender = client_sender.clone();
-                    let bytes = bytes.clone();
-                    async_std::task::spawn(async move {
-                        client_sender.send(bytes).await;
-                    });
-                }
+        for connected_peer in self
+            .inner
+            .peers_store
+            .lock()
+            .await
+            .connections
+            .values()
+            .cloned()
+        {
+            if &connected_peer.addr != sender {
+                trace!("Sending a {} message to {}", message, connected_peer.addr);
+                let bytes = bytes.clone();
+                async_std::task::spawn(async move {
+                    connected_peer.sender.send(bytes).await;
+                });
             }
         }
     }
@@ -317,13 +394,11 @@ impl Network {
         block_height: u64,
     ) -> Result<Vec<Block>, RequestError> {
         let response = self
-            .request_internal(RequestMessage::BlocksRequest(BlocksRequest {
-                block_height,
-            }))
+            .request(RequestMessage::Blocks(BlocksRequest { block_height }))
             .await?;
 
         match response {
-            ResponseMessage::BlocksResponse(response) => Ok(response.blocks),
+            ResponseMessage::Blocks(response) => Ok(response.blocks),
             // _ => Err(RequestError::BadResponse),
         }
     }
@@ -354,6 +429,20 @@ impl Network {
         }
     }
 
+    pub(crate) async fn request_peers(
+        &self,
+        peer: ConnectedPeer,
+    ) -> Result<Vec<SocketAddr>, RequestError> {
+        let response = self
+            .internal_request(peer, InternalRequestMessage::Peers)
+            .await?;
+
+        match response {
+            InternalResponseMessage::Peers(peers) => Ok(peers),
+            // _ => Err(RequestError::BadResponse),
+        }
+    }
+
     pub async fn on_gossip<F: Fn(&GossipMessage) + Send + 'static>(&self, callback: F) {
         self.inner
             .handlers
@@ -369,8 +458,12 @@ impl Network {
     }
 
     pub async fn connect_to(&self, peer_addr: SocketAddr) -> io::Result<()> {
-        let stream = TcpStream::connect(peer_addr).await?;
-        self.clone().on_connected(peer_addr, stream).await;
+        let mut stream = TcpStream::connect(peer_addr).await?;
+        let network = self.clone();
+
+        if let Some(peer_addr) = exchange_peer_addr(self.inner.node_addr, &mut stream).await {
+            network.on_connected(peer_addr, stream).await;
+        };
 
         Ok(())
     }
@@ -381,9 +474,13 @@ impl Network {
         {
             let mut peers_store = self.inner.peers_store.lock().await;
 
-            peers_store
-                .connections
-                .insert(peer_addr, client_sender.clone());
+            peers_store.connections.insert(
+                peer_addr,
+                ConnectedPeer {
+                    addr: peer_addr,
+                    sender: client_sender.clone(),
+                },
+            );
             // if peers is low, add to peers
             // later explicitly ask to reduce churn
             if peers_store.peers.len() < MAX_PEERS {
@@ -407,7 +504,6 @@ impl Network {
             }
         });
 
-        let peers_store = Arc::clone(&self.inner.peers_store);
         async_std::task::spawn(async move {
             while let Some(message) = messages_receiver.next().await {
                 if let Ok(message) = message {
@@ -450,11 +546,53 @@ impl Network {
                                 debug!("Received response for unknown request {}", id);
                             }
                         }
+                        Message::InternalRequest { id, message } => {
+                            let response = match message {
+                                InternalRequestMessage::Peers => InternalResponseMessage::Peers(
+                                    self.inner
+                                        .peers_store
+                                        .lock()
+                                        .await
+                                        .peers
+                                        .iter()
+                                        .filter(|&&address| {
+                                            address != self.inner.node_addr && address != peer_addr
+                                        })
+                                        .copied()
+                                        .collect(),
+                                ),
+                            };
+                            drop(
+                                client_sender
+                                    .send(
+                                        Message::InternalResponse {
+                                            id,
+                                            message: response,
+                                        }
+                                        .to_bytes(),
+                                    )
+                                    .await,
+                            );
+                        }
+                        Message::InternalResponse { id, message } => {
+                            if let Some(response_sender) = self
+                                .inner
+                                .internal_requests_container
+                                .lock()
+                                .await
+                                .handlers
+                                .remove(&id)
+                            {
+                                drop(response_sender.send(message));
+                            } else {
+                                debug!("Received response for unknown request {}", id);
+                            }
+                        }
                     }
                 }
             }
 
-            let mut peers_store = peers_store.lock().await;
+            let mut peers_store = self.inner.peers_store.lock().await;
 
             peers_store.connections.remove(&peer_addr);
             peers_store.peers.remove(&peer_addr);
@@ -463,10 +601,7 @@ impl Network {
     }
 
     /// Non-generic method to avoid significant duplication in final binary
-    async fn request_internal(
-        &self,
-        message: RequestMessage,
-    ) -> Result<ResponseMessage, RequestError> {
+    async fn request(&self, message: RequestMessage) -> Result<ResponseMessage, RequestError> {
         let id;
         let (response_sender, response_receiver) = async_oneshot::oneshot();
         let requests_container = &self.inner.requests_container;
@@ -488,7 +623,7 @@ impl Network {
         }
 
         // TODO: Previous version of the code used peers instead of connections, was it correct?
-        let client_sender = self
+        let connected_peer = self
             .inner
             .peers_store
             .lock()
@@ -497,9 +632,9 @@ impl Network {
             .values()
             .choose(&mut rand::thread_rng())
             .cloned();
-        if let Some(client_sender) = client_sender {
+        if let Some(connected_peer) = connected_peer {
             async_std::task::spawn(async move {
-                client_sender.send(message).await;
+                connected_peer.sender.send(message).await;
             });
         } else {
             return Err(RequestError::NoPeers);
@@ -520,6 +655,75 @@ impl Network {
             },
         )
         .await
+    }
+
+    /// Non-generic method to avoid significant duplication in final binary
+    async fn internal_request(
+        &self,
+        peer: ConnectedPeer,
+        message: InternalRequestMessage,
+    ) -> Result<InternalResponseMessage, RequestError> {
+        let id;
+        let (response_sender, response_receiver) = async_oneshot::oneshot();
+        let internal_requests_container = &self.inner.internal_requests_container;
+
+        {
+            let mut internal_requests_container = internal_requests_container.lock().await;
+
+            id = internal_requests_container.next_id;
+
+            internal_requests_container.next_id =
+                internal_requests_container.next_id.wrapping_add(1);
+            internal_requests_container
+                .handlers
+                .insert(id, response_sender);
+        }
+
+        let message = Message::InternalRequest { id, message }.to_bytes();
+        if message.len() > MAX_MESSAGE_CONTENTS_LENGTH {
+            internal_requests_container
+                .lock()
+                .await
+                .handlers
+                .remove(&id);
+
+            return Err(RequestError::MessageTooLong);
+        }
+
+        async_std::task::spawn(async move {
+            peer.sender.send(message).await;
+        });
+
+        future::or(
+            async move {
+                response_receiver
+                    .await
+                    .map_err(|_| RequestError::ConnectionClosed {})
+            },
+            async move {
+                async_io::Timer::after(REQUEST_TIMEOUT).await;
+
+                internal_requests_container
+                    .lock()
+                    .await
+                    .handlers
+                    .remove(&id);
+
+                Err(RequestError::TimedOut)
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn get_random_peer(&self) -> Option<ConnectedPeer> {
+        self.inner
+            .peers_store
+            .lock()
+            .await
+            .connections
+            .values()
+            .choose(&mut rand::thread_rng())
+            .cloned()
     }
 
     // /// retrieve the socket addr for each peer, except the one asking
@@ -553,6 +757,10 @@ mod tests {
     use futures::executor;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    fn init() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
+
     fn fake_block() -> Block {
         Block {
             data: None,
@@ -585,6 +793,7 @@ mod tests {
 
     #[test]
     fn test_create() {
+        init();
         executor::block_on(async {
             Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
                 .await
@@ -594,6 +803,7 @@ mod tests {
 
     #[test]
     fn test_gossip_regossip_callback() {
+        init();
         executor::block_on(async {
             let gateway_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
                 .await
@@ -641,6 +851,7 @@ mod tests {
 
     #[test]
     fn test_gossip_regossip() {
+        init();
         executor::block_on(async {
             let gateway_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
                 .await
@@ -714,6 +925,7 @@ mod tests {
 
     #[test]
     fn test_request_response() {
+        init();
         executor::block_on(async {
             let gateway_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
                 .await
@@ -742,12 +954,12 @@ mod tests {
                 {
                     let (request, sender) = gateway_requests.next().await.unwrap();
                     assert!(
-                        matches!(request, RequestMessage::BlocksRequest(..)),
+                        matches!(request, RequestMessage::Blocks(..)),
                         "Expected blocks request",
                     );
 
                     sender
-                        .send(ResponseMessage::BlocksResponse(BlocksResponse {
+                        .send(ResponseMessage::Blocks(BlocksResponse {
                             blocks: vec![fake_block()],
                         }))
                         .unwrap();
@@ -757,6 +969,45 @@ mod tests {
 
                 assert_eq!(vec![fake_block()], blocks, "Bad blocks response");
             }
+        });
+    }
+
+    #[test]
+    fn test_get_peers() {
+        init();
+        executor::block_on(async {
+            let gateway_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("Network failed to start");
+
+            let peer_network_1 = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("Network failed to start");
+
+            peer_network_1
+                .connect_to(gateway_network.address())
+                .await
+                .expect("Failed to connect to gateway");
+
+            let peer_network_2 = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("Network failed to start");
+
+            peer_network_2
+                .connect_to(gateway_network.address())
+                .await
+                .expect("Failed to connect to gateway");
+
+            let random_peer = peer_network_1
+                .get_random_peer()
+                .await
+                .expect("Must be connected to gateway");
+            let peers = peer_network_1
+                .request_peers(random_peer)
+                .await
+                .expect("Should return peers");
+
+            assert_eq!(vec![peer_network_2.address()], peers, "Bad list of peers");
         });
     }
 }
