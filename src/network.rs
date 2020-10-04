@@ -1,8 +1,8 @@
 pub(crate) mod messages;
 
 use crate::block::Block;
+use crate::console;
 use crate::network::messages::{InternalRequestMessage, InternalResponseMessage};
-use crate::{console, MAX_PEERS};
 use async_std::net::{TcpListener, TcpStream};
 use async_std::sync::{channel, Receiver, Sender};
 use async_std::task::JoinHandle;
@@ -225,6 +225,7 @@ impl<T> Default for RequestsContainer<T> {
 
 #[derive(Default)]
 struct Handlers {
+    connected_peer: AsyncMutex<Vec<Box<dyn Fn(&ConnectedPeer) + Send>>>,
     gossip: AsyncMutex<Vec<Box<dyn Fn(&GossipMessage) + Send>>>,
 }
 
@@ -256,6 +257,8 @@ struct Inner {
     requests_container: Arc<AsyncMutex<RequestsContainer<ResponseMessage>>>,
     internal_requests_container: Arc<AsyncMutex<RequestsContainer<InternalResponseMessage>>>,
     node_addr: SocketAddr,
+    min_peers: usize,
+    max_peers: usize,
 }
 
 impl Drop for Inner {
@@ -277,7 +280,12 @@ pub struct Network {
 }
 
 impl Network {
-    pub async fn new(node_id: NodeID, addr: SocketAddr) -> io::Result<Self> {
+    pub async fn new(
+        node_id: NodeID,
+        addr: SocketAddr,
+        min_peers: usize,
+        max_peers: usize,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         let (gossip_sender, gossip_receiver) =
             async_channel::bounded::<(SocketAddr, GossipMessage)>(32);
@@ -298,6 +306,8 @@ impl Network {
             requests_container: Arc::default(),
             internal_requests_container: Arc::default(),
             node_addr,
+            min_peers,
+            max_peers,
         });
 
         let network = Self { inner };
@@ -449,6 +459,15 @@ impl Network {
         }
     }
 
+    pub async fn on_connected_peer<F: Fn(&ConnectedPeer) + Send + 'static>(&self, callback: F) {
+        self.inner
+            .handlers
+            .connected_peer
+            .lock()
+            .await
+            .push(Box::new(callback));
+    }
+
     pub async fn on_gossip<F: Fn(&GossipMessage) + Send + 'static>(&self, callback: F) {
         self.inner
             .handlers
@@ -501,7 +520,7 @@ impl Network {
                 .insert(peer_addr, connected_peer.clone());
             // if peers is low, add to peers
             // later explicitly ask to reduce churn
-            if peers_store.peers.len() < MAX_PEERS {
+            if peers_store.peers.len() < self.inner.max_peers {
                 peers_store.peers.insert(peer_addr);
             }
 
@@ -817,7 +836,7 @@ mod tests {
     fn test_create() {
         init();
         executor::block_on(async {
-            Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
+            Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap(), 1, 2)
                 .await
                 .expect("Network failed to start");
         });
@@ -827,9 +846,10 @@ mod tests {
     fn test_gossip_regossip_callback() {
         init();
         executor::block_on(async {
-            let gateway_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
-                .await
-                .expect("Network failed to start");
+            let gateway_network =
+                Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap(), 1, 2)
+                    .await
+                    .expect("Network failed to start");
 
             {
                 let callback_called = Arc::new(AtomicUsize::new(0));
@@ -875,14 +895,16 @@ mod tests {
     fn test_gossip_regossip() {
         init();
         executor::block_on(async {
-            let gateway_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
-                .await
-                .expect("Network failed to start");
+            let gateway_network =
+                Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap(), 1, 2)
+                    .await
+                    .expect("Network failed to start");
             let mut gateway_gossip = gateway_network.get_gossip_receiver().unwrap();
 
-            let peer_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
-                .await
-                .expect("Network failed to start");
+            let peer_network =
+                Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap(), 1, 2)
+                    .await
+                    .expect("Network failed to start");
 
             peer_network
                 .connect_to(gateway_network.address())
@@ -949,14 +971,16 @@ mod tests {
     fn test_request_response() {
         init();
         executor::block_on(async {
-            let gateway_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
-                .await
-                .expect("Network failed to start");
+            let gateway_network =
+                Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap(), 1, 2)
+                    .await
+                    .expect("Network failed to start");
             let mut gateway_requests = gateway_network.get_requests_receiver().unwrap();
 
-            let peer_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
-                .await
-                .expect("Network failed to start");
+            let peer_network =
+                Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap(), 1, 2)
+                    .await
+                    .expect("Network failed to start");
 
             peer_network
                 .connect_to(gateway_network.address())
@@ -998,22 +1022,25 @@ mod tests {
     fn test_get_peers() {
         init();
         executor::block_on(async {
-            let gateway_network = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
-                .await
-                .expect("Network failed to start");
+            let gateway_network =
+                Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap(), 1, 2)
+                    .await
+                    .expect("Network failed to start");
 
-            let peer_network_1 = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
-                .await
-                .expect("Network failed to start");
+            let peer_network_1 =
+                Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap(), 1, 2)
+                    .await
+                    .expect("Network failed to start");
 
             peer_network_1
                 .connect_to(gateway_network.address())
                 .await
                 .expect("Failed to connect to gateway");
 
-            let peer_network_2 = Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap())
-                .await
-                .expect("Network failed to start");
+            let peer_network_2 =
+                Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap(), 1, 2)
+                    .await
+                    .expect("Network failed to start");
 
             peer_network_2
                 .connect_to(gateway_network.address())

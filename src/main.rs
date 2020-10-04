@@ -140,6 +140,8 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         } else {
             node_addr
         },
+        MIN_PEERS,
+        MAX_PEERS,
     );
     let network = network_fut.await.unwrap();
     if node_type != NodeType::Gateway {
