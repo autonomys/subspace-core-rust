@@ -194,6 +194,13 @@ async fn exchange_peer_addr(own_addr: SocketAddr, stream: &mut TcpStream) -> Opt
 }
 
 #[derive(Debug)]
+pub enum ConnectionError {
+    AlreadyConnected,
+    FailedToExchangeAddress,
+    IO { error: io::Error },
+}
+
+#[derive(Debug)]
 pub(crate) enum RequestError {
     ConnectionClosed,
     // BadResponse,
@@ -222,7 +229,7 @@ struct Handlers {
 }
 
 #[derive(Clone)]
-pub(crate) struct ConnectedPeer {
+pub struct ConnectedPeer {
     addr: SocketAddr,
     sender: Sender<Bytes>,
 }
@@ -313,7 +320,7 @@ impl Network {
                             if let Some(peer_addr) =
                                 exchange_peer_addr(node_addr, &mut stream).await
                             {
-                                network.on_connected(peer_addr, stream).await;
+                                drop(network.on_connected(peer_addr, stream).await);
                             };
                         });
                     } else {
@@ -457,36 +464,50 @@ impl Network {
         NetworkWeak { inner }
     }
 
-    pub async fn connect_to(&self, peer_addr: SocketAddr) -> io::Result<()> {
-        let mut stream = TcpStream::connect(peer_addr).await?;
+    pub async fn connect_to(
+        &self,
+        peer_addr: SocketAddr,
+    ) -> Result<ConnectedPeer, ConnectionError> {
+        let mut stream = TcpStream::connect(peer_addr)
+            .await
+            .map_err(|error| ConnectionError::IO { error })?;
         let network = self.clone();
 
-        if let Some(peer_addr) = exchange_peer_addr(self.inner.node_addr, &mut stream).await {
-            network.on_connected(peer_addr, stream).await;
-        };
-
-        Ok(())
+        match exchange_peer_addr(self.inner.node_addr, &mut stream).await {
+            Some(peer_addr) => network.on_connected(peer_addr, stream).await,
+            None => Err(ConnectionError::FailedToExchangeAddress),
+        }
     }
 
-    async fn on_connected(self, peer_addr: SocketAddr, mut stream: TcpStream) {
+    async fn on_connected(
+        self,
+        peer_addr: SocketAddr,
+        mut stream: TcpStream,
+    ) -> Result<ConnectedPeer, ConnectionError> {
         let (client_sender, mut client_receiver) = channel::<Bytes>(32);
 
-        {
+        let connected_peer = {
             let mut peers_store = self.inner.peers_store.lock().await;
 
-            peers_store.connections.insert(
-                peer_addr,
-                ConnectedPeer {
-                    addr: peer_addr,
-                    sender: client_sender.clone(),
-                },
-            );
+            if peers_store.connections.contains_key(&peer_addr) {
+                return Err(ConnectionError::AlreadyConnected);
+            }
+
+            let connected_peer = ConnectedPeer {
+                addr: peer_addr,
+                sender: client_sender.clone(),
+            };
+            peers_store
+                .connections
+                .insert(peer_addr, connected_peer.clone());
             // if peers is low, add to peers
             // later explicitly ask to reduce churn
             if peers_store.peers.len() < MAX_PEERS {
                 peers_store.peers.insert(peer_addr);
             }
-        }
+
+            connected_peer
+        };
 
         let mut messages_receiver = read_messages(stream.clone());
 
@@ -598,6 +619,8 @@ impl Network {
             peers_store.peers.remove(&peer_addr);
             info!("Broker has dropped a peer who disconnected");
         });
+
+        Ok(connected_peer)
     }
 
     /// Non-generic method to avoid significant duplication in final binary
