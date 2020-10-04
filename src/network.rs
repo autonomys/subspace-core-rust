@@ -196,10 +196,14 @@ async fn exchange_peer_addr(own_addr: SocketAddr, stream: &mut TcpStream) -> Opt
 fn request_more_peers(network_weak: NetworkWeak, connected_peer: ConnectedPeer) {
     async_std::task::spawn(async move {
         if let Some(network) = network_weak.upgrade() {
-            match network.request_peers(connected_peer).await {
+            match network.request_peers(connected_peer.clone()).await {
                 Ok(peers) => {
                     for peer in peers {
-                        drop(network.connect_to(peer).await);
+                        let mut peers_store = network.inner.peers_store.lock().await;
+                        peers_store.peers.insert(peer);
+                        for callback in network.inner.handlers.peer.lock().await.iter() {
+                            callback(peer);
+                        }
                     }
                 }
                 Err(error) => {
@@ -234,11 +238,14 @@ async fn on_connected(
 
         // if peers is low, add to peers
         // later explicitly ask to reduce churn
-        if peers_store.peers.len() < network.inner.max_peers {
+        if peers_store.peers.len() < network.inner.max_connected_peers {
             peers_store.peers.insert(peer_addr);
+            for callback in network.inner.handlers.peer.lock().await.iter() {
+                callback(peer_addr);
+            }
 
             // Get more peers if needed
-            if peers_store.connections.len() < network.inner.min_peers {
+            if peers_store.connections.len() < network.inner.min_connected_peers {
                 request_more_peers(network.downgrade(), connected_peer.clone());
             }
         }
@@ -409,6 +416,7 @@ impl<T> Default for RequestsContainer<T> {
 
 #[derive(Default)]
 struct Handlers {
+    peer: AsyncMutex<Vec<Box<dyn Fn(SocketAddr) + Send>>>,
     connected_peer: AsyncMutex<Vec<Box<dyn Fn(&ConnectedPeer) + Send>>>,
     gossip: AsyncMutex<Vec<Box<dyn Fn(&GossipMessage) + Send>>>,
 }
@@ -441,8 +449,8 @@ struct Inner {
     requests_container: Arc<AsyncMutex<RequestsContainer<ResponseMessage>>>,
     internal_requests_container: Arc<AsyncMutex<RequestsContainer<InternalResponseMessage>>>,
     node_addr: SocketAddr,
-    min_peers: usize,
-    max_peers: usize,
+    min_connected_peers: usize,
+    max_connected_peers: usize,
 }
 
 impl Drop for Inner {
@@ -467,8 +475,8 @@ impl Network {
     pub async fn new(
         node_id: NodeID,
         addr: SocketAddr,
-        min_peers: usize,
-        max_peers: usize,
+        min_connected_peers: usize,
+        max_connected_peers: usize,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         let (gossip_sender, gossip_receiver) =
@@ -490,8 +498,8 @@ impl Network {
             requests_container: Arc::default(),
             internal_requests_container: Arc::default(),
             node_addr,
-            min_peers,
-            max_peers,
+            min_connected_peers,
+            max_connected_peers,
         });
 
         let network = Self { inner };
@@ -641,6 +649,15 @@ impl Network {
             InternalResponseMessage::Peers(peers) => Ok(peers),
             // _ => Err(RequestError::BadResponse),
         }
+    }
+
+    pub async fn on_peer<F: Fn(SocketAddr) + Send + 'static>(&self, callback: F) {
+        self.inner
+            .handlers
+            .peer
+            .lock()
+            .await
+            .push(Box::new(callback));
     }
 
     pub async fn on_connected_peer<F: Fn(&ConnectedPeer) + Send + 'static>(&self, callback: F) {
@@ -795,7 +812,7 @@ impl Network {
         .await
     }
 
-    pub(crate) async fn get_random_peer(&self) -> Option<ConnectedPeer> {
+    pub(crate) async fn get_random_connected_peer(&self) -> Option<ConnectedPeer> {
         self.inner
             .peers_store
             .lock()
@@ -806,14 +823,15 @@ impl Network {
             .cloned()
     }
 
-    // /// retrieve the socket addr for each peer, except the one asking
-    // fn _get_contacts(&self, exception: &SocketAddr) -> Vec<SocketAddr> {
-    //     self.peers
-    //         .iter()
-    //         .filter(|&peer| !peer.eq(&exception))
-    //         .copied()
-    //         .collect()
-    // }
+    pub(crate) async fn get_random_disconnected_peer(&self) -> Option<SocketAddr> {
+        let peers_store = self.inner.peers_store.lock().await;
+        peers_store
+            .peers
+            .iter()
+            .filter(|addr| !peers_store.connections.contains_key(addr))
+            .choose(&mut rand::thread_rng())
+            .cloned()
+    }
 }
 
 #[derive(Clone)]
@@ -1087,7 +1105,7 @@ mod tests {
                 .expect("Failed to connect to gateway");
 
             let random_peer = peer_network_1
-                .get_random_peer()
+                .get_random_connected_peer()
                 .await
                 .expect("Must be connected to gateway");
             let peers = peer_network_1
@@ -1108,13 +1126,15 @@ mod tests {
                     .await
                     .expect("Network failed to start");
 
+            let gateway_addr = gateway_network.address();
+
             let peer_network_1 =
                 Network::new(NodeID::default(), "127.0.0.1:0".parse().unwrap(), 1, 2)
                     .await
                     .expect("Network failed to start");
 
             peer_network_1
-                .connect_to(gateway_network.address())
+                .connect_to(gateway_addr)
                 .await
                 .expect("Failed to connect to gateway");
 
@@ -1124,46 +1144,55 @@ mod tests {
                     .expect("Network failed to start");
 
             let connected_peers = Arc::new(AtomicUsize::new(0));
-            let (all_peers_connected_sender, all_peers_connected_receiver) =
-                async_oneshot::oneshot::<()>();
             {
                 let connected_peers = Arc::clone(&connected_peers);
-                let all_peers_connected_sender = StdMutex::new(Some(all_peers_connected_sender));
                 peer_network_2
-                    .on_connected_peer(move |_connected_peer| {
-                        if connected_peers.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
-                            drop(
-                                all_peers_connected_sender
-                                    .lock()
-                                    .unwrap()
-                                    .take()
-                                    .unwrap()
-                                    .send(()),
-                            );
+                    .on_connected_peer({
+                        move |_connected_peer| {
+                            connected_peers.fetch_add(1, Ordering::SeqCst);
+                        }
+                    })
+                    .await;
+            }
+
+            let (second_peer_sender, second_peer_receiver) = async_oneshot::oneshot::<SocketAddr>();
+            {
+                let second_peer_sender = StdMutex::new(Some(second_peer_sender));
+                peer_network_2
+                    .on_peer({
+                        let peer_network_2 = peer_network_2.clone();
+
+                        move |peer| {
+                            if peer != gateway_addr {
+                                drop(
+                                    second_peer_sender
+                                        .lock()
+                                        .unwrap()
+                                        .take()
+                                        .unwrap()
+                                        .send(peer),
+                                );
+                            }
                         }
                     })
                     .await;
             }
 
             peer_network_2
-                .connect_to(gateway_network.address())
+                .connect_to(gateway_addr)
                 .await
                 .expect("Failed to connect to gateway");
 
-            let result_fut = future::or(
-                async move {
-                    drop(all_peers_connected_receiver.await);
+            peer_network_2
+                .connect_to(second_peer_receiver.await.unwrap())
+                .await
+                .expect("Failed to connect to the other peer");
 
-                    Ok(())
-                },
-                async {
-                    async_io::Timer::after(Duration::from_secs(3)).await;
-
-                    Err(())
-                },
+            assert_eq!(
+                2,
+                connected_peers.load(Ordering::SeqCst),
+                "Should have 2 peers connected",
             );
-
-            assert!(result_fut.await.is_ok(), "Failed to connect to other peer");
         });
     }
 }
