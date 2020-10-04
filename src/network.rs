@@ -380,6 +380,10 @@ async fn on_connected(
             peers_store.connections.remove(&peer_addr);
             peers_store.peers.remove(&peer_addr);
             info!("Broker has dropped a peer who disconnected");
+
+            // TODO: Proactive establishment of new connections if number of connections went below
+            //  desired
+            // TODO: Fallback to bootstrap nodes in case we can't reconnect at all
         }
     });
 
@@ -453,6 +457,7 @@ struct Inner {
     node_addr: SocketAddr,
     min_connected_peers: usize,
     max_connected_peers: usize,
+    min_peers: usize,
     max_peers: usize,
 }
 
@@ -480,6 +485,7 @@ impl Network {
         addr: SocketAddr,
         min_connected_peers: usize,
         max_connected_peers: usize,
+        min_peers: usize,
         max_peers: usize,
         maintain_peers_interval: Duration,
     ) -> io::Result<Self> {
@@ -505,6 +511,7 @@ impl Network {
             node_addr,
             min_connected_peers,
             max_connected_peers,
+            min_peers,
             max_peers,
         });
 
@@ -519,7 +526,7 @@ impl Network {
                 info!("Listening on TCP socket for inbound connections");
 
                 while let Some(stream) = connections.next().await {
-                    info!("New inbound TCP connection initiated");
+                    debug!("New inbound TCP connection initiated");
 
                     let mut stream = stream.unwrap();
                     if let Some(network) = network_weak.upgrade() {
@@ -554,13 +561,38 @@ impl Network {
                                 if result {
                                     // TODO: Update timestamp
                                 } else {
+                                    trace!("Dropping unreachable peer {}", peer);
                                     // TODO: Some number of attempts instead of removing immediately
+                                    // TODO: Dropping connection here will not cause disconnection
+                                    //  if peer is still connected for some reason
+                                    peers_store.connections.remove(&peer);
                                     peers_store.peers.remove(&peer);
                                 }
                             });
                         }
 
-                    // TODO: Establish new connections if necessary
+                        while network.inner.peers_store.lock().await.connections.len()
+                            < network.inner.min_connected_peers
+                        {
+                            trace!("Low on connections, trying to establish more");
+                            if let Some(peer) = network.get_random_disconnected_peer().await {
+                                // TODO: Probably count number of errors for peer and remove it if
+                                //  fails all the time
+                                drop(network.connect_to(peer).await);
+                            } else {
+                                break;
+                            }
+                        }
+
+                        if network.inner.peers_store.lock().await.peers.len()
+                            < network.inner.min_peers
+                        {
+                            trace!("Low on peers, trying to request more");
+                            if let Some(connected_peer) = network.get_random_connected_peer().await
+                            {
+                                request_more_peers(network_weak.clone(), connected_peer);
+                            }
+                        }
                     } else {
                         break;
                     }
@@ -934,6 +966,7 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 1,
                 2,
+                5,
                 10,
                 Duration::from_secs(60),
             )
@@ -951,6 +984,7 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 1,
                 2,
+                5,
                 10,
                 Duration::from_secs(60),
             )
@@ -1006,6 +1040,7 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 1,
                 2,
+                5,
                 10,
                 Duration::from_secs(60),
             )
@@ -1018,6 +1053,7 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 1,
                 2,
+                5,
                 10,
                 Duration::from_secs(60),
             )
@@ -1094,6 +1130,7 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 1,
                 2,
+                5,
                 10,
                 Duration::from_secs(60),
             )
@@ -1106,6 +1143,7 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 1,
                 2,
+                5,
                 10,
                 Duration::from_secs(60),
             )
@@ -1157,6 +1195,7 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 1,
                 2,
+                5,
                 10,
                 Duration::from_secs(60),
             )
@@ -1168,6 +1207,7 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 1,
                 2,
+                5,
                 10,
                 Duration::from_secs(60),
             )
@@ -1184,6 +1224,7 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 1,
                 2,
+                5,
                 10,
                 Duration::from_secs(60),
             )
@@ -1217,6 +1258,7 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 1,
                 2,
+                5,
                 10,
                 Duration::from_secs(60),
             )
@@ -1230,6 +1272,7 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 1,
                 2,
+                5,
                 10,
                 Duration::from_secs(60),
             )
@@ -1246,6 +1289,7 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 2,
                 2,
+                5,
                 10,
                 Duration::from_secs(60),
             )
@@ -1307,8 +1351,9 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 1,
                 2,
+                5,
                 10,
-                Duration::from_secs(60),
+                Duration::from_secs(100),
             )
             .await
             .expect("Network failed to start");
@@ -1320,8 +1365,9 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 1,
                 2,
+                5,
                 10,
-                Duration::from_secs(60),
+                Duration::from_secs(100),
             )
             .await
             .expect("Network failed to start");
@@ -1331,13 +1377,16 @@ mod tests {
                 .await
                 .expect("Failed to connect to gateway");
 
+            let peer_network_1_address = peer_network_1.address();
+
             let peer_network_2 = Network::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
                 1,
                 2,
+                2,
                 10,
-                Duration::from_millis(200),
+                Duration::from_millis(100),
             )
             .await
             .expect("Network failed to start");
@@ -1375,7 +1424,7 @@ mod tests {
 
             drop(peer_network_1);
 
-            async_std::task::sleep(Duration::from_secs(1)).await;
+            async_std::task::sleep(Duration::from_millis(1000)).await;
 
             assert!(
                 peer_network_2
@@ -1383,6 +1432,33 @@ mod tests {
                     .await
                     .is_none(),
                 "Must have no disconnected peers",
+            );
+
+            let peer_network_1 = Network::new(
+                NodeID::default(),
+                peer_network_1_address,
+                1,
+                2,
+                5,
+                10,
+                Duration::from_secs(100),
+            )
+            .await
+            .expect("Network failed to start");
+
+            peer_network_1
+                .connect_to(gateway_addr)
+                .await
+                .expect("Failed to connect to gateway");
+
+            async_std::task::sleep(Duration::from_millis(500)).await;
+
+            assert!(
+                peer_network_2
+                    .get_random_disconnected_peer()
+                    .await
+                    .is_some(),
+                "Must have disconnected peer received from gateway",
             );
         });
     }
