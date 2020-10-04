@@ -193,6 +193,152 @@ async fn exchange_peer_addr(own_addr: SocketAddr, stream: &mut TcpStream) -> Opt
     }
 }
 
+async fn on_connected(
+    network: Network,
+    peer_addr: SocketAddr,
+    mut stream: TcpStream,
+) -> Result<ConnectedPeer, ConnectionError> {
+    let (client_sender, mut client_receiver) = channel::<Bytes>(32);
+
+    let connected_peer = {
+        let mut peers_store = network.inner.peers_store.lock().await;
+
+        if peers_store.connections.contains_key(&peer_addr) {
+            return Err(ConnectionError::AlreadyConnected);
+        }
+
+        let connected_peer = ConnectedPeer {
+            addr: peer_addr,
+            sender: client_sender.clone(),
+        };
+        peers_store
+            .connections
+            .insert(peer_addr, connected_peer.clone());
+        // if peers is low, add to peers
+        // later explicitly ask to reduce churn
+        if peers_store.peers.len() < network.inner.max_peers {
+            peers_store.peers.insert(peer_addr);
+        }
+
+        connected_peer
+    };
+
+    let mut messages_receiver = read_messages(stream.clone());
+
+    // listen for new messages from the broker and send back to peer over stream
+    async_std::task::spawn(async move {
+        while let Some(bytes) = client_receiver.next().await {
+            let length = bytes.len() as u16;
+            let result: io::Result<()> = try {
+                stream.write_all(&length.to_le_bytes()).await?;
+                stream.write_all(&bytes).await?
+            };
+            if result.is_err() {
+                break;
+            }
+        }
+    });
+
+    async_std::task::spawn(async move {
+        while let Some(message) = messages_receiver.next().await {
+            if let Ok(message) = message {
+                match message {
+                    Message::Gossip(message) => {
+                        drop(network.inner.gossip_sender.send((peer_addr, message)).await);
+                    }
+                    Message::Request { id, message } => {
+                        let (response_sender, response_receiver) = async_oneshot::oneshot();
+                        drop(
+                            network
+                                .inner
+                                .request_sender
+                                .send((message, response_sender))
+                                .await,
+                        );
+                        {
+                            let client_sender = client_sender.clone();
+                            async_std::task::spawn(async move {
+                                if let Ok(message) = response_receiver.await {
+                                    drop(
+                                        client_sender
+                                            .send(Message::Response { id, message }.to_bytes())
+                                            .await,
+                                    );
+                                }
+                            });
+                        }
+                    }
+                    Message::Response { id, message } => {
+                        if let Some(response_sender) = network
+                            .inner
+                            .requests_container
+                            .lock()
+                            .await
+                            .handlers
+                            .remove(&id)
+                        {
+                            drop(response_sender.send(message));
+                        } else {
+                            debug!("Received response for unknown request {}", id);
+                        }
+                    }
+                    Message::InternalRequest { id, message } => {
+                        let response = match message {
+                            InternalRequestMessage::Peers => InternalResponseMessage::Peers(
+                                network
+                                    .inner
+                                    .peers_store
+                                    .lock()
+                                    .await
+                                    .peers
+                                    .iter()
+                                    .filter(|&&address| {
+                                        address != network.inner.node_addr && address != peer_addr
+                                    })
+                                    .copied()
+                                    .collect(),
+                            ),
+                        };
+                        drop(
+                            client_sender
+                                .send(
+                                    Message::InternalResponse {
+                                        id,
+                                        message: response,
+                                    }
+                                    .to_bytes(),
+                                )
+                                .await,
+                        );
+                    }
+                    Message::InternalResponse { id, message } => {
+                        if let Some(response_sender) = network
+                            .inner
+                            .internal_requests_container
+                            .lock()
+                            .await
+                            .handlers
+                            .remove(&id)
+                        {
+                            drop(response_sender.send(message));
+                        } else {
+                            debug!("Received response for unknown request {}", id);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut peers_store = network.inner.peers_store.lock().await;
+
+        peers_store.connections.remove(&peer_addr);
+        peers_store.peers.remove(&peer_addr);
+        info!("Broker has dropped a peer who disconnected");
+    });
+
+    Ok(connected_peer)
+}
+
 #[derive(Debug)]
 pub enum ConnectionError {
     AlreadyConnected,
@@ -329,7 +475,7 @@ impl Network {
                             if let Some(peer_addr) =
                                 exchange_peer_addr(node_addr, &mut stream).await
                             {
-                                drop(network.on_connected(peer_addr, stream).await);
+                                drop(on_connected(network, peer_addr, stream).await);
                             };
                         });
                     } else {
@@ -489,156 +635,11 @@ impl Network {
         let mut stream = TcpStream::connect(peer_addr)
             .await
             .map_err(|error| ConnectionError::IO { error })?;
-        let network = self.clone();
 
         match exchange_peer_addr(self.inner.node_addr, &mut stream).await {
-            Some(peer_addr) => network.on_connected(peer_addr, stream).await,
+            Some(peer_addr) => on_connected(self.clone(), peer_addr, stream).await,
             None => Err(ConnectionError::FailedToExchangeAddress),
         }
-    }
-
-    async fn on_connected(
-        self,
-        peer_addr: SocketAddr,
-        mut stream: TcpStream,
-    ) -> Result<ConnectedPeer, ConnectionError> {
-        let (client_sender, mut client_receiver) = channel::<Bytes>(32);
-
-        let connected_peer = {
-            let mut peers_store = self.inner.peers_store.lock().await;
-
-            if peers_store.connections.contains_key(&peer_addr) {
-                return Err(ConnectionError::AlreadyConnected);
-            }
-
-            let connected_peer = ConnectedPeer {
-                addr: peer_addr,
-                sender: client_sender.clone(),
-            };
-            peers_store
-                .connections
-                .insert(peer_addr, connected_peer.clone());
-            // if peers is low, add to peers
-            // later explicitly ask to reduce churn
-            if peers_store.peers.len() < self.inner.max_peers {
-                peers_store.peers.insert(peer_addr);
-            }
-
-            connected_peer
-        };
-
-        let mut messages_receiver = read_messages(stream.clone());
-
-        // listen for new messages from the broker and send back to peer over stream
-        async_std::task::spawn(async move {
-            while let Some(bytes) = client_receiver.next().await {
-                let length = bytes.len() as u16;
-                let result: io::Result<()> = try {
-                    stream.write_all(&length.to_le_bytes()).await?;
-                    stream.write_all(&bytes).await?
-                };
-                if result.is_err() {
-                    break;
-                }
-            }
-        });
-
-        async_std::task::spawn(async move {
-            while let Some(message) = messages_receiver.next().await {
-                if let Ok(message) = message {
-                    match message {
-                        Message::Gossip(message) => {
-                            drop(self.inner.gossip_sender.send((peer_addr, message)).await);
-                        }
-                        Message::Request { id, message } => {
-                            let (response_sender, response_receiver) = async_oneshot::oneshot();
-                            drop(
-                                self.inner
-                                    .request_sender
-                                    .send((message, response_sender))
-                                    .await,
-                            );
-                            {
-                                let client_sender = client_sender.clone();
-                                async_std::task::spawn(async move {
-                                    if let Ok(message) = response_receiver.await {
-                                        drop(
-                                            client_sender
-                                                .send(Message::Response { id, message }.to_bytes())
-                                                .await,
-                                        );
-                                    }
-                                });
-                            }
-                        }
-                        Message::Response { id, message } => {
-                            if let Some(response_sender) = self
-                                .inner
-                                .requests_container
-                                .lock()
-                                .await
-                                .handlers
-                                .remove(&id)
-                            {
-                                drop(response_sender.send(message));
-                            } else {
-                                debug!("Received response for unknown request {}", id);
-                            }
-                        }
-                        Message::InternalRequest { id, message } => {
-                            let response = match message {
-                                InternalRequestMessage::Peers => InternalResponseMessage::Peers(
-                                    self.inner
-                                        .peers_store
-                                        .lock()
-                                        .await
-                                        .peers
-                                        .iter()
-                                        .filter(|&&address| {
-                                            address != self.inner.node_addr && address != peer_addr
-                                        })
-                                        .copied()
-                                        .collect(),
-                                ),
-                            };
-                            drop(
-                                client_sender
-                                    .send(
-                                        Message::InternalResponse {
-                                            id,
-                                            message: response,
-                                        }
-                                        .to_bytes(),
-                                    )
-                                    .await,
-                            );
-                        }
-                        Message::InternalResponse { id, message } => {
-                            if let Some(response_sender) = self
-                                .inner
-                                .internal_requests_container
-                                .lock()
-                                .await
-                                .handlers
-                                .remove(&id)
-                            {
-                                drop(response_sender.send(message));
-                            } else {
-                                debug!("Received response for unknown request {}", id);
-                            }
-                        }
-                    }
-                }
-            }
-
-            let mut peers_store = self.inner.peers_store.lock().await;
-
-            peers_store.connections.remove(&peer_addr);
-            peers_store.peers.remove(&peer_addr);
-            info!("Broker has dropped a peer who disconnected");
-        });
-
-        Ok(connected_peer)
     }
 
     /// Non-generic method to avoid significant duplication in final binary
