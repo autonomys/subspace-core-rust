@@ -245,7 +245,7 @@ struct Peers {
 struct Inner {
     node_id: NodeID,
     peers_store: Arc<AsyncMutex<Peers>>,
-    connections_handle: StdMutex<Option<JoinHandle<()>>>,
+    background_tasks: StdMutex<Vec<JoinHandle<()>>>,
     handlers: Handlers,
     gossip_sender: async_channel::Sender<(SocketAddr, GossipMessage)>,
     gossip_receiver: StdMutex<Option<async_channel::Receiver<(SocketAddr, GossipMessage)>>>,
@@ -260,15 +260,14 @@ struct Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        // Stop accepting new connections, this will also drop the listener and close the socket
-        async_std::task::spawn(
-            self.connections_handle
-                .lock()
-                .unwrap()
-                .take()
-                .unwrap()
-                .cancel(),
-        );
+        let background_tasks: Vec<JoinHandle<()>> =
+            mem::take(self.background_tasks.lock().unwrap().as_mut());
+        async_std::task::spawn(async move {
+            // Stop all long-running background tasks
+            for task in background_tasks {
+                task.cancel().await;
+            }
+        });
     }
 }
 
@@ -290,7 +289,7 @@ impl Network {
         let inner = Arc::new(Inner {
             node_id,
             peers_store: Arc::default(),
-            connections_handle: StdMutex::default(),
+            background_tasks: StdMutex::default(),
             handlers,
             gossip_sender,
             gossip_receiver: StdMutex::new(Some(gossip_receiver)),
@@ -332,10 +331,10 @@ impl Network {
 
         network
             .inner
-            .connections_handle
+            .background_tasks
             .lock()
             .unwrap()
-            .replace(connections_handle);
+            .push(connections_handle);
 
         Ok(network)
     }
