@@ -27,6 +27,7 @@ jsonrpc-derive = {git = "https://github.com/paritytech/jsonrpc.git"}
 jsonrpc-pubsub = {git = "https://github.com/paritytech/jsonrpc.git"}
 jsonrpc-ws-server = {git = "https://github.com/paritytech/jsonrpc.git"}
 log = "0.4.0"
+lru = "0.6.0"
 merkle-tree-binary = { git = "https://github.com/subspace/merkle-tree-binary.rs" }
 num-bigint = "0.2.3"
 num-traits = "0.2.10"

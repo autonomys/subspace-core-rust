@@ -12,16 +12,17 @@ use futures::lock::Mutex as AsyncMutex;
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use futures_lite::future;
 use log::*;
+use lru::LruCache;
 use messages::{BlocksRequest, GossipMessage, Message, RequestMessage, ResponseMessage};
 use rand::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt::{Debug, Display};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fmt, io, mem};
 
 /* Todo
@@ -204,7 +205,7 @@ fn request_more_peers(network_weak: NetworkWeak, connected_peer: ConnectedPeer) 
                         .filter(|&peer| peer != network.inner.node_addr)
                     {
                         let mut peers_store = network.inner.peers_store.lock().await;
-                        if peers_store.peers.insert(peer) {
+                        if peers_store.peers.put(peer, None).is_none() {
                             for callback in network.inner.handlers.peer.lock().await.iter() {
                                 callback(peer);
                             }
@@ -241,7 +242,7 @@ async fn on_connected(
             .connections
             .insert(peer_addr, connected_peer.clone());
 
-        peers_store.peers.insert(peer_addr);
+        peers_store.peers.put(peer_addr, Some(Instant::now()));
         for callback in network.inner.handlers.peer.lock().await.iter() {
             callback(peer_addr);
         }
@@ -337,10 +338,12 @@ async fn on_connected(
                                     .await
                                     .peers
                                     .iter()
-                                    .filter(|&&address| {
-                                        address != network.inner.node_addr && address != peer_addr
+                                    .filter(|(&address, timestamp)| {
+                                        timestamp.is_some()
+                                            && address != network.inner.node_addr
+                                            && address != peer_addr
                                     })
-                                    .copied()
+                                    .map(|(&addr, _)| addr)
                                     .collect(),
                             ),
                         };
@@ -378,7 +381,7 @@ async fn on_connected(
             let mut peers_store = network.inner.peers_store.lock().await;
 
             peers_store.connections.remove(&peer_addr);
-            peers_store.peers.remove(&peer_addr);
+            peers_store.peers.pop(&peer_addr);
             info!("Broker has dropped a peer who disconnected");
 
             // TODO: Proactive establishment of new connections if number of connections went below
@@ -433,12 +436,20 @@ pub struct ConnectedPeer {
     sender: Sender<Bytes>,
 }
 
-#[derive(Default)]
 struct Peers {
     /// Active established connections
     connections: HashMap<SocketAddr, ConnectedPeer>,
     /// All known peers
-    peers: HashSet<SocketAddr>,
+    peers: LruCache<SocketAddr, Option<Instant>>,
+}
+
+impl Peers {
+    fn new(max_peers: usize) -> Self {
+        Self {
+            connections: HashMap::new(),
+            peers: LruCache::new(max_peers),
+        }
+    }
 }
 
 struct Inner {
@@ -499,7 +510,7 @@ impl Network {
         let handlers = Handlers::default();
         let inner = Arc::new(Inner {
             node_id,
-            peers_store: Arc::default(),
+            peers_store: Arc::new(AsyncMutex::new(Peers::new(max_peers))),
             background_tasks: StdMutex::default(),
             handlers,
             gossip_sender,
@@ -530,9 +541,9 @@ impl Network {
 
                     let mut stream = stream.unwrap();
                     if let Some(network) = network_weak.upgrade() {
-                        if network.inner.peers_store.lock().await
-                            >= network.inner.max_connected_peers
-                        {
+                        let connected_peers =
+                            network.inner.peers_store.lock().await.connections.len();
+                        if connected_peers >= network.inner.max_connected_peers {
                             // Ignore connection, we've reached a limit for connected peers
                             continue;
                         }
@@ -557,7 +568,15 @@ impl Network {
                 let mut interval = stream::interval(maintain_peers_interval);
                 while let Some(_) = interval.next().await {
                     if let Some(network) = network_weak.upgrade() {
-                        for peer in network.inner.peers_store.lock().await.peers.iter().copied() {
+                        for peer in network
+                            .inner
+                            .peers_store
+                            .lock()
+                            .await
+                            .peers
+                            .iter()
+                            .map(|(&addr, _)| addr)
+                        {
                             let peers_store = Arc::clone(&network.inner.peers_store);
                             async_std::task::spawn(async move {
                                 // TODO: Timeout?
@@ -565,14 +584,14 @@ impl Network {
 
                                 let mut peers_store = peers_store.lock().await;
                                 if result {
-                                    // TODO: Update timestamp
+                                    peers_store.peers.put(peer, Some(Instant::now()));
                                 } else {
                                     trace!("Dropping unreachable peer {}", peer);
                                     // TODO: Some number of attempts instead of removing immediately
                                     // TODO: Dropping connection here will not cause disconnection
                                     //  if peer is still connected for some reason
                                     peers_store.connections.remove(&peer);
-                                    peers_store.peers.remove(&peer);
+                                    peers_store.peers.pop(&peer);
                                 }
                             });
                         }
@@ -902,6 +921,7 @@ impl Network {
         peers_store
             .peers
             .iter()
+            .map(|(addr, _)| addr)
             .filter(|addr| !peers_store.connections.contains_key(addr))
             .choose(&mut rand::thread_rng())
             .cloned()
@@ -1359,7 +1379,7 @@ mod tests {
                 2,
                 5,
                 10,
-                Duration::from_secs(100),
+                Duration::from_millis(100),
             )
             .await
             .expect("Network failed to start");
@@ -1373,7 +1393,7 @@ mod tests {
                 2,
                 5,
                 10,
-                Duration::from_secs(100),
+                Duration::from_millis(100),
             )
             .await
             .expect("Network failed to start");
@@ -1430,7 +1450,7 @@ mod tests {
 
             drop(peer_network_1);
 
-            async_std::task::sleep(Duration::from_millis(1000)).await;
+            async_std::task::sleep(Duration::from_millis(500)).await;
 
             assert!(
                 peer_network_2
@@ -1447,7 +1467,7 @@ mod tests {
                 2,
                 5,
                 10,
-                Duration::from_secs(100),
+                Duration::from_millis(100),
             )
             .await
             .expect("Network failed to start");
