@@ -142,6 +142,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         },
         MIN_CONNECTED_PEERS,
         MAX_CONNECTED_PEERS,
+        MAX_PEERS,
     );
     let network = network_fut.await.unwrap();
     if node_type != NodeType::Gateway {
@@ -155,7 +156,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         // Connect to more peers if possible
         for _ in 0..MIN_CONNECTED_PEERS {
             if let Some(peer) = network.get_random_disconnected_peer().await {
-                network.connect_to(peer).await;
+                drop(network.connect_to(peer).await);
             }
         }
     }
