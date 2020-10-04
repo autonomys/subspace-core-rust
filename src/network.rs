@@ -522,7 +522,7 @@ impl Network {
                                 exchange_peer_addr(node_addr, &mut stream).await
                             {
                                 drop(on_connected(network, peer_addr, stream).await);
-                            };
+                            }
                         });
                     } else {
                         break;
@@ -812,7 +812,7 @@ impl Network {
         .await
     }
 
-    pub(crate) async fn get_random_connected_peer(&self) -> Option<ConnectedPeer> {
+    pub async fn get_random_connected_peer(&self) -> Option<ConnectedPeer> {
         self.inner
             .peers_store
             .lock()
@@ -823,7 +823,7 @@ impl Network {
             .cloned()
     }
 
-    pub(crate) async fn get_random_disconnected_peer(&self) -> Option<SocketAddr> {
+    pub async fn get_random_disconnected_peer(&self) -> Option<SocketAddr> {
         let peers_store = self.inner.peers_store.lock().await;
         peers_store
             .peers
@@ -1160,8 +1160,6 @@ mod tests {
                 let second_peer_sender = StdMutex::new(Some(second_peer_sender));
                 peer_network_2
                     .on_peer({
-                        let peer_network_2 = peer_network_2.clone();
-
                         move |peer| {
                             if peer != gateway_addr {
                                 drop(
