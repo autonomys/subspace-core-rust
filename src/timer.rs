@@ -31,6 +31,8 @@ pub async fn run(
 
     // advance through timeslots on set interval
     loop {
+        // TODO: this is fast forwarding if timeslot is incorrect
+
         async_std::task::sleep(
             (next_timeslot as u32 * Duration::from_millis(TIMESLOT_DURATION))
                 .checked_sub(genesis_instant.elapsed())

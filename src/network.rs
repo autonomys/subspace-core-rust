@@ -25,19 +25,14 @@ use std::{fmt, io, mem};
 /* Todo
  *
  * Fix all unwrap calls
- * Ensure message size does not exceed 16k
- * Exchange peers on sync (and ensure peers request works)
- * Add another peer to replace the dropped one
+ * Ensure message size does not exceed 16k by the sender (already handled by receiver)
  * Handle empty block responses, currently that peer will randomly come again soon
  * Handle errors as results
- * Write tests
- * Filter duplicate message with cache at manager using get_id
- * Handle get peers response with outbound message correctly
  *
 */
 
 const MAX_MESSAGE_CONTENTS_LENGTH: usize = 2usize.pow(16) - 1;
-// TODO: What should this timeout be?
+// TODO: Consider adaptive request timeout for more efficient sync
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub type NodeID = [u8; 32];

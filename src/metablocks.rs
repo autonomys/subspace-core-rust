@@ -30,7 +30,7 @@ pub struct MetaBlock {
 
 pub struct MetaBlocks {
     pub blocks: HashMap<ProofId, MetaBlock>,
-    content_to_proof_map: HashMap<ContentId, ProofId>,
+    pub content_to_proof_map: HashMap<ContentId, ProofId>,
 }
 
 impl MetaBlocks {

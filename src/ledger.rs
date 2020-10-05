@@ -7,7 +7,7 @@ use crate::{
     PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 
-use crate::metablocks::MetaBlocks;
+use crate::metablocks::{BlockStatus, MetaBlocks};
 use log::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
@@ -40,6 +40,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
     X 7. Apply transactions
     ~ 8. Sync with late blocks
     9. Finish remote block validation
+    10. Handle forks
+    11. Start a ledger spec
 
     Case 1: Single block in each timeslot (some may be skipped)
     Case 2: Multiple blocks in each timeslot
@@ -56,6 +58,36 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
     - verify blocks received via gossip
     - how to verify a claim that a parent is on the longest chain?
     - apply cached blocks during sync (test)
+    - ensure pending blocks on different levels are applied correctly
+
+    Simplifying Consensus
+    - remove staged_blocks temporary data structure
+    - single blocks_by_height data structure?
+    - stop tracking state of blocks in metablocks (why do we need this?)
+    - simplify ordering since we don't allow out of sequence blocks now
+    - detect and handle the fork event
+
+    Have to track
+    - all valid blocks are placed in metablocks -> with state pending
+        - HashMap<ProofId, MetaBlock>
+        - HashMap<ContentId, ProofId>
+    - new blocks are put into pending_blocks: HashSet<ContentId> as they are seen
+    - if a new block added to pending blocks references a current pending block, it is moved to blocks_by_height
+    - what if the new block references a block that is not in pending blocks?
+    - then we check the state in metablocks
+        - unknown -> we have not seen the block, try to apply the block again at the next timeslot?
+        - pending -> this should not occur (it should be in pending blocks then)
+        - referenced -> this is ok (we don't apply until the end of the round)
+        - applied -> this means we have a duplicate reference and the block is invalid
+    - referenced blocks are placed into blocks_by_height: BTreeMap<BlockHeight, Vec<ProofId>>
+    - as each timeslot closes any new level is ordered and applied
+    - how do we track which blocks are on the longest chain?
+
+
+    Understanding Forks
+    - If two or more blocks from different timeslots reference the same parent_id
+    - If two or more blocks from the same timeslot are seen
+
 */
 
 pub type BlockHeight = u64;
@@ -68,13 +100,14 @@ pub struct PendingBlock {
 }
 
 // TODO: can we sync blocks by epoch
-// TODO: can we have a relational database for blocks and block states? maybe dgraph
+// TODO: can we have a relational database for blocks and block states? maybe dgraph or redis
 
 pub struct Ledger {
     pub balances: HashMap<AccountAddress, AccountState>,
     pub metablocks: MetaBlocks,
     pub staged_blocks: HashSet<(BlockHeight, ProofId, ContentId)>,
-    // proof_id_by_timeslot
+    pub pending_blocks: HashSet<ContentId>,
+    pub blocks_by_height: BTreeMap<BlockHeight, Vec<ProofId>>,
     pub pending_blocks_by_height: BTreeMap<BlockHeight, BTreeMap<ProofId, PendingBlock>>,
     pub applied_blocks_by_height: BTreeMap<BlockHeight, Vec<ProofId>>,
     pub blocks_on_longest_chain: HashSet<ProofId>,
@@ -113,6 +146,8 @@ impl Ledger {
             txs: HashMap::new(),
             tx_mempool: HashSet::new(),
             staged_blocks: HashSet::new(),
+            pending_blocks: HashSet::new(),
+            blocks_by_height: BTreeMap::new(),
             applied_blocks_by_height: BTreeMap::new(),
             blocks_on_longest_chain: HashSet::new(),
             cached_proof_ids_by_timeslot: BTreeMap::new(),
@@ -278,6 +313,32 @@ impl Ledger {
         }
 
         false
+    }
+
+    pub fn reference_pending_block_new(&mut self, proof_id: &ProofId) {
+        // check if the block is still pending
+        if !self.pending_blocks.contains(proof_id) {
+            match self.metablocks.get_status(&proof_id) {
+                BlockStatus::Referenced => {
+                    // change state to referenced in metablocks
+                    // remove from pending blocks set
+                    // add to blocks_by_height
+                }
+                BlockStatus::Applied => {
+                    // this is an invalid block
+                    // it should be discarded and not gossiped
+                    // this should be caught at block validation, not here
+                }
+                BlockStatus::Unknown => {
+                    // we have not seen the parent block yet
+                    // we can either wait for the parent and try again
+                    // or we can request the parent from the sender
+                    // we should not gossip until we have the parents though
+                    // the same should be done for included txs
+                }
+                _ => panic!("Logic error, pending block should not be in cached or staged state"),
+            };
+        }
     }
 
     pub fn apply_pending_block(&mut self, proof_id: &ProofId, block_height: &u64) {
@@ -625,26 +686,10 @@ impl Ledger {
         block
     }
 
-    /// cache a block received via gossip ahead of the current epoch
-    pub fn cache_remote_block(&mut self, block: Block) {
-        // cache the block
-        // TODO: Does this need to be inserted here at all?
-        self.metablocks.cache(block.clone());
-
-        let proof_id = block.proof.get_id();
-
-        // TODO: should be timeslot seen in, not the timeslot of the block (but timer hasn't started...)
-        // add to cached blocks tracker
-        self.cached_proof_ids_by_timeslot
-            .entry(block.proof.timeslot)
-            .and_modify(|proof_ids| proof_ids.push(proof_id))
-            .or_insert(vec![proof_id]);
-    }
-
     /// validate and apply a block received via gossip
-    pub async fn validate_and_apply_remote_block(&mut self, block: Block) -> bool {
+    pub async fn validate_and_stage_remote_block(&mut self, block: Block) -> bool {
         debug!(
-            "Validating and applying block for epoch: {} at timeslot {}",
+            "Validating and staging remote block for epoch: {} at timeslot {}",
             block.proof.epoch, block.proof.timeslot
         );
 
@@ -669,53 +714,78 @@ impl Ledger {
             return false;
         }
 
-        // TODO: ensure that we have the parent and all uncles
+        let parent_proof_id = self
+            .metablocks
+            .get_proof_id_from_content_id(block.content.parent_id);
+
+        // collect parent and uncle pointers seen by this block
+        let mut content_ids_seen_by_this_block = block.content.uncle_ids.clone();
+        content_ids_seen_by_this_block.push(block.content.parent_id);
+
+        // check to see if ancestors have been seen and have not been applied yet
+        for content_id in content_ids_seen_by_this_block.into_iter() {
+            match self.metablocks.content_to_proof_map.get(&content_id) {
+                Some(proof_id) => {
+                    let metablock = self.metablocks.blocks.get(proof_id).unwrap();
+                    match metablock.status {
+                        BlockStatus::Applied => {
+                            // only if the height of the block is greater than one
+
+                            warn!(
+                                "Invalid block, its parent has already been applied to the ledger"
+                            );
+                            // TODO: this is a fork
+                            // this block is not valid
+                        }
+                        _ => {}
+                    }
+                }
+                None => {
+                    // ancestor is unknown, cache the block
+                    warn!("Cannot validate block that contains unknown ancestor blocks");
+                    // TODO: cache the block and apply once we see the parent
+                    // will this even work with timeslots now?
+                    // unless we apply late blocks immediately if no other blocks in the previous round
+                    return false;
+                }
+            }
+        }
+
+        // TODO: if the block is from a past timeslot see if we can apply immediately or if it causes a fork
 
         // TODO: ensure the parent and all uncles are from an earlier timeslot
+        // get the timeslot of each and compare to the current timeslot
 
         // TODO: ensure the block's parent is the head of the longest chain
+        // check that it is the last entry in the ids on longest chain (else we have a fork)
 
-        // TODO: ensure the block does not reference uncles that have already been referenced
+        // TODO: ensure that we have all transactions for this block
+        // else we will need to wait or request them
 
         // TODO: validate all transactions for this block (coinbase and credit)
 
         // apply the block to the ledger`
         self.stage_block(&block).await;
 
-        // TODO: apply children of this block that were depending on it
+        // TODO: check to see if this block was required for any cached blocks
 
         true
     }
 
-    /// validate and apply a cached block from gossip after syncing the ledger
-    pub async fn validate_and_apply_cached_block(&mut self, block: Block) -> bool {
-        //TODO: must handle the case where the epoch is still open
+    /// cache a block received via gossip ahead of the current epoch
+    pub fn cache_remote_block(&mut self, block: Block) {
+        // cache the block
+        // TODO: Does this need to be inserted here at all?
+        self.metablocks.cache(block.clone());
 
-        let randomness_epoch_index = block.proof.epoch - CHALLENGE_LOOKBACK_EPOCHS;
-        let challenge_timeslot = block.proof.timeslot;
-        info!(
-            "Validating and applying cached block for epoch: {} at timeslot {}",
-            randomness_epoch_index, challenge_timeslot
-        );
+        let proof_id = block.proof.get_id();
 
-        // get correct randomness for this block
-        let epoch = self.epoch_tracker.get_epoch(randomness_epoch_index).await;
-
-        // check if the block is valid
-        if !block.is_valid(
-            &self.merkle_root,
-            &self.genesis_piece_hash,
-            &epoch.randomness,
-            &epoch.get_challenge_for_timeslot(challenge_timeslot),
-            &self.sloth,
-        ) {
-            return false;
-        }
-
-        // apply the block to the ledger
-        self.stage_block(&block).await;
-
-        true
+        // TODO: should be timeslot seen in, not the timeslot of the block (but timer hasn't started...)
+        // add to cached blocks tracker
+        self.cached_proof_ids_by_timeslot
+            .entry(block.proof.timeslot)
+            .and_modify(|proof_ids| proof_ids.push(proof_id))
+            .or_insert(vec![proof_id]);
     }
 
     /// apply the cached block to the ledger
@@ -726,7 +796,7 @@ impl Ledger {
             if let Some(proof_ids) = self.cached_proof_ids_by_timeslot.remove(&current_timeslot) {
                 for proof_id in proof_ids.iter() {
                     let cached_block = self.metablocks.blocks.get(proof_id).unwrap().block.clone();
-                    if !self.validate_and_apply_cached_block(cached_block).await {
+                    if !self.validate_and_stage_remote_block(cached_block).await {
                         return Err(());
                     }
                 }

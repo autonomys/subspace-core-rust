@@ -102,7 +102,7 @@ pub async fn run(
                 match message {
                     GossipMessage::BlockProposal { block } => {
                         let mut ledger = ledger.lock().await;
-                        trace!(
+                        debug!(
                             "Received a block via gossip, with {} uncles",
                             block.content.uncle_ids.len()
                         );
@@ -186,7 +186,7 @@ pub async fn run(
                         // TODO: important -- this may lead to forks if nodes are malicious
 
                         // check if the block is valid and apply
-                        if ledger.validate_and_apply_remote_block(block.clone()).await {
+                        if ledger.validate_and_stage_remote_block(block.clone()).await {
                             network
                                 .regossip(&peer_addr, GossipMessage::BlockProposal { block })
                                 .await;
@@ -286,7 +286,7 @@ pub async fn run(
                                 hex::encode(&block.get_id()[0..8])
                             );
 
-                            if ledger.validate_and_apply_remote_block(block.clone()).await {
+                            if ledger.validate_and_stage_remote_block(block.clone()).await {
                                 network
                                     .regossip(&peer_addr, GossipMessage::BlockProposal { block })
                                     .await;

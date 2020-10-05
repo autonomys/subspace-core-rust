@@ -1,39 +1,86 @@
 ## Security Requirements
 
-Key Questions
+### Key Questions
 
-1. Does the honest network converge in the presence of forks
-2. Can an attacker gain an advantage through private simulation of different solutions?
-3. Is there an incentive for nodes to gossip/solve ahead of the deadline (and simulate)?
-4. What is the probability of winning by encoding on-demand?
-5. How far back may a history rewriting attack be implemented?
-6. Are there any incentives for selfish mining?
-7. Is pooled mining even possible?
-8. How ASIC resistant is Sloth?
-9. Shortcuts in Sloth computation?
-10. Do incentives work correclty for the plotting pieces closest to node_id?
-11. Is there any advantage to employing the sybil attack (using multpile node ids)?
-12. Does the g-greedy strategy allow for the balance attack?
+1. How does the network recover from forks (accidental & intentional)?
+2. Is there any advantage gained from intentionally forking the network?
+3. How much storage power is needed for the private attack?
+4. Is selfish farming even possible?
+5. Do forking attacks allow for a balance attack?
+6. How to eliminate public simulation?
+7. How to constrain private simulation?
+8. How far into the future can nodes solve (predict)?
+9. How far into the future will nodes apply blocks?
+
+* on-demand encoding (and hybrid version)
+* Do we need incentives for uncles?
+* Attacks on the shared clock
+* Sybil attacks and piece/node-id proximity rule
+* Are there incentives for pooled mining?
+* history rewriting attacks
+* ASIC and GPU resistance of Sloth (memory bandwidth hardness)
+* discuss implications of multiple valid blocks per round (easier to fork/balance?)
+
+### Goals
+
+1. Explain how the honest network converges and manages forks
+2. Show that less than 51% storage attacks are not possible with sufficient k-depth.
+3. Show that substituting computation for storage is irrational.
+4. Show that selfish farming is impossible.
+5. Show that simulation (and history rewriting) are severely constrained.
+6. Show how bribery attacks are constrained.
 
 ### Honest Network Convergence
 
-In a traditional proof-of-work blockchain, such as Bitcoin, it takes ten minutes, on average, for a miner to find a valid solution to the block challenge, while it takes less than thirty seconds for the new block to propogate to all miners on the network. In a proof-of-capacity blockchain, such as Subspace, it takes a few milliesconds for a farmer to solve the block challenge, but up to a second for the block to propagate across the network. 
+* Operation of the honest network
+* Defining a fork (two blocks at the same height with different parents)
+* Probability of an accidental fork
+* Intentionally creating forks (how & why)
+* Recovery from a fork (fork choice rule)
 
-Blocks take much less time to produce than to propagate across the network
-Multiple blocks may be found that are above the quality threshold
+### Private Attack
 
-For each challenge, there are as many potential solutions as there are replicas of the ledger, as each encoding of the piece under audit is valid. Critically, one encoding will always have the highest quality
+* How to execute and why
+* Probability of success based on k-depth
+* Caveats for Nakamoto's analysis
+* Note on the balance attack (used ICW forking)
+* Note on the sybil attack 
 
+### Selfish Farming
 
-For each block there is one challenge, with many possible solutions
-How do we know which is the best solution
+* what is selfish mining
+* define selfish farming
+* is subspace race-free (like Spacemesh)
+* show that no advantage may be gained
 
-### Broadcasting Ahead of the Deadline
+### Time-Space Trade-off Attacks
 
-### Less than 50% Storage Attacks
-
-### On-Demand Encoding (Space-Time Tradeoff)
+* show how much computation is needed for naive encoding on-demand
+* describe the compression attack
+* show how much computation is needed for the compression attack
+* describe the countermeasure for the computation attack
+* show how much computation is needed based on the nonce update interval
+* show implications for fairness attacks
+* show implication for 51% computation attacks
+* examine combined storage and computation attacks
 
 ### Simulation Attacks
 
-### History Rewriting Attacks
+* state the advantage gained from simulation
+* show the impact of challenge re-use
+* show how to derive the challenge securely
+* state the expected advantage an attacker may gain
+* show this applies to recent and deep forks
+
+### Bribery Attacks
+
+* show how far into the future any farmer may predict (within and between epochs)
+* explain how the bribery attack works
+* show the relation between k-depth and c-correlation to achieve security
+
+### Remaining Assumptions
+
+1. Random Oracles
+2. Digital Signatures
+3. Modular Square Roots
+4. Shared Clock
