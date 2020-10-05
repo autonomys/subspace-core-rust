@@ -6,6 +6,7 @@ use log::*;
 use serde::{Deserialize, Serialize};
 use static_assertions::_core::fmt;
 use static_assertions::_core::fmt::{Debug, Display};
+use std::net::SocketAddr;
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub enum GossipMessage {
@@ -28,7 +29,7 @@ impl Display for GossipMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct BlocksRequest {
-    pub(crate) timeslot: u64,
+    pub(crate) block_height: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -38,7 +39,7 @@ pub(crate) struct BlocksResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum RequestMessage {
-    BlocksRequest(BlocksRequest),
+    Blocks(BlocksRequest),
 }
 
 impl Display for RequestMessage {
@@ -47,7 +48,7 @@ impl Display for RequestMessage {
             f,
             "{}",
             match self {
-                Self::BlocksRequest { .. } => "BlockRequest",
+                Self::Blocks { .. } => "Blocks",
             }
         )
     }
@@ -55,7 +56,7 @@ impl Display for RequestMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum ResponseMessage {
-    BlocksResponse(BlocksResponse),
+    Blocks(BlocksResponse),
 }
 
 impl Display for ResponseMessage {
@@ -64,7 +65,41 @@ impl Display for ResponseMessage {
             f,
             "{}",
             match self {
-                Self::BlocksResponse { .. } => "BlockResponse",
+                Self::Blocks { .. } => "Blocks",
+            }
+        )
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum InternalRequestMessage {
+    Peers,
+}
+
+impl Display for InternalRequestMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Peers { .. } => "Peers",
+            }
+        )
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum InternalResponseMessage {
+    Peers(Vec<SocketAddr>),
+}
+
+impl Display for InternalResponseMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Peers { .. } => "Peers",
             }
         )
     }
@@ -73,8 +108,22 @@ impl Display for ResponseMessage {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum Message {
     Gossip(GossipMessage),
-    Request { id: u32, message: RequestMessage },
-    Response { id: u32, message: ResponseMessage },
+    Request {
+        id: u32,
+        message: RequestMessage,
+    },
+    Response {
+        id: u32,
+        message: ResponseMessage,
+    },
+    InternalRequest {
+        id: u32,
+        message: InternalRequestMessage,
+    },
+    InternalResponse {
+        id: u32,
+        message: InternalResponseMessage,
+    },
 }
 
 impl Display for Message {
@@ -83,6 +132,8 @@ impl Display for Message {
             Self::Gossip(message) => write!(f, "{}", message),
             Self::Request { id, message } => write!(f, "{}:{}", message, id),
             Self::Response { id, message } => write!(f, "{}:{}", message, id),
+            Message::InternalRequest { id, message } => write!(f, "{}:{}", message, id),
+            Message::InternalResponse { id, message } => write!(f, "{}:{}", message, id),
         }
     }
 }

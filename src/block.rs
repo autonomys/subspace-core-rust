@@ -6,15 +6,6 @@ use log::warn;
 use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 
-pub enum BlockState {
-    /// block has been validated and is being tracked
-    Published,
-    /// randomness has closed for the block's epoch and it has been ordered
-    Ordered,
-    /// content block has k unique ancestors
-    Confirmed,
-}
-
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct Block {
     pub proof: Proof,

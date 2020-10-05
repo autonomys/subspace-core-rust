@@ -1,6 +1,7 @@
 #![feature(try_blocks)]
 #![feature(const_int_pow)]
 #![feature(drain_filter)]
+#![feature(map_first_last)]
 
 use async_std::sync::{Arc, Mutex};
 use static_assertions::const_assert;
@@ -13,6 +14,7 @@ pub mod crypto;
 pub mod farmer;
 pub mod ledger;
 pub mod manager;
+pub mod metablocks;
 pub mod network;
 pub mod plot;
 pub mod plotter;
@@ -48,7 +50,12 @@ pub const BLOCKS_PER_ENCODING: usize = PIECE_SIZE / PRIME_SIZE_BYTES;
 pub const ENCODING_LAYERS_TEST: usize = 1;
 pub const ENCODING_LAYERS_PROD: usize = BLOCKS_PER_ENCODING;
 pub const PLOT_UPDATE_INTERVAL: usize = 10000;
-pub const MAX_PEERS: usize = 8;
+pub const MIN_CONNECTED_PEERS: usize = 4;
+pub const MAX_CONNECTED_PEERS: usize = 20;
+pub const MIN_PEERS: usize = 10;
+pub const MAX_PEERS: usize = 100;
+// TODO: Is this a good value?
+pub const MAINTAIN_PEERS_INTERVAL: Duration = Duration::from_secs(60);
 pub const CONFIRMATION_DEPTH: usize = 6;
 pub const DEV_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";
@@ -62,9 +69,9 @@ pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 4;
 // pub const EPOCH_CLOSE_WAIT_TIME: u64 = CHALLENGE_LOOKBACK - 2;
 /// Time in epochs
 pub const EPOCH_CLOSE_WAIT_TIME: u64 = 2;
-pub const TIMESLOTS_PER_EPOCH: u64 = 10;
+pub const TIMESLOTS_PER_EPOCH: u64 = 32;
 
-pub const EPOCHS_PER_EON: u64 = 2;
+pub const EPOCHS_PER_EON: u64 = 2016;
 pub const SOLUTION_RANGE_LOOKBACK_EONS: u64 = 3;
 
 // Assertions about acceptable values for above parameters:

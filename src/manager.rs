@@ -7,8 +7,10 @@ use crate::network::messages::{
 };
 use crate::network::{Network, NodeType};
 use crate::timer::EpochTracker;
+use crate::transaction::Transaction;
 use crate::{
-    CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+    timer, CHALLENGE_LOOKBACK_EPOCHS, CONSOLE, EPOCH_GRACE_PERIOD, MIN_CONNECTED_PEERS, PLOT_SIZE,
+    TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
@@ -55,6 +57,27 @@ impl Display for ProtocolMessage {
     }
 }
 
+pub type SharedLedger = Arc<Mutex<Ledger>>;
+
+/// start the timer after syncing the ledger
+pub fn start_timer(
+    timer_to_farmer_tx: Sender<FarmerMessage>,
+    is_farming: bool,
+    epoch_tracker: EpochTracker,
+    genesis_timestamp: u64,
+    next_timeslot: u64,
+    ledger: SharedLedger,
+) {
+    async_std::task::spawn(timer::run(
+        timer_to_farmer_tx,
+        epoch_tracker,
+        is_farming,
+        genesis_timestamp,
+        next_timeslot,
+        ledger,
+    ));
+}
+
 /// Starts the manager process, a broker loop that acts as the central async message hub for the node
 pub async fn run(
     node_type: NodeType,
@@ -64,10 +87,10 @@ pub async fn run(
     network: Network,
     main_to_main_tx: Sender<ProtocolMessage>,
     state_sender: crossbeam_channel::Sender<AppState>,
-    timer_to_solver_tx: Sender<FarmerMessage>,
+    timer_to_farmer_tx: Sender<FarmerMessage>,
     epoch_tracker: EpochTracker,
 ) {
-    let ledger = Arc::new(Mutex::new(ledger));
+    let ledger: SharedLedger = Arc::new(Mutex::new(ledger));
     {
         let network = network.clone();
         let epoch_tracker = epoch_tracker.clone();
@@ -85,9 +108,9 @@ pub async fn run(
                         );
 
                         // TODO: need to reference block by proof not by full block
-                        let block_id = block.get_id();
+                        let proof_id = block.proof.get_id();
 
-                        if ledger.blocks.contains_key(&block_id) {
+                        if ledger.metablocks.contains_key(&proof_id) {
                             warn!("Received a block proposal via gossip for known block, ignoring");
                             continue;
                         }
@@ -170,8 +193,27 @@ pub async fn run(
                         }
                     }
                     GossipMessage::TxProposal { tx } => {
-                        // TODO: Handle this
+                        let tx_id = tx.get_id();
+                        let mut ledger = ledger.lock().await;
 
+                        // check to see if we already have the tx
+                        if ledger.txs.contains_key(&tx_id) {
+                            warn!("Received a duplicate tx via gossip, ignoring");
+                            continue;
+                        }
+
+                        // validate the tx
+                        let from_account_state = ledger.balances.get(&tx.from_address);
+                        if !tx.is_valid(from_account_state) {
+                            warn!("Received an invalid tx via gossip, ignoring");
+                            continue;
+                        }
+
+                        // add to tx database and mempool
+                        ledger.txs.insert(tx_id, Transaction::Credit(tx.clone()));
+                        ledger.tx_mempool.insert(tx_id);
+
+                        // re-gossip transaction
                         network
                             .regossip(&peer_addr, GossipMessage::TxProposal { tx })
                             .await;
@@ -192,14 +234,13 @@ pub async fn run(
 
                 async_std::task::spawn(async move {
                     match message {
-                        RequestMessage::BlocksRequest(BlocksRequest { timeslot }) => {
+                        RequestMessage::Blocks(BlocksRequest { block_height }) => {
                             // TODO: check to make sure that the requested timeslot is not ahead of local timeslot
-                            let blocks = ledger.lock().await.get_blocks_by_timeslot(timeslot);
+                            let blocks = ledger.lock().await.get_blocks_by_height(block_height);
 
                             drop(
-                                response_sender.send(ResponseMessage::BlocksResponse(
-                                    BlocksResponse { blocks },
-                                )),
+                                response_sender
+                                    .send(ResponseMessage::Blocks(BlocksResponse { blocks })),
                             );
                         }
                     }
@@ -214,11 +255,19 @@ pub async fn run(
         // if gateway init the genesis block set and then start the timer
         if node_type == NodeType::Gateway {
             // init ledger from genesis
-            ledger
-                .lock()
-                .await
-                .init_from_genesis(timer_to_solver_tx.clone())
-                .await;
+            let genesis_timestamp = ledger.lock().await.init_from_genesis().await;
+
+            ledger.lock().await.timer_is_running = true;
+
+            // start the timer
+            start_timer(
+                timer_to_farmer_tx.clone(),
+                true,
+                epoch_tracker.clone(),
+                genesis_timestamp,
+                CHALLENGE_LOOKBACK_EPOCHS * TIMESLOTS_PER_EPOCH,
+                Arc::clone(&ledger),
+            );
         }
 
         loop {
@@ -296,35 +345,76 @@ pub async fn run(
 
                 let is_farming = matches!(node_type, NodeType::Gateway | NodeType::Farmer);
 
-                let mut timeslot = 0;
+                let mut timeslot: u64 = 0;
+                let mut block_height = 0;
                 loop {
-                    match network.request_blocks(timeslot).await {
+                    match network.request_blocks(block_height).await {
                         Ok(blocks) => {
-                            let mut ledger = ledger.lock().await;
+                            // TODO: may be able to work with timeslot since we are not creating blocks
+                            let mut locked_ledger = ledger.lock().await;
                             // TODO: this is mainly for testing, later this will be replaced by state chain sync
                             // so there is no need for validating the block or timestamp
 
-                            // TODO: sort the blocks lexicographically (on client or server)
+                            // first retrieves all applied blocks (ledger.applied_blocks_by_height)
+                            // then retrieves all pending blocks (ledger.pending_blocks_by_height)
+                            // finally retrieves all staged blocks (ledger.staged_blocks)
+                            // if no blocks we whould be at (or near) the current timeslot
+                            // will continue returning no blocks until we reach the current timeslot
 
-                            // apply each block for the timeslot
-                            for block in blocks.into_iter() {
-                                ledger.apply_block_from_sync(block).await;
+                            // TODO: keep track of pending blocks in the console to see how long they remain pending
+
+                            if blocks.len() > 0 {
+                                let block_timeslot = blocks[0].proof.timeslot;
+
+                                // skip forward to the timeslot for the next block height
+                                while timeslot < block_timeslot {
+                                    // advance epochs
+                                    if (timeslot + 1) % TIMESLOTS_PER_EPOCH as u64 == 0 {
+                                        // create new epoch
+                                        let current_epoch = epoch_tracker
+                                            .advance_epoch(&locked_ledger.blocks_on_longest_chain)
+                                            .await;
+
+                                        debug!(
+                                            "Closed randomness for epoch {} during sync",
+                                            current_epoch - 1
+                                        );
+
+                                        debug!(
+                                            "Created a new empty epoch during sync blocks for index {}",
+                                            current_epoch
+                                        );
+                                    }
+                                    // advance timeslot
+                                    timeslot += 1;
+                                }
+
+                                // stage each block for the block_height
+                                for block in blocks.into_iter() {
+                                    locked_ledger.stage_block(&block).await;
+                                }
+
+                                // apply all referenced blocks
+                                locked_ledger.apply_referenced_blocks().await;
                             }
 
                             let next_timeslot_arrival_time = Duration::from_millis(
                                 ((timeslot + 1) * TIMESLOT_DURATION)
-                                    + ledger.genesis_timestamp as u64,
+                                    + locked_ledger.genesis_timestamp as u64,
                             );
 
                             let time_now = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .expect("Time went backwards");
 
+                            // check if we have arrived at the next timeslot
                             if next_timeslot_arrival_time < time_now {
                                 // increment the epoch on boundary
                                 if (timeslot + 1) % TIMESLOTS_PER_EPOCH as u64 == 0 {
                                     // create new epoch
-                                    let current_epoch = epoch_tracker.advance_epoch().await;
+                                    let current_epoch = epoch_tracker
+                                        .advance_epoch(&locked_ledger.blocks_on_longest_chain)
+                                        .await;
 
                                     debug!(
                                         "Closed randomness for epoch {} during sync",
@@ -336,20 +426,30 @@ pub async fn run(
                                         current_epoch
                                     );
                                 }
-                                // request the next timeslot
+                                // increment the timeslot
                                 timeslot += 1;
+
+                                // request the next block height
+                                block_height += 1;
                             } else {
                                 // once we have all blocks, apply cached gossip
+
                                 // call sync and start timer
                                 info!("Applying cached blocks");
-                                match ledger.apply_cached_blocks(timeslot).await {
+                                match locked_ledger.apply_cached_blocks(block_height).await {
                                     Ok(timeslot) => {
                                         info!("Starting the timer from genesis time");
 
-                                        ledger.start_timer(
-                                            timer_to_solver_tx.clone(),
-                                            timeslot,
+                                        locked_ledger.timer_is_running = true;
+
+                                        // start the timer
+                                        start_timer(
+                                            timer_to_farmer_tx.clone(),
                                             is_farming,
+                                            epoch_tracker.clone(),
+                                            locked_ledger.genesis_timestamp,
+                                            timeslot,
+                                            Arc::clone(&ledger),
                                         );
                                     }
                                     Err(_) => {
@@ -362,8 +462,8 @@ pub async fn run(
                         Err(error) => {
                             // TODO: Not panic, retry
                             panic!(
-                                "Failed to request blocks for timeslot {}: {:?}",
-                                timeslot, error
+                                "Failed to request blocks for block_height {}: {:?}",
+                                block_height, error
                             );
                         }
                     }
@@ -380,7 +480,7 @@ pub async fn run(
             loop {
                 let mut state = network.get_state().await;
                 state.node_type = node_type.to_string();
-                state.peers = state.peers + "/" + &MAX_PEERS.to_string()[..];
+                state.peers = state.peers + "/" + &MIN_CONNECTED_PEERS.to_string()[..];
                 state.blocks = "TODO".to_string();
                 state.pieces = match node_type {
                     NodeType::Gateway => PLOT_SIZE.to_string(),

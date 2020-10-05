@@ -5,16 +5,20 @@ use crossbeam_channel::unbounded;
 use futures::join;
 use log::LevelFilter;
 use log::*;
-use manager::ProtocolMessage;
-use network::{Network, NodeType};
 use std::path::PathBuf;
 use std::thread;
 use std::{env, fs};
 use subspace_core_rust::farmer::FarmerMessage;
 use subspace_core_rust::ledger::Ledger;
+use subspace_core_rust::manager::ProtocolMessage;
+use subspace_core_rust::network::{Network, NodeType};
 use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
-use subspace_core_rust::*;
+use subspace_core_rust::{
+    console, crypto, farmer, manager, plotter, rpc, CONSOLE, DEV_GATEWAY_ADDR,
+    MAINTAIN_PEERS_INTERVAL, MAX_CONNECTED_PEERS, MAX_PEERS, MIN_CONNECTED_PEERS, MIN_PEERS,
+    PLOT_SIZE,
+};
 use tui_logger::{init_logger, set_default_level};
 
 /* ToDo
@@ -140,6 +144,11 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         } else {
             node_addr
         },
+        MIN_CONNECTED_PEERS,
+        MAX_CONNECTED_PEERS,
+        MIN_PEERS,
+        MAX_PEERS,
+        MAINTAIN_PEERS_INTERVAL,
     );
     let network = network_fut.await.unwrap();
     if node_type != NodeType::Gateway {
@@ -149,6 +158,13 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
             .connect_to(DEV_GATEWAY_ADDR.parse().unwrap())
             .await
             .unwrap();
+
+        // Connect to more peers if possible
+        for _ in 0..MIN_CONNECTED_PEERS {
+            if let Some(peer) = network.get_random_disconnected_peer().await {
+                drop(network.connect_to(peer).await);
+            }
+        }
     }
 
     // manager loop

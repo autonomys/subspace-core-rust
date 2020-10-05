@@ -33,17 +33,10 @@ enum ReadRequests {
         index: usize,
         result_sender: oneshot::Sender<io::Result<Piece>>,
     },
-    FindByTag {
-        tag: u64,
-        result_sender: oneshot::Sender<io::Result<(u64, usize)>>,
-    },
     FindByRange {
         target: Tag,
         range: u64,
         result_sender: oneshot::Sender<io::Result<Vec<(Tag, usize)>>>,
-    },
-    GetKeys {
-        result_sender: oneshot::Sender<io::Result<Vec<u64>>>,
     },
 }
 
@@ -163,28 +156,6 @@ impl Plot {
                         None => {
                             return;
                         }
-                        Some(ReadRequests::FindByTag { tag, result_sender }) => {
-                            // TODO: Remove unwrap
-                            let (best_tag, index) = task::spawn_blocking({
-                                let tags_db = Arc::clone(&tags_db);
-                                move || {
-                                    let mut iter = tags_db.raw_iterator();
-
-                                    iter.seek(tag.to_le_bytes());
-                                    // TODO: Remove unwrap
-                                    let best_tag = iter.key().unwrap();
-                                    let index = iter.value().unwrap();
-
-                                    (
-                                        u64::from_le_bytes(best_tag.try_into().unwrap()),
-                                        usize::from_le_bytes(index.try_into().unwrap()),
-                                    )
-                                }
-                            })
-                            .await;
-
-                            let _ = result_sender.send(Ok((best_tag, index)));
-                        }
                         Some(ReadRequests::FindByRange {
                             target,
                             range,
@@ -259,29 +230,6 @@ impl Plot {
                             .await;
 
                             let _ = result_sender.send(Ok(solutions));
-                        }
-                        Some(ReadRequests::GetKeys { result_sender }) => {
-                            // TODO: Remove unwrap
-                            let keys = task::spawn_blocking({
-                                let tags_db = Arc::clone(&tags_db);
-                                move || {
-                                    let mut iter = tags_db.raw_iterator();
-                                    let mut keys: Vec<u64> = Vec::new();
-
-                                    iter.seek_to_first();
-                                    while iter.key().is_some() {
-                                        keys.push(u64::from_be_bytes(
-                                            iter.key().unwrap().try_into().unwrap(),
-                                        ));
-                                        iter.next();
-                                    }
-
-                                    keys
-                                }
-                            })
-                            .await;
-
-                            let _ = result_sender.send(Ok(keys));
                         }
                     }
                 }
@@ -405,23 +353,6 @@ impl Plot {
             .expect("Read encoding result sender was dropped")
     }
 
-    pub async fn find_by_tag(&self, tag: u64) -> io::Result<(u64, usize)> {
-        let (result_sender, result_receiver) = oneshot::channel();
-
-        self.read_requests_sender
-            .clone()
-            .send(ReadRequests::FindByTag { tag, result_sender })
-            .await
-            .expect("Failed sending get by tag request");
-
-        // If fails - it is either full or disconnected, we don't care either way, so ignore result
-        let _ = self.any_requests_sender.clone().try_send(());
-
-        result_receiver
-            .await
-            .expect("Get by tag result sender was dropped")
-    }
-
     pub async fn find_by_range(
         &self,
         target: [u8; 8],
@@ -445,23 +376,6 @@ impl Plot {
         result_receiver
             .await
             .expect("Get by range result sender was dropped")
-    }
-
-    pub async fn get_keys(&self) -> io::Result<Vec<u64>> {
-        let (result_sender, result_receiver) = oneshot::channel();
-
-        self.read_requests_sender
-            .clone()
-            .send(ReadRequests::GetKeys { result_sender })
-            .await
-            .expect("Failed sending get keys request");
-
-        // If fails - it is either full or disconnected, we don't care either way, so ignore result
-        let _ = self.any_requests_sender.clone().try_send(());
-
-        result_receiver
-            .await
-            .expect("Get keys result sender was dropped")
     }
 
     /// Writes a piece to the plot by index, will overwrite if piece exists (updates)
@@ -524,6 +438,7 @@ mod tests {
     use async_std::path::PathBuf;
     use rand::prelude::*;
     use std::fs;
+    use std::time::Duration;
 
     struct TargetDirectory {
         path: PathBuf,
@@ -544,8 +459,8 @@ mod tests {
     }
 
     impl TargetDirectory {
-        fn new() -> Self {
-            let path = PathBuf::from("target").join("test");
+        fn new(test_name: &str) -> Self {
+            let path = PathBuf::from("target").join(test_name);
 
             fs::create_dir_all(&path).unwrap();
 
@@ -553,18 +468,122 @@ mod tests {
         }
     }
 
+    fn init() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
+
     #[async_std::test]
-    async fn test_basic() {
-        let path = TargetDirectory::new();
+    async fn test_read_write() {
+        init();
+        let path = TargetDirectory::new("read_write");
 
         let piece = crypto::generate_random_piece();
-        let tag = rand::thread_rng().gen::<u64>();
+        let nonce = rand::thread_rng().gen::<u64>();
         let index = 0;
 
         let plot = Plot::open_or_create(&path).await.unwrap();
-        plot.write(piece, tag, index).await.unwrap();
+        assert_eq!(true, plot.is_empty().await);
+        plot.write(piece, nonce, index).await.unwrap();
+        assert_eq!(false, plot.is_empty().await);
         let extracted_piece = plot.read(index).await.unwrap();
 
-        assert_eq!(extracted_piece[..], piece[..]);
+        assert_eq!(piece[..], extracted_piece[..]);
+
+        drop(plot);
+
+        async_std::task::sleep(Duration::from_millis(100)).await;
+
+        // Make sure it is still not empty on reopen
+        let plot = Plot::open_or_create(&path).await.unwrap();
+        assert_eq!(false, plot.is_empty().await);
+        drop(plot);
+
+        // Let plot to destroy gracefully, otherwise may get "pure virtual method called
+        // terminate called without an active exception" message
+        async_std::task::sleep(Duration::from_millis(100)).await;
+    }
+
+    #[async_std::test]
+    async fn test_find_by_tag() {
+        init();
+        let path = TargetDirectory::new("find_by_tag");
+
+        let plot = Plot::open_or_create(&path).await.unwrap();
+        for index in 0..1024 {
+            let piece = crypto::generate_random_piece();
+            let nonce = rand::thread_rng().gen::<u64>();
+            plot.write(piece, nonce, index).await.unwrap();
+        }
+
+        {
+            let target = [0u8, 0, 0, 0, 0, 0, 0, 1];
+            let solution_range =
+                u64::from_be_bytes([0u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+            let solutions = plot.find_by_range(target, solution_range).await.unwrap();
+            // This is probabilistic, but should be fine most of the time
+            assert!(!solutions.is_empty());
+            // Wraps around
+            let lower = u64::from_be_bytes(target).wrapping_sub(solution_range / 2);
+            let upper = u64::from_be_bytes(target) + solution_range / 2;
+            for (solution, _) in solutions {
+                let solution = u64::from_be_bytes(solution);
+                assert!(
+                    solution >= lower || solution <= upper,
+                    "Solution {:?} must be over wrapped lower edge {:?} or under upper edge {:?}",
+                    solution.to_be_bytes(),
+                    lower.to_be_bytes(),
+                    upper.to_be_bytes(),
+                );
+            }
+        }
+
+        {
+            let target = [0xff_u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe];
+            let solution_range =
+                u64::from_be_bytes([0u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+            let solutions = plot.find_by_range(target, solution_range).await.unwrap();
+            // This is probabilistic, but should be fine most of the time
+            assert!(!solutions.is_empty());
+            // Wraps around
+            let lower = u64::from_be_bytes(target) - solution_range / 2;
+            let upper = u64::from_be_bytes(target).wrapping_add(solution_range / 2);
+            for (solution, _) in solutions {
+                let solution = u64::from_be_bytes(solution);
+                assert!(
+                    solution >= lower || solution <= upper,
+                    "Solution {:?} must be over lower edge {:?} or under wrapped upper edge {:?}",
+                    solution.to_be_bytes(),
+                    lower.to_be_bytes(),
+                    upper.to_be_bytes(),
+                );
+            }
+        }
+
+        {
+            let target = [0xef_u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+            let solution_range =
+                u64::from_be_bytes([0u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+            let solutions = plot.find_by_range(target, solution_range).await.unwrap();
+            // This is probabilistic, but should be fine most of the time
+            assert!(!solutions.is_empty());
+            let lower = u64::from_be_bytes(target) - solution_range / 2;
+            let upper = u64::from_be_bytes(target) + solution_range / 2;
+            for (solution, _) in solutions {
+                let solution = u64::from_be_bytes(solution);
+                assert!(
+                    solution >= lower && solution <= upper,
+                    "Solution {:?} must be over lower edge {:?} and under upper edge {:?}",
+                    solution.to_be_bytes(),
+                    lower.to_be_bytes(),
+                    upper.to_be_bytes(),
+                );
+            }
+        }
+
+        drop(plot);
+
+        // Let plot to destroy gracefully, otherwise may get "pure virtual method called
+        // terminate called without an active exception" message
+        async_std::task::sleep(Duration::from_millis(100)).await;
     }
 }

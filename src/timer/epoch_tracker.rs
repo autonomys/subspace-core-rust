@@ -1,12 +1,31 @@
 use crate::timer::Epoch;
 use crate::{
-    BlockId, CHALLENGE_LOOKBACK_EPOCHS, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME, PIECE_SIZE,
+    ProofId, CHALLENGE_LOOKBACK_EPOCHS, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME, PIECE_SIZE,
     SOLUTION_RANGE_LOOKBACK_EONS, TIMESLOTS_PER_EPOCH,
 };
 use async_std::sync::Mutex;
 use log::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/*
+   Deriving randomness based on k-depth
+
+   Track proof_ids by confirmation depth when applied in a BTreeMap<BlockHeight, Vec<ProofId>>
+   At epoch closure, take the lowest block_height and the smallest proof_id
+   Check to ensure that the proof is on the longest chain using proof_id set
+   Use that proof_id as the epoch_randomness
+
+   Why not just use applied_blocks_by_height?
+   How do we know which timeslot this corresponds to?
+
+   The height of a block is always parent_height + 1
+   What if the block is seen late?
+
+
+
+
+*/
 
 #[derive(Default)]
 struct Inner {
@@ -24,7 +43,7 @@ impl Inner {
         }
     }
 
-    fn advance_epoch(&mut self) -> u64 {
+    fn advance_epoch(&mut self, blocks_on_longest_chain: &HashSet<ProofId>) -> u64 {
         if self.epochs.is_empty() {
             self.current_epoch = 0;
         } else {
@@ -52,7 +71,8 @@ impl Inner {
             let close_epoch_index = current_epoch - EPOCH_CLOSE_WAIT_TIME;
             let epoch = self.epochs.get_mut(&close_epoch_index).unwrap();
 
-            epoch.close();
+            // TODO: pass in blocks_on_longest_chain
+            epoch.close_new(blocks_on_longest_chain);
 
             debug!(
                 "Closed epoch with index {}, randomness is {}",
@@ -163,31 +183,34 @@ impl EpochTracker {
     /// Move to the next epoch
     ///
     /// Returns current epoch index
-    pub async fn advance_epoch(&self) -> u64 {
-        self.inner.lock().await.advance_epoch()
+    pub async fn advance_epoch(&self, blocks_on_longest_chain: &HashSet<ProofId>) -> u64 {
+        self.inner
+            .lock()
+            .await
+            .advance_epoch(blocks_on_longest_chain)
     }
 
     /// Returns `true` in case no blocks for this timeslot existed before
     pub async fn add_block_to_epoch(
         &self,
         epoch_index: u64,
-        timeslot: u64,
-        block_id: BlockId,
-        // distance_from_challenge: u64,
+        block_height: u64,
+        proof_id: ProofId,
         solution_range: u64,
+        blocks_on_longest_chain: &HashSet<ProofId>,
     ) {
         let mut inner = self.inner.lock().await;
 
         if inner.eon_to_solution_range.is_empty() {
             inner.fill_initial_solution_range(solution_range);
             // Create the initial epoch
-            inner.advance_epoch();
+            inner.advance_epoch(blocks_on_longest_chain);
         }
 
         inner
             .epochs
             .get_mut(&epoch_index)
             .unwrap()
-            .add_block_to_timeslot(timeslot, block_id);
+            .add_block_at_height(block_height, proof_id);
     }
 }

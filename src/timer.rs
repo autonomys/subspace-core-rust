@@ -1,7 +1,7 @@
 mod epoch;
 mod epoch_tracker;
-
 use crate::farmer::FarmerMessage;
+use crate::manager::SharedLedger;
 use crate::{CHALLENGE_LOOKBACK_EPOCHS, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION};
 use async_std::sync::Sender;
 pub use epoch::Epoch;
@@ -12,9 +12,10 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 pub async fn run(
     timer_to_farmer_tx: Sender<FarmerMessage>,
     epoch_tracker: EpochTracker,
-    next_timeslot: u64,
     is_farming: bool,
     genesis_timestamp: u64,
+    next_timeslot: u64,
+    ledger: SharedLedger,
 ) {
     info!(
         "Starting timer with genesis timestamp {}...",
@@ -37,18 +38,24 @@ pub async fn run(
         )
         .await;
 
-        // TODO: apply all blocks that were referenced in the previous round
-
-        // We are looking to epoch boundary, but also trying not to go ahead of clock
-        if next_timeslot % TIMESLOTS_PER_EPOCH == 0
-            && (current_epoch_index < next_timeslot / TIMESLOTS_PER_EPOCH)
         {
-            current_epoch_index = epoch_tracker.advance_epoch().await;
+            // apply all blocks that were referenced in the previous round (happy path)
+            let mut locked_ledger = ledger.lock().await;
+            locked_ledger.apply_referenced_blocks().await;
 
-            debug!(
-                "Timer is creating a new empty epoch at index {}",
-                current_epoch_index
-            );
+            // We are looking to epoch boundary, but also trying not to go ahead of clock
+            if next_timeslot % TIMESLOTS_PER_EPOCH == 0
+                && (current_epoch_index < next_timeslot / TIMESLOTS_PER_EPOCH)
+            {
+                current_epoch_index = epoch_tracker
+                    .advance_epoch(&locked_ledger.blocks_on_longest_chain)
+                    .await;
+
+                debug!(
+                    "Timer is creating a new empty epoch at index {}",
+                    current_epoch_index
+                );
+            }
         }
 
         debug!("Timer has arrived on timeslot: {}", next_timeslot);

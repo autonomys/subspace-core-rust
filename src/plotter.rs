@@ -62,7 +62,7 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
                         .unwrap();
 
                     // TODO: Replace challenge here and in other places
-                    let tag = u64::from_le_bytes(
+                    let nonce = u64::from_le_bytes(
                         crypto::create_hmac(&piece, b"subspace")[0..8]
                             .try_into()
                             .unwrap(),
@@ -72,7 +72,7 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
                         let plot = plot.clone();
 
                         async move {
-                            let _ = plot.write(piece, tag, index).await;
+                            let _ = plot.write(piece, nonce, index).await;
                         }
                     });
                     if let Some(b) = &bar {
