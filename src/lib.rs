@@ -50,7 +50,12 @@ pub const BLOCKS_PER_ENCODING: usize = PIECE_SIZE / PRIME_SIZE_BYTES;
 pub const ENCODING_LAYERS_TEST: usize = 1;
 pub const ENCODING_LAYERS_PROD: usize = BLOCKS_PER_ENCODING;
 pub const PLOT_UPDATE_INTERVAL: usize = 10000;
-pub const MAX_PEERS: usize = 8;
+pub const MIN_CONNECTED_PEERS: usize = 4;
+pub const MAX_CONNECTED_PEERS: usize = 20;
+pub const MIN_PEERS: usize = 10;
+pub const MAX_PEERS: usize = 100;
+// TODO: Is this a good value?
+pub const MAINTAIN_PEERS_INTERVAL: Duration = Duration::from_secs(60);
 pub const CONFIRMATION_DEPTH: usize = 6;
 pub const DEV_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";

@@ -9,7 +9,7 @@ use crate::network::{Network, NodeType};
 use crate::timer::EpochTracker;
 use crate::transaction::Transaction;
 use crate::{
-    timer, CHALLENGE_LOOKBACK_EPOCHS, CONSOLE, EPOCH_GRACE_PERIOD, MAX_PEERS, PLOT_SIZE,
+    timer, CHALLENGE_LOOKBACK_EPOCHS, CONSOLE, EPOCH_GRACE_PERIOD, MIN_CONNECTED_PEERS, PLOT_SIZE,
     TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::{Receiver, Sender};
@@ -234,14 +234,13 @@ pub async fn run(
 
                 async_std::task::spawn(async move {
                     match message {
-                        RequestMessage::BlocksRequest(BlocksRequest { block_height }) => {
+                        RequestMessage::Blocks(BlocksRequest { block_height }) => {
                             // TODO: check to make sure that the requested timeslot is not ahead of local timeslot
                             let blocks = ledger.lock().await.get_blocks_by_height(block_height);
 
                             drop(
-                                response_sender.send(ResponseMessage::BlocksResponse(
-                                    BlocksResponse { blocks },
-                                )),
+                                response_sender
+                                    .send(ResponseMessage::Blocks(BlocksResponse { blocks })),
                             );
                         }
                     }
@@ -481,7 +480,7 @@ pub async fn run(
             loop {
                 let mut state = network.get_state().await;
                 state.node_type = node_type.to_string();
-                state.peers = state.peers + "/" + &MAX_PEERS.to_string()[..];
+                state.peers = state.peers + "/" + &MIN_CONNECTED_PEERS.to_string()[..];
                 state.blocks = "TODO".to_string();
                 state.pieces = match node_type {
                     NodeType::Gateway => PLOT_SIZE.to_string(),
