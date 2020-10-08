@@ -4,24 +4,18 @@ use crate::timer::EpochTracker;
 use crate::transaction::{AccountAddress, AccountState, CoinbaseTx, Transaction, TxId};
 use crate::{
     crypto, sloth, ContentId, ProofId, Tag, BLOCK_REWARD, CHALLENGE_LOOKBACK_EPOCHS,
-    PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+    CONFIRMATION_DEPTH, MAX_EARLY_TIMESLOTS, MAX_LATE_TIMESLOTS, PRIME_SIZE_BITS,
+    TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 
-use crate::metablocks::{BlockStatus, MetaBlocks};
+use crate::metablocks::{MetaBlock, MetaBlocks};
+use async_std::task::JoinHandle;
 use log::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/* ToDo
- * ----
- *
- * Fix: self-adjusting difficulty
- * Track chain quality
- * Ensure that commits to the ledger are fully atomic
- *
- * TESTING
- * -------
+/* TESTING
  * Piece count is always 256 for testing for the merkle tree
  * Plot size is configurable, but must be a multiple of 256
  * For each challenge, solver will check every 256th piece starting at index and return the top N
@@ -30,89 +24,57 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
  *
 */
 
-/*
-    X 1. Replace block_id with proof_id throughout
-    X 2. Solve blocks (choose correct parent)
-    X 3. Stage blocks
-    X 4. Apply blocks (order then apply tx to balances)
-    X 5. Derive randomness for next epoch
-    ~ 6. Sync in the happy path
-    X 7. Apply transactions
-    ~ 8. Sync with late blocks
-    9. Finish remote block validation
-    10. Handle forks
-    11. Start a ledger spec
+// TODO: can we sync blocks by epoch
 
-    Case 1: Single block in each timeslot (some may be skipped)
-    Case 2: Multiple blocks in each timeslot
-    Case 3: Multiple blocks in successive timeslots
-    Case 4: Late blocks (seen by all in the next round)
-    Case 5: Unseen pointers (seen by some in the round, some in the next)
+// sync process
+// each proposer block and state block is stored in blocks by timeslot
+// request at each timeslot and return all blocks for that slot
+// bundle any transactions with transaction blocks
 
-    Next Steps
-    X call apply blocks in timer (nsure they are being applied)
-    X figure out why farmer dies on sync
-    X derive randomness
-    X revise sync process (double-check)
-    X draw a new reference diagram for better understanding
-    - verify blocks received via gossip
-    - how to verify a claim that a parent is on the longest chain?
-    - apply cached blocks during sync (test)
-    - ensure pending blocks on different levels are applied correctly
-
-    Simplifying Consensus
-    - remove staged_blocks temporary data structure
-    - single blocks_by_height data structure?
-    - stop tracking state of blocks in metablocks (why do we need this?)
-    - simplify ordering since we don't allow out of sequence blocks now
-    - detect and handle the fork event
-
-    Have to track
-    - all valid blocks are placed in metablocks -> with state pending
-        - HashMap<ProofId, MetaBlock>
-        - HashMap<ContentId, ProofId>
-    - new blocks are put into pending_blocks: HashSet<ContentId> as they are seen
-    - if a new block added to pending blocks references a current pending block, it is moved to blocks_by_height
-    - what if the new block references a block that is not in pending blocks?
-    - then we check the state in metablocks
-        - unknown -> we have not seen the block, try to apply the block again at the next timeslot?
-        - pending -> this should not occur (it should be in pending blocks then)
-        - referenced -> this is ok (we don't apply until the end of the round)
-        - applied -> this means we have a duplicate reference and the block is invalid
-    - referenced blocks are placed into blocks_by_height: BTreeMap<BlockHeight, Vec<ProofId>>
-    - as each timeslot closes any new level is ordered and applied
-    - how do we track which blocks are on the longest chain?
-
-
-    Understanding Forks
-    - If two or more blocks from different timeslots reference the same parent_id
-    - If two or more blocks from the same timeslot are seen
-
-*/
+// add a notion of tx blocks
 
 pub type BlockHeight = u64;
+pub type Timeslot = u64;
 
-#[derive(Debug, Clone)]
-pub struct PendingBlock {
+pub struct Head {
+    block_height: u64,
     content_id: ContentId,
-    // TODO: maybe don't need here since we have BlockStatus
-    is_referenced: bool,
 }
 
-// TODO: can we sync blocks by epoch
-// TODO: can we have a relational database for blocks and block states? maybe dgraph or redis
+// block: cached || staged
+// cached due to: received before sync or blocks found close together
+
+// on receipt of new block via gossip
+// if the parent is in metablocks -> stage
+// else -> cache into cached_blocks_by_pending_parent: <ContentId, Vec<Block>>
+// on receipt of parent -> stage cached block
+
+// what to do when we are syncing blocks?
+// cache all incoming gossip
+// request blocks from peer by timeslot, validate and stage
+// if block is cached, remove from cache
+// once we arrive at the current timeslot, apply all cached gossip
 
 pub struct Ledger {
+    /// the current confirmed credit balance of all subspace accounts
     pub balances: HashMap<AccountAddress, AccountState>,
+    /// storage container for blocks with metadata
     pub metablocks: MetaBlocks,
-    pub staged_blocks: HashSet<(BlockHeight, ProofId, ContentId)>,
-    pub pending_blocks: HashSet<ContentId>,
-    pub blocks_by_height: BTreeMap<BlockHeight, Vec<ProofId>>,
-    pub pending_blocks_by_height: BTreeMap<BlockHeight, BTreeMap<ProofId, PendingBlock>>,
-    pub applied_blocks_by_height: BTreeMap<BlockHeight, Vec<ProofId>>,
+    /// proof_ids for the last N blocks, to prevent duplicate gossip and content spamming
+    pub recent_proof_ids: HashSet<ProofId>,
+    /// record that allows for syncing the ledger by timeslot
+    pub proof_ids_by_timeslot: BTreeMap<Timeslot, Vec<ProofId>>,
+    /// container for blocks received who have an unknown parent
+    pub cached_blocks_by_parent_content_id: HashMap<ContentId, Vec<Block>>,
+    /// temporary container for blocks seen before their timeslot has arrived
+    pub early_blocks_by_timeslot: BTreeMap<Timeslot, Vec<Block>>,
+    /// all confirmed proposer blocks
     pub blocks_on_longest_chain: HashSet<ProofId>,
-    pub cached_proof_ids_by_timeslot: BTreeMap<u64, Vec<ProofId>>,
+    /// fork tracker for pending blocks, used to find the current head of longest chain
+    pub heads: Vec<Head>,
+    /// container for all txs
     pub txs: HashMap<TxId, Transaction>,
+    /// tracker for txs that have not yet been included in a tx block
     pub tx_mempool: HashSet<TxId>,
     pub epoch_tracker: EpochTracker,
     pub timer_is_running: bool,
@@ -124,6 +86,17 @@ pub struct Ledger {
     pub merkle_root: Vec<u8>,
     pub merkle_proofs: Vec<Vec<u8>>,
     pub tx_payload: Vec<u8>,
+    pub current_timeslot: u64,
+    timer_handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for Ledger {
+    fn drop(&mut self) {
+        let timer_handle: JoinHandle<()> = self.timer_handle.take().unwrap();
+        async_std::task::spawn(async move {
+            timer_handle.cancel().await;
+        });
+    }
 }
 
 impl Ledger {
@@ -139,19 +112,29 @@ impl Ledger {
         let prime_size = PRIME_SIZE_BITS;
         let sloth = sloth::Sloth::init(prime_size);
 
+        // spawn a background task
+        // assign to join_handle
+
+        let timer_handle = async_std::task::spawn(async {
+            // TODO: listen on the channel
+
+            // listen for the next timeslot
+            // increment the timeslot count
+            // stage early blocks for that timeslot
+        });
+
         // TODO: all of these data structures need to be periodically truncated
         Ledger {
             balances: HashMap::new(),
             metablocks: MetaBlocks::new(),
+            recent_proof_ids: HashSet::new(),
+            proof_ids_by_timeslot: BTreeMap::new(),
+            cached_blocks_by_parent_content_id: HashMap::new(),
+            early_blocks_by_timeslot: BTreeMap::new(),
+            blocks_on_longest_chain: HashSet::new(),
+            heads: Vec::new(),
             txs: HashMap::new(),
             tx_mempool: HashSet::new(),
-            staged_blocks: HashSet::new(),
-            pending_blocks: HashSet::new(),
-            blocks_by_height: BTreeMap::new(),
-            applied_blocks_by_height: BTreeMap::new(),
-            blocks_on_longest_chain: HashSet::new(),
-            cached_proof_ids_by_timeslot: BTreeMap::new(),
-            pending_blocks_by_height: BTreeMap::new(),
             genesis_timestamp: 0,
             timer_is_running: false,
             quality: 0,
@@ -162,49 +145,97 @@ impl Ledger {
             keys,
             tx_payload,
             merkle_proofs,
+            current_timeslot: 0,
+            timer_handle: Some(timer_handle),
         }
     }
 
-    /// returns either all applied or pending blocks for a given level
-    pub fn get_blocks_by_height(&self, height: u64) -> Vec<Block> {
-        let applied_blocks: Vec<Block> = self
-            .applied_blocks_by_height
-            .get(&height)
+    /// Update the timeslot, then validates and stages all early blocks that have arrived
+    pub async fn next_timeslot(&mut self) {
+        self.current_timeslot += 1;
+
+        // apply all early blocks
+        if self
+            .early_blocks_by_timeslot
+            .contains_key(&self.current_timeslot)
+        {
+            for block in self
+                .early_blocks_by_timeslot
+                .get(&self.current_timeslot)
+                .unwrap()
+                .clone()
+            {
+                debug!("Timeslot has arrived for early block, validating and staging");
+
+                if self.is_valid_proposer_block_that_has_arrived(&block).await {
+                    // TODO: have to make sure we don't reference the block (just check for last timeslot in create block)
+                    self.stage_block(&block).await;
+                }
+            }
+
+            self.early_blocks_by_timeslot.remove(&self.current_timeslot);
+        }
+    }
+
+    /// Returns all blocks seen for a given timeslot
+    pub fn get_blocks_by_timeslot(&self, timeslot: u64) -> Vec<Block> {
+        self.proof_ids_by_timeslot
+            .get(&timeslot)
             .map(|proof_ids| {
                 proof_ids
                     .iter()
                     .map(|proof_id| self.metablocks.blocks.get(proof_id).unwrap().block.clone())
                     .collect()
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
 
-        if applied_blocks.len() == 0 {
-            // if no pending blocks at that level, fetch from pending blocks
-            match self.pending_blocks_by_height.get(&height) {
-                Some(pending_blocks) => {
-                    return pending_blocks
-                        .keys()
-                        .map(|proof_id| self.metablocks.blocks.get(proof_id).unwrap().block.clone())
-                        .collect();
+    /// returns the tip of the longest chain as seen by this node
+    pub fn get_head(&self) -> ContentId {
+        self.heads[0].content_id
+    }
+
+    /// updates an existing branch, setting to head if longest, or creates a new branch
+    pub fn update_heads(&mut self, parent_id: ContentId, content_id: ContentId, block_height: u64) {
+        for (index, head) in self.heads.iter_mut().enumerate() {
+            if head.content_id == parent_id {
+                // updated existing head
+                head.block_height += 1;
+                head.content_id = content_id;
+
+                // check if existing branch has overtaken the current head
+                if index != 0 && head.block_height > self.heads[0].block_height {
+                    self.heads.swap(0, index);
                 }
-                None => {
-                    // if no pending blocks, fetch any staged blocks at the requested height
-                    return self
-                        .staged_blocks
-                        .iter()
-                        .filter(|(block_height, _, _)| block_height == &height)
-                        .map(|(_, proof_id, _)| {
-                            self.metablocks.blocks.get(proof_id).unwrap().block.clone()
-                        })
-                        .collect();
-                }
+                return;
             }
-        } else {
-            return applied_blocks;
         }
+
+        // else create a new branch -- cannot be longest head (unless first head)
+        self.heads.push(Head {
+            content_id,
+            block_height,
+        });
+    }
+
+    /// removes a branch that is equal to the current confirmed ledger
+    pub fn prune_branch(&mut self, content_id: ContentId) {
+        let mut remove_index: Option<usize> = None;
+        for (index, head) in self.heads.iter().enumerate() {
+            if head.content_id == content_id {
+                if index == 0 {
+                    panic!("Cannot prune head of the longest chain!");
+                }
+
+                remove_index = Some(index);
+            }
+        }
+
+        self.heads.remove(remove_index.expect("Branch must exist"));
     }
 
     /// Start a new chain from genesis as a gateway node
+    // TODO: this should solve from some genesis state block
     pub async fn init_from_genesis(&mut self) -> u64 {
         self.genesis_timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -249,7 +280,6 @@ impl Ledger {
 
                 let mut content = Content {
                     parent_id,
-                    uncle_ids: vec![],
                     proof_id,
                     proof_signature: self.keys.sign(&proof_id).to_bytes().to_vec(),
                     timestamp,
@@ -289,295 +319,18 @@ impl Ledger {
 
                 //TODO: this should wait for the correct time to arrive rather than waiting for a fixed amount of time
                 async_std::task::sleep(Duration::from_millis(timestamp - time_now as u64)).await;
-
-                // order blocks and apply transactions
-                self.apply_referenced_blocks().await;
             }
         }
 
         self.genesis_timestamp
     }
 
-    /// Searches for a pending block and references it, if not yet referenced
-    /// returns false if the pending block is not found
-    pub fn reference_pending_block(&mut self, proof_id: &ProofId) -> bool {
-        for pending_blocks in self.pending_blocks_by_height.values_mut() {
-            match pending_blocks.get_mut(proof_id) {
-                Some(pending_block) => {
-                    self.metablocks.reference(*proof_id);
-                    pending_block.is_referenced = true;
-                    return true;
-                }
-                None => {}
-            };
-        }
-
-        false
-    }
-
-    pub fn reference_pending_block_new(&mut self, proof_id: &ProofId) {
-        // check if the block is still pending
-        if !self.pending_blocks.contains(proof_id) {
-            match self.metablocks.get_status(&proof_id) {
-                BlockStatus::Referenced => {
-                    // change state to referenced in metablocks
-                    // remove from pending blocks set
-                    // add to blocks_by_height
-                }
-                BlockStatus::Applied => {
-                    // this is an invalid block
-                    // it should be discarded and not gossiped
-                    // this should be caught at block validation, not here
-                }
-                BlockStatus::Unknown => {
-                    // we have not seen the parent block yet
-                    // we can either wait for the parent and try again
-                    // or we can request the parent from the sender
-                    // we should not gossip until we have the parents though
-                    // the same should be done for included txs
-                }
-                _ => panic!("Logic error, pending block should not be in cached or staged state"),
-            };
-        }
-    }
-
-    pub fn apply_pending_block(&mut self, proof_id: &ProofId, block_height: &u64) {
-        self.metablocks.apply(*proof_id);
-        let pending_blocks = self
-            .pending_blocks_by_height
-            .get_mut(&block_height)
-            .unwrap();
-        pending_blocks.remove(proof_id);
-        if pending_blocks.len() == 0 {
-            self.pending_blocks_by_height.remove(&block_height);
-        }
-    }
-
-    /// Prepare the block for application once it is "seen" by some other block
-    pub async fn stage_block(&mut self, block: &Block) {
-        // save the coinbase tx
-        self.txs.insert(
-            block.coinbase_tx.get_id(),
-            Transaction::Coinbase(block.coinbase_tx.clone()),
-        );
-
-        let mut pruned_block = block.clone();
-        pruned_block.prune();
-        // TODO: Everything that happens here may need to be reversed if `add_block_to_epoch()` at
-        //  the end fails, which implies that this function should have a lock and not be called
-        //  concurrently
-
-        let proof_id = block.proof.get_id();
-
-        // check if cached and remove from pending gossip
-        if self.metablocks.contains_key(&proof_id) {
-            // remove from pending gossip
-            let mut is_empty = false;
-            self.cached_proof_ids_by_timeslot
-                .entry(block.proof.timeslot)
-                .and_modify(|proof_ids| {
-                    proof_ids
-                        .iter()
-                        .position(|prf_id| *prf_id == proof_id)
-                        .map(|index| proof_ids.remove(index));
-                    is_empty = proof_ids.is_empty();
-                });
-            if is_empty {
-                self.cached_proof_ids_by_timeslot
-                    .remove(&block.proof.timeslot);
-            }
-        }
-
-        let metablock = self.metablocks.stage(pruned_block);
-
-        // skip the genesis block
-        if block.proof.timeslot != 0 {
-            // TODO: how do we know the parent is actually on the longest chain?
-            let parent_proof_id = self
-                .metablocks
-                .get_proof_id_from_content_id(block.content.parent_id);
-
-            // add parent to longest chain since it is now referenced
-            self.blocks_on_longest_chain.insert(parent_proof_id);
-
-            // collect parent and uncle pointers seen by this block
-            let mut content_ids_seen_by_this_block = block.content.uncle_ids.clone();
-            content_ids_seen_by_this_block.push(block.content.parent_id);
-
-            // attempt to reference each pending block seen
-            content_ids_seen_by_this_block
-                .iter()
-                .map(|content_id| {
-                    self.metablocks
-                        .get_proof_id_from_content_id(*content_id)
-                        .clone()
-                })
-                .collect::<Vec<ProofId>>()
-                .iter()
-                .for_each(|proof_id| {
-                    // if it doesn't show as a pending block panic
-                    if !self.reference_pending_block(&proof_id) {
-                        // TODO: this should instead discard the block or wait for its parents
-                        panic!(
-                            "Cannot stage block that references an unknown content block with proof id {}",
-                            hex::encode(&proof_id[0..8]),
-                        );
-                    }
-                });
-        } else {
-            self.genesis_timestamp = block.content.timestamp;
-        }
-
-        // these blocks will not be created as pending until the end of the timeslot, but before the referenced blocks are applied
-        self.staged_blocks
-            .insert((metablock.height, metablock.proof_id, metablock.content_id));
-
-        // add to epoch tracker
-        self.epoch_tracker
-            .add_block_to_epoch(
-                block.proof.epoch,
-                metablock.height,
-                proof_id,
-                block.proof.solution_range,
-                &self.blocks_on_longest_chain,
-            )
-            .await;
-    }
-
-    /// order all seen blocks and apply transactions
-    pub async fn apply_referenced_blocks(&mut self) {
-        // first add all new pending blocks
-        // if we add them immediately they will reference each other
-        for (block_height, proof_id, content_id) in self.staged_blocks.drain().into_iter() {
-            let pending_block = PendingBlock {
-                content_id,
-                is_referenced: false,
-            };
-
-            // add the block to pending blocks
-            self.pending_blocks_by_height
-                .entry(block_height)
-                .and_modify(|pending_blocks| {
-                    pending_blocks.insert(proof_id, pending_block.clone());
-                })
-                .or_insert({
-                    let mut btreemap = BTreeMap::new();
-                    btreemap.insert(proof_id, pending_block);
-                    btreemap
-                });
-        }
-
-        // apply highest block first, then smallest proof
-        for (block_height, pending_blocks) in self.pending_blocks_by_height.clone().iter().rev() {
-            for (proof_id, pending_block) in pending_blocks.iter() {
-                if pending_block.is_referenced == true {
-                    // get the block
-                    let metablock = self.metablocks.blocks.get(proof_id).unwrap().clone();
-                    let block = metablock.block;
-
-                    // change state to applied and remove from pending blocks
-                    self.apply_pending_block(proof_id, block_height);
-
-                    // add to applied blocks by height
-                    self.applied_blocks_by_height
-                        .entry(metablock.height)
-                        .and_modify(|proof_ids| {
-                            proof_ids.push(*proof_id);
-                            proof_ids.sort();
-                        })
-                        .or_insert(vec![*proof_id]);
-
-                    debug!(
-                        "Applied block with proof_id: {} to the ledger",
-                        hex::encode(&proof_id[0..8])
-                    );
-
-                    // TODO: apply block to state buffer
-
-                    // TODO: make this cleaner with a single for loop
-                    // apply the coinbase tx
-                    match self.txs.get(&block.content.tx_ids[0]).unwrap() {
-                        Transaction::Coinbase(tx) => {
-                            // create or update account state
-                            self.balances
-                                .entry(tx.to_address)
-                                .and_modify(|account_state| account_state.balance += BLOCK_REWARD)
-                                .or_insert(AccountState {
-                                    nonce: 0,
-                                    balance: BLOCK_REWARD,
-                                });
-
-                            debug!("Applied a coinbase tx to balances");
-
-                            // TODO: add to state, may remove from tx db here
-                        }
-                        _ => panic!("The first tx must be a coinbase tx"),
-                    };
-
-                    // apply remaining credit txs
-                    for tx_id in block.content.tx_ids.iter().skip(1) {
-                        match self.txs.get(tx_id).unwrap() {
-                            Transaction::Credit(tx) => {
-                                // check if the tx has already been applied
-                                if !self.tx_mempool.contains(tx_id) {
-                                    warn!("Transaction has already been referenced by a previous block, skipping");
-                                    continue;
-                                }
-
-                                // ensure the tx is still valid
-                                let sender_account_state =
-                                    self.balances.get(&tx.from_address).expect(
-                                        "Existence of account state has already been validated",
-                                    );
-
-                                if sender_account_state.balance < tx.amount {
-                                    error!("Invalid transaction, from account state has insufficient funds, transaction will not be applied");
-                                    continue;
-                                }
-
-                                if sender_account_state.nonce >= tx.nonce {
-                                    error!("Invalid transaction, tx nonce has already been used, transaction will not be applied");
-                                    continue;
-                                }
-
-                                // debit the sender
-                                self.balances
-                                    .entry(tx.from_address)
-                                    .and_modify(|account_state| account_state.balance -= tx.amount);
-
-                                // credit  the receiver
-                                self.balances
-                                    .entry(tx.to_address)
-                                    .and_modify(|account_state| account_state.balance += tx.amount)
-                                    .or_insert(AccountState {
-                                        nonce: 0,
-                                        balance: tx.amount,
-                                    });
-
-                                // TODO: pay tx fee to farmer
-
-                                // remove from mem pool
-                                self.tx_mempool.remove(tx_id);
-
-                                // TODO: apply tx to state buffer, may remove from tx db here...
-                            }
-                            _ => panic!("Only the first tx may be a coinbase tx"),
-                        };
-                    }
-
-                    // TODO: update chain quality
-                }
-            }
-        }
-    }
-
-    /// roll back a block and all tx in the event of a fork and re-org
-    async fn _revert_referenced_block(&mut self) {
-        // TODO: complete this to handle forks and re-orgs
-    }
-
     /// create a new block locally from a valid farming solution
-    pub async fn create_and_apply_local_block(&mut self, solution: Solution) -> Block {
+    pub async fn create_and_apply_local_block(
+        &mut self,
+        solution: Solution,
+        sibling_content_ids: Vec<ContentId>,
+    ) -> Block {
         let proof = Proof {
             randomness: solution.randomness,
             epoch: solution.epoch_index,
@@ -602,37 +355,38 @@ impl Ledger {
             .expect("Time went backwards")
             .as_millis() as u64;
 
-        // for the largest block height, take the smallest proof as parent block
-        let (_, pending_block) = self
-            .pending_blocks_by_height
-            .last_key_value()
-            .expect("There should always be at least one pending level")
-            .1
-            .first_key_value()
-            .expect("There should always be at least on pending block for each level");
+        let mut longest_content_id = self.get_head();
+        if sibling_content_ids
+            .iter()
+            .any(|content_id| content_id == &longest_content_id)
+        {
+            // the block is referencing a sibling, get its parent instead
+            let sibling_proof_id = self
+                .metablocks
+                .content_to_proof_map
+                .get(&longest_content_id)
+                .expect("Sibling is in metablocks");
 
-        let longest_content_id = pending_block.content_id;
+            let sibling_metablock = self
+                .metablocks
+                .blocks
+                .get(sibling_proof_id)
+                .expect("Sibling is in metablocks");
+
+            longest_content_id = sibling_metablock.block.content.parent_id;
+        }
 
         debug!(
             "Parent content id for locally created block is: {}",
             hex::encode(&longest_content_id[0..8])
         );
 
-        // get all other unseen blocks as uncles
-        let unseen_uncles = self
-            .pending_blocks_by_height
-            .values()
-            .map(|pending_blocks| pending_blocks.values())
-            .flatten()
-            .filter(|pending_block| pending_block.is_referenced == false)
-            .map(|pending_block| pending_block.content_id)
-            .filter(|content_id| content_id != &longest_content_id)
-            .collect();
-
         // create the coinbase tx
         let proof_id = proof.get_id();
         let coinbase_tx = CoinbaseTx::new(BLOCK_REWARD, self.keys.public, proof_id);
         let mut tx_ids = vec![coinbase_tx.get_id()];
+
+        // TODO: split between proposer and tx block
 
         // add all txs in the mempool, sorted by hash
         let mut pending_tx_ids: Vec<TxId> = self.tx_mempool.iter().cloned().collect();
@@ -643,7 +397,6 @@ impl Ledger {
 
         let mut content = Content {
             parent_id: longest_content_id,
-            uncle_ids: unseen_uncles,
             proof_id,
             proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
             timestamp,
@@ -660,39 +413,14 @@ impl Ledger {
             data: Some(data),
         };
 
-        // get correct randomness for this block
-        let epoch = self
-            .epoch_tracker
-            .get_lookback_epoch(block.proof.epoch)
-            .await;
-
-        if !epoch.is_closed {
-            panic!("Epoch being used for randomness is still open!");
-        }
-
-        // check if the block is valid
-        let is_valid = block.is_valid(
-            &self.merkle_root,
-            &self.genesis_piece_hash,
-            &epoch.randomness,
-            &epoch.get_challenge_for_timeslot(block.proof.timeslot),
-            &self.sloth,
-        );
+        let is_valid = self.validate_block(&block).await;
         assert!(is_valid, "Local block must always be valid");
-
-        // stage the block for application once it is referenced
-        self.stage_block(&block).await;
 
         block
     }
 
-    /// validate and apply a block received via gossip
-    pub async fn validate_and_stage_remote_block(&mut self, block: Block) -> bool {
-        debug!(
-            "Validating and staging remote block for epoch: {} at timeslot {}",
-            block.proof.epoch, block.proof.timeslot
-        );
-
+    /// Validates that a block is internally consistent
+    async fn validate_block(&self, block: &Block) -> bool {
         // get correct randomness for this block
         let epoch = self
             .epoch_tracker
@@ -700,6 +428,7 @@ impl Ledger {
             .await;
 
         if !epoch.is_closed {
+            // TODO: ensure this cannot be exploited to crash a node
             panic!("Epoch being used for randomness is still open!");
         }
 
@@ -711,119 +440,540 @@ impl Ledger {
             &epoch.get_challenge_for_timeslot(block.proof.timeslot),
             &self.sloth,
         ) {
+            // TODO: blacklist this peer
+            return false;
+        }
+
+        true
+    }
+
+    /// Validates a proposer block received via sync during startup
+    pub async fn is_valid_proposer_block_from_sync(&mut self, block: &Block) -> bool {
+        // TODO: is this from the timeslot requested? else error
+
+        // is this a new block? else error
+        let proof_id = block.proof.get_id();
+
+        // is this a new block?
+        if self.recent_proof_ids.contains(&proof_id) {
+            error!("Received a block proposal via gossip for known block, ignoring");
+            return false;
+        }
+
+        // TODO: make this into a self-pruning data structure
+        // else add
+        self.recent_proof_ids.insert(proof_id);
+
+        // have we already received parent? else error
+        if !self
+            .metablocks
+            .content_to_proof_map
+            .contains_key(&block.content.parent_id)
+        {
+            error!("Received a block via sync with unknown parent");
             return false;
         }
 
         let parent_proof_id = self
             .metablocks
-            .get_proof_id_from_content_id(block.content.parent_id);
+            .content_to_proof_map
+            .get(&block.content.parent_id)
+            .unwrap();
+        let parent_metablock = self.metablocks.blocks.get(parent_proof_id).unwrap().clone();
 
-        // collect parent and uncle pointers seen by this block
-        let mut content_ids_seen_by_this_block = block.content.uncle_ids.clone();
-        content_ids_seen_by_this_block.push(block.content.parent_id);
-
-        // check to see if ancestors have been seen and have not been applied yet
-        for content_id in content_ids_seen_by_this_block.into_iter() {
-            match self.metablocks.content_to_proof_map.get(&content_id) {
-                Some(proof_id) => {
-                    let metablock = self.metablocks.blocks.get(proof_id).unwrap();
-                    match metablock.status {
-                        BlockStatus::Applied => {
-                            // only if the height of the block is greater than one
-
-                            warn!(
-                                "Invalid block, its parent has already been applied to the ledger"
-                            );
-                            // TODO: this is a fork
-                            // this block is not valid
-                        }
-                        _ => {}
-                    }
-                }
-                None => {
-                    // ancestor is unknown, cache the block
-                    warn!("Cannot validate block that contains unknown ancestor blocks");
-                    // TODO: cache the block and apply once we see the parent
-                    // will this even work with timeslots now?
-                    // unless we apply late blocks immediately if no other blocks in the previous round
-                    return false;
-                }
-            }
+        // ensure the parent is from an earlier timeslot
+        if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
+            error!("Received a block via sync whose parent is in the future");
+            return false;
         }
 
-        // TODO: if the block is from a past timeslot see if we can apply immediately or if it causes a fork
+        // is the parent not too far back? (no deep forks)
+        // compare parent block height to current block height of longest chain
+        if parent_metablock.height + CONFIRMATION_DEPTH as u64 >= self.heads[0].block_height {
+            error!("Receive a block via sync that would cause a deep fork");
+            return false;
+        }
 
-        // TODO: ensure the parent and all uncles are from an earlier timeslot
-        // get the timeslot of each and compare to the current timeslot
-
-        // TODO: ensure the block's parent is the head of the longest chain
-        // check that it is the last entry in the ids on longest chain (else we have a fork)
-
-        // TODO: ensure that we have all transactions for this block
-        // else we will need to wait or request them
-
-        // TODO: validate all transactions for this block (coinbase and credit)
-
-        // apply the block to the ledger`
-        self.stage_block(&block).await;
-
-        // TODO: check to see if this block was required for any cached blocks
+        // block is valid?
+        if !(self.validate_block(block).await) {
+            return false;
+        }
 
         true
     }
 
-    /// cache a block received via gossip ahead of the current epoch
-    pub fn cache_remote_block(&mut self, block: Block) {
-        // cache the block
-        // TODO: Does this need to be inserted here at all?
-        self.metablocks.cache(block.clone());
+    /// Validates a proposer block received via gossip
+    pub async fn is_valid_proposer_block_from_gossip(&mut self, block: &Block) -> bool {
+        debug!(
+            "Validating remote block for epoch: {} at timeslot {}",
+            block.proof.epoch, block.proof.timeslot
+        );
 
         let proof_id = block.proof.get_id();
 
-        // TODO: should be timeslot seen in, not the timeslot of the block (but timer hasn't started...)
-        // add to cached blocks tracker
-        self.cached_proof_ids_by_timeslot
+        // is this a new block?
+        if self.recent_proof_ids.contains(&proof_id) {
+            warn!("Received a block proposal via gossip for known block, ignoring");
+            return false;
+        }
+
+        // TODO: make this into a self-pruning data structure
+        // else add
+        self.recent_proof_ids.insert(proof_id);
+
+        // If node is still syncing the ledger, cache and apply on sync
+        if !self.timer_is_running {
+            trace!("Caching a block received via gossip before the ledger is synced");
+            self.cache_remote_block(block);
+            return false;
+        }
+
+        // has the proof's timeslot arrived?
+        if self.current_timeslot < block.proof.timeslot {
+            if self.current_timeslot - MAX_EARLY_TIMESLOTS > block.proof.timeslot {
+                // TODO: flag this peer
+                debug!("Ignoring a block that is too early");
+                return false;
+            }
+
+            // else cache and wait for arrival
+            self.early_blocks_by_timeslot
+                .entry(block.proof.timeslot)
+                .and_modify(|blocks| blocks.push(block.clone()))
+                .or_insert(vec![block.clone()]);
+
+            debug!("Caching a block that is early");
+            return false;
+        }
+
+        // is the timeslot recent enough?
+        if block.proof.timeslot > self.current_timeslot + MAX_LATE_TIMESLOTS {
+            // TODO: flag this peer
+            error!("Received a late block via gossip, ignoring");
+            return false;
+        }
+
+        // If we are not aware of the blocks parent, cache and apply once parent is seen
+        if !self
+            .metablocks
+            .content_to_proof_map
+            .contains_key(&block.content.parent_id)
+        {
+            debug!("Caching a block received via gossip with unknown parent");
+            self.cache_remote_block(block);
+            return false;
+        }
+
+        let parent_proof_id = self
+            .metablocks
+            .content_to_proof_map
+            .get(&block.content.parent_id)
+            .unwrap();
+        let parent_metablock = self.metablocks.blocks.get(parent_proof_id).unwrap().clone();
+
+        // ensure the parent is from an earlier timeslot
+        if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
+            // TODO: blacklist this peer
+            debug!("Ignoring a block whose parent is in the future");
+            return false;
+        }
+
+        // is the parent not too far back? (no deep forks)
+        // compare parent block height to current block height of longest chain
+        if parent_metablock.height + CONFIRMATION_DEPTH as u64 >= self.heads[0].block_height {
+            // TODO: blacklist this peer
+            debug!("Ignoring a block that would cause a deep fork");
+            return false;
+        }
+
+        // is the block valid?
+        if !(self.validate_block(block).await) {
+            return false;
+        }
+
+        true
+    }
+
+    /// Completes validation for a cached proposer block received via gossip whose parent has been staged
+    pub async fn is_valid_proposer_block_from_cache(&mut self, block: &Block) -> bool {
+        // is parent from earlier timeslot?
+        let parent_proof_id = self
+            .metablocks
+            .content_to_proof_map
+            .get(&block.content.parent_id)
+            .unwrap();
+        let parent_metablock = self.metablocks.blocks.get(parent_proof_id).unwrap().clone();
+
+        // ensure the parent is from an earlier timeslot
+        if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
+            // TODO: blacklist this peer
+            debug!("Ignoring a block whose parent is in the future");
+            return false;
+        }
+
+        // removed check for arrival time window, as this doesn't seem to apply to cached blocks
+
+        // is the block valid?
+        if !(self.validate_block(block).await) {
+            return false;
+        }
+
+        true
+    }
+
+    /// Completes validation for a proposer block received via gossip that was ahead of the timeslot received in and has now arrived
+    pub async fn is_valid_proposer_block_that_has_arrived(&mut self, block: &Block) -> bool {
+        // block is valid
+        if !(self.validate_block(block).await) {
+            return false;
+        }
+
+        // If we are not aware of the blocks parent, cache and apply once parent is seen
+        if !self
+            .metablocks
+            .content_to_proof_map
+            .contains_key(&block.content.parent_id)
+        {
+            debug!("Caching a block received via gossip with unknown parent");
+            self.cache_remote_block(block);
+            return false;
+        }
+
+        let parent_proof_id = self
+            .metablocks
+            .content_to_proof_map
+            .get(&block.content.parent_id)
+            .unwrap();
+        let parent_metablock = self.metablocks.blocks.get(parent_proof_id).unwrap().clone();
+
+        // ensure the parent is from an earlier timeslot
+        if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
+            // TODO: blacklist this peer
+            debug!("Ignoring a block whose parent is in the future");
+            return false;
+        }
+
+        // is the parent not too far back? (no deep forks)
+        // compare parent block height to current block height of longest chain
+        if parent_metablock.height + CONFIRMATION_DEPTH as u64 >= self.heads[0].block_height {
+            // TODO: blacklist this peer
+            debug!("Ignoring a block that would cause a deep fork");
+            return false;
+        }
+
+        true
+    }
+
+    /// Prepare the block for application once it is "seen" by some other block
+    pub async fn stage_block(&mut self, block: &Block) {
+        // TODO: this should be hardcoded into the reference implementation
+        if self.genesis_timestamp == 0 {
+            self.genesis_timestamp = block.content.timestamp;
+        }
+
+        // save the coinbase tx
+        self.txs.insert(
+            block.coinbase_tx.get_id(),
+            Transaction::Coinbase(block.coinbase_tx.clone()),
+        );
+
+        let mut pruned_block = block.clone();
+        pruned_block.prune();
+        // TODO: Everything that happens here may need to be reversed if `add_block_to_epoch()` at
+        //  the end fails, which implies that this function should have a lock and not be called
+        //  concurrently
+
+        let proof_id = block.proof.get_id();
+
+        // TODO: make sure the branch will not below the current confirmed block height
+
+        // check if block received during sync is in cached gossip and remove
+        if self.metablocks.contains_key(&proof_id) {
+            // remove from cached gossip
+            let mut is_empty = false;
+            self.cached_blocks_by_parent_content_id
+                .entry(block.content.parent_id)
+                .and_modify(|blocks| {
+                    blocks
+                        .iter()
+                        .position(|block| block.proof.get_id() == proof_id)
+                        .map(|index| blocks.remove(index));
+                    is_empty = blocks.is_empty();
+                });
+
+            if is_empty {
+                self.cached_blocks_by_parent_content_id
+                    .remove(&block.content.parent_id);
+            }
+        }
+
+        // save block -> metablocks, blocks by timeslot
+        let metablock = self.metablocks.save(pruned_block);
+        self.proof_ids_by_timeslot
             .entry(block.proof.timeslot)
-            .and_modify(|proof_ids| proof_ids.push(proof_id))
-            .or_insert(vec![proof_id]);
+            .and_modify(|blocks| blocks.push(metablock.proof_id))
+            .or_insert(vec![metablock.proof_id]);
+
+        // update head of this branch
+        self.update_heads(
+            metablock.block.content.parent_id,
+            metablock.content_id,
+            metablock.height,
+        );
+
+        // confirm the k-deep parent
+        let mut parent_content_id = metablock.block.content.parent_id;
+        let mut confirmation_depth: usize = 0;
+        loop {
+            match self
+                .metablocks
+                .content_to_proof_map
+                .get(&metablock.block.content.parent_id)
+            {
+                Some(parent_proof_id) => {
+                    let parent_block = self
+                        .metablocks
+                        .blocks
+                        .get(parent_proof_id)
+                        .expect("Must have block if in content_to_proof_map")
+                        .clone();
+
+                    parent_content_id = parent_block.block.content.parent_id;
+                    confirmation_depth += 1;
+                    if confirmation_depth == CONFIRMATION_DEPTH {
+                        self.confirm_block(&parent_block).await;
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+
+        // add to epoch tracker
+        self.epoch_tracker
+            .add_block_to_epoch(
+                block.proof.epoch,
+                metablock.height,
+                proof_id,
+                &self.blocks_on_longest_chain,
+            )
+            .await;
+    }
+
+    /// Stage all cached descendants for a given parent
+    pub async fn stage_cached_children(&mut self, parent_id: ContentId) {
+        let mut blocks = self
+            .cached_blocks_by_parent_content_id
+            .get(&parent_id)
+            .cloned()
+            .unwrap_or_default();
+
+        while blocks.len() > 0 {
+            let mut additional_blocks: Vec<Block> = Vec::new();
+            for block in blocks.drain(..) {
+                if self
+                    .is_valid_proposer_block_from_cache(&block.clone())
+                    .await
+                {
+                    self.stage_block(&block.clone()).await;
+
+                    self.cached_blocks_by_parent_content_id
+                        .get(&block.content.get_id())
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .for_each(|block| additional_blocks.push(block.clone()));
+                }
+            }
+
+            std::mem::swap(&mut blocks, &mut additional_blocks);
+        }
+    }
+
+    /// Applies the txs in a block to balances when it is k-deep
+    pub async fn confirm_block(&mut self, metablock: &MetaBlock) -> bool {
+        debug!(
+            "Confirming block with proof_id: {}",
+            hex::encode(&metablock.proof_id[0..8])
+        );
+
+        // TODO: modify to verify tx blocks and that the first tx is always a coinbase tx
+        // do we have all txs referenced?
+        for tx_id in metablock.block.content.tx_ids.iter() {
+            if !self.txs.contains_key(tx_id) {
+                error!("Cannot confirm block, includes unknown txs");
+                return false;
+            }
+        }
+
+        // add to longest chain
+        self.blocks_on_longest_chain.insert(metablock.proof_id);
+
+        // TODO: add block header to state buffer
+
+        // TODO: order all tx blocks
+        // apply all tx (confirm balance is still available and not already applied)
+        for tx_id in metablock.block.content.tx_ids.iter() {
+            match self.txs.get(tx_id).unwrap() {
+                Transaction::Coinbase(tx) => {
+                    // create or update account state
+                    self.balances
+                        .entry(tx.to_address)
+                        .and_modify(|account_state| account_state.balance += BLOCK_REWARD)
+                        .or_insert(AccountState {
+                            nonce: 0,
+                            balance: BLOCK_REWARD,
+                        });
+
+                    debug!("Applied a coinbase tx to balances");
+
+                    // TODO: add to state, may remove from tx db here
+                }
+                Transaction::Credit(tx) => {
+                    // TODO: apply tx to state buffer, may remove from tx db here...
+
+                    // check if the tx has already been applied
+                    if !self.tx_mempool.contains(tx_id) {
+                        warn!(
+                            "Transaction has already been referenced by a previous block, skipping"
+                        );
+                        continue;
+                    }
+
+                    // remove from mem pool
+                    self.tx_mempool.remove(tx_id);
+
+                    // ensure the tx is still valid
+                    let sender_account_state = self
+                        .balances
+                        .get(&tx.from_address)
+                        .expect("Existence of account state has already been validated");
+
+                    if sender_account_state.balance < tx.amount {
+                        error!("Invalid transaction, from account state has insufficient funds, transaction will not be applied");
+                        continue;
+                    }
+
+                    if sender_account_state.nonce >= tx.nonce {
+                        error!("Invalid transaction, tx nonce has already been used, transaction will not be applied");
+                        continue;
+                    }
+
+                    // debit the sender
+                    self.balances
+                        .entry(tx.from_address)
+                        .and_modify(|account_state| account_state.balance -= tx.amount);
+
+                    // credit  the receiver
+                    self.balances
+                        .entry(tx.to_address)
+                        .and_modify(|account_state| account_state.balance += tx.amount)
+                        .or_insert(AccountState {
+                            nonce: 0,
+                            balance: tx.amount,
+                        });
+
+                    // TODO: pay tx fee to farmer
+                }
+            }
+        }
+
+        if metablock.height > 0 {
+            // get the parent_content_id of this block
+            let parent_content_id = self
+                .metablocks
+                .content_to_proof_map
+                .get(&metablock.block.content.parent_id)
+                .expect("Parent will be in metablocks");
+
+            // fetch the parent block and drain all children that are not this block
+            let siblings: Vec<ProofId> = self
+                .metablocks
+                .blocks
+                .get_mut(parent_content_id)
+                .expect("Parent will be in metablocks")
+                .children
+                .drain_filter(|proof_id| proof_id != &metablock.proof_id)
+                .collect();
+
+            self.prune_children(siblings);
+        }
+
+        // TODO: update chain quality
+
+        true
+    }
+
+    /// Recursively removes all siblings and their descendants when a new block is confirmed
+    pub fn prune_children(&mut self, proof_ids: Vec<ProofId>) {
+        for child_proof_id in proof_ids.iter() {
+            // remove from metablocks
+            let metablock = self
+                .metablocks
+                .blocks
+                .remove(child_proof_id)
+                .expect("Child will be in metablocks");
+
+            // remove from content to proof map
+            self.metablocks
+                .content_to_proof_map
+                .remove(&metablock.content_id);
+
+            if metablock.children.is_empty() {
+                // leaf node, remove the branch from heads
+                self.prune_branch(metablock.content_id);
+            } else {
+                // repeat with this blocks children
+                self.prune_children(metablock.children);
+            }
+        }
+    }
+
+    /// cache a block received via gossip ahead of the current epoch
+    /// block will be staged once it's parent is seen
+    pub fn cache_remote_block(&mut self, block: &Block) {
+        self.cached_blocks_by_parent_content_id
+            .entry(block.content.parent_id)
+            .and_modify(|blocks| blocks.push(block.clone()))
+            .or_insert(vec![block.clone()]);
     }
 
     /// apply the cached block to the ledger
     ///
     /// Returns last (potentially unfinished) timeslot
-    pub async fn apply_cached_blocks(&mut self, timeslot: u64) -> Result<u64, ()> {
-        for current_timeslot in timeslot.. {
-            if let Some(proof_ids) = self.cached_proof_ids_by_timeslot.remove(&current_timeslot) {
-                for proof_id in proof_ids.iter() {
-                    let cached_block = self.metablocks.blocks.get(proof_id).unwrap().block.clone();
-                    if !self.validate_and_stage_remote_block(cached_block).await {
-                        return Err(());
-                    }
-                }
-            }
-
-            if self.cached_proof_ids_by_timeslot.is_empty() {
-                return Ok(current_timeslot);
-            }
-
-            if current_timeslot % TIMESLOTS_PER_EPOCH as u64 == 0 {
-                // create the new epoch
-                let current_epoch = self
-                    .epoch_tracker
-                    .advance_epoch(&self.blocks_on_longest_chain)
-                    .await;
-
-                debug!(
-                    "Closed randomness for epoch {} during apply cached blocks",
-                    current_epoch - CHALLENGE_LOOKBACK_EPOCHS
-                );
-
-                debug!("Creating a new empty epoch for epoch {}", current_epoch);
-            }
-        }
-
-        Ok(timeslot)
-    }
+    // pub async fn apply_cached_blocks(&mut self, timeslot: u64) -> Result<u64, ()> {
+    //     for current_timeslot in timeslot.. {
+    //         if let Some(proof_ids) = self.cached_proof_ids_by_timeslot.remove(&current_timeslot) {
+    //             for proof_id in proof_ids.iter() {
+    //                 let cached_block = self.metablocks.blocks.get(proof_id).unwrap().block.clone();
+    //                 if !self.validate_and_stage_remote_block(cached_block).await {
+    //                     return Err(());
+    //                 }
+    //             }
+    //         }
+    //
+    //         if self.cached_proof_ids_by_timeslot.is_empty() {
+    //             return Ok(current_timeslot);
+    //         }
+    //
+    //         if current_timeslot % TIMESLOTS_PER_EPOCH as u64 == 0 {
+    //             // create the new epoch
+    //             let current_epoch = self
+    //                 .epoch_tracker
+    //                 .advance_epoch(&self.blocks_on_longest_chain)
+    //                 .await;
+    //
+    //             debug!(
+    //                 "Closed randomness for epoch {} during apply cached blocks",
+    //                 current_epoch - CHALLENGE_LOOKBACK_EPOCHS
+    //             );
+    //
+    //             debug!("Creating a new empty epoch for epoch {}", current_epoch);
+    //         }
+    //     }
+    //
+    //     Ok(timeslot)
+    // }
 
     /// Retrieve the balance for a given node id
     pub fn get_account_state(&self, id: &[u8]) -> Option<AccountState> {

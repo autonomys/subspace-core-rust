@@ -209,10 +209,8 @@ impl Proof {
 pub struct Content {
     /// id of matching proof
     pub proof_id: ProofId,
-    /// id of all parent block that is head of the longest chain
+    /// content id of parent block that is seen as head of the longest chain
     pub parent_id: ContentId,
-    /// ids of all uncle blocks that have not yet been seen by the longest chain
-    pub uncle_ids: Vec<ContentId>,
     /// signature of the proof with same public key
     pub proof_signature: Vec<u8>,
     /// when this block was created (from Nodes local view)

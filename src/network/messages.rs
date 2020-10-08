@@ -29,7 +29,7 @@ impl Display for GossipMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct BlocksRequest {
-    pub(crate) block_height: u64,
+    pub(crate) timeslot: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

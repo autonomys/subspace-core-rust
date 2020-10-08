@@ -1,7 +1,7 @@
 use crate::timer::Epoch;
 use crate::{
-    ProofId, CHALLENGE_LOOKBACK_EPOCHS, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME, PIECE_SIZE,
-    SOLUTION_RANGE_LOOKBACK_EONS, TIMESLOTS_PER_EPOCH,
+    ProofId, CHALLENGE_LOOKBACK_EPOCHS, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME,
+    INITIAL_SOLUTION_RANGE, PIECE_SIZE, SOLUTION_RANGE_LOOKBACK_EONS, TIMESLOTS_PER_EPOCH,
 };
 use async_std::sync::Mutex;
 use log::*;
@@ -196,13 +196,12 @@ impl EpochTracker {
         epoch_index: u64,
         block_height: u64,
         proof_id: ProofId,
-        solution_range: u64,
         blocks_on_longest_chain: &HashSet<ProofId>,
     ) {
         let mut inner = self.inner.lock().await;
 
         if inner.eon_to_solution_range.is_empty() {
-            inner.fill_initial_solution_range(solution_range);
+            inner.fill_initial_solution_range(INITIAL_SOLUTION_RANGE);
             // Create the initial epoch
             inner.advance_epoch(blocks_on_longest_chain);
         }

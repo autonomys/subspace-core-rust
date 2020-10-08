@@ -9,6 +9,11 @@ pub use epoch_tracker::EpochTracker;
 use log::*;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
+// timer is a struct
+// has a channel which is a beacon
+// sends a message on every timeslot arrival
+// where does the receiver go?
+
 pub async fn run(
     timer_to_farmer_tx: Sender<FarmerMessage>,
     epoch_tracker: EpochTracker,
@@ -41,9 +46,8 @@ pub async fn run(
         .await;
 
         {
-            // apply all blocks that were referenced in the previous round (happy path)
             let mut locked_ledger = ledger.lock().await;
-            locked_ledger.apply_referenced_blocks().await;
+            locked_ledger.next_timeslot().await;
 
             // We are looking to epoch boundary, but also trying not to go ahead of clock
             if next_timeslot % TIMESLOTS_PER_EPOCH == 0

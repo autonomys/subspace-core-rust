@@ -692,7 +692,9 @@ impl Network {
         block_height: u64,
     ) -> Result<Vec<Block>, RequestError> {
         let response = self
-            .request(RequestMessage::Blocks(BlocksRequest { block_height }))
+            .request(RequestMessage::Blocks(BlocksRequest {
+                timeslot: block_height,
+            }))
             .await?;
 
         match response {

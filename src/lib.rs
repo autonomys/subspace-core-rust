@@ -64,6 +64,8 @@ pub const CONSOLE: bool = false;
 pub const BLOCK_REWARD: u64 = 1;
 // TODO: build duration object here and only define once
 // TODO: add documentation on allowed parameters for time
+pub const MAX_EARLY_TIMESLOTS: u64 = 10;
+pub const MAX_LATE_TIMESLOTS: u64 = 10;
 pub const TIMESLOT_DURATION: u64 = 1000;
 pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 4;
 // pub const EPOCH_CLOSE_WAIT_TIME: u64 = CHALLENGE_LOOKBACK - 2;
@@ -73,6 +75,7 @@ pub const TIMESLOTS_PER_EPOCH: u64 = 6;
 
 pub const EPOCHS_PER_EON: u64 = 2016;
 pub const SOLUTION_RANGE_LOOKBACK_EONS: u64 = 3;
+pub const INITIAL_SOLUTION_RANGE: u64 = u64::MAX / PLOT_SIZE as u64 / 10u64;
 
 // Assertions about acceptable values for above parameters:
 // Lookback should always be at least one

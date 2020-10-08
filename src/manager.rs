@@ -9,8 +9,8 @@ use crate::network::{Network, NodeType};
 use crate::timer::EpochTracker;
 use crate::transaction::Transaction;
 use crate::{
-    timer, CHALLENGE_LOOKBACK_EPOCHS, CONSOLE, EPOCH_GRACE_PERIOD, MIN_CONNECTED_PEERS, PLOT_SIZE,
-    TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+    timer, ContentId, CHALLENGE_LOOKBACK_EPOCHS, CONSOLE, EPOCH_GRACE_PERIOD, MAX_EARLY_TIMESLOTS,
+    MAX_LATE_TIMESLOTS, MIN_CONNECTED_PEERS, PLOT_SIZE, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
@@ -37,11 +37,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub enum ProtocolMessage {
     /// Solver sends a set of solutions back to main for application
     BlockSolutions { solutions: Vec<Solution> },
-    BlockArrived {
-        block: Block,
-        peer_addr: SocketAddr,
-        cached: bool,
-    },
 }
 
 impl Display for ProtocolMessage {
@@ -51,7 +46,6 @@ impl Display for ProtocolMessage {
             "{}",
             match self {
                 Self::BlockSolutions { .. } => "BlockSolutions",
-                Self::BlockArrived { .. } => "BlockArrived",
             }
         )
     }
@@ -101,94 +95,28 @@ pub async fn run(
             while let Ok((peer_addr, message)) = gossip_receiver.recv().await {
                 match message {
                     GossipMessage::BlockProposal { block } => {
-                        let mut ledger = ledger.lock().await;
-                        debug!(
-                            "Received a block via gossip, with {} uncles",
-                            block.content.uncle_ids.len()
-                        );
+                        debug!("Received a new block via gossip");
+                        let mut locked_ledger = ledger.lock().await;
 
-                        // TODO: need to reference block by proof not by full block
-                        let proof_id = block.proof.get_id();
-
-                        if ledger.metablocks.contains_key(&proof_id) {
-                            warn!("Received a block proposal via gossip for known block, ignoring");
-                            continue;
-                        }
-
-                        if !ledger.timer_is_running {
-                            trace!(
-                                "Caching a block received via gossip before the ledger is synced"
-                            );
-                            ledger.cache_remote_block(block);
-                            continue;
-                        }
-
-                        // TODO: this should be set once as a constant on ledger
-                        let genesis_instant = Instant::now()
-                            - (UNIX_EPOCH.elapsed().unwrap()
-                                - Duration::from_millis(ledger.genesis_timestamp));
-
-                        let block_arrival_time = Duration::from_millis(
-                            (block.proof.timeslot * TIMESLOT_DURATION) as u64,
-                        );
-
-                        let earliest_arrival_time = block_arrival_time - EPOCH_GRACE_PERIOD;
-                        let latest_arrival_time = block_arrival_time + EPOCH_GRACE_PERIOD;
-
-                        if genesis_instant.elapsed() < earliest_arrival_time {
-                            error!(
-                                "genesis instant {}, earliest arrival time {}",
-                                genesis_instant.elapsed().as_millis(),
-                                earliest_arrival_time.as_millis()
-                            );
-
-                            let wait_time = earliest_arrival_time - genesis_instant.elapsed();
-                            error!("Received an early block via gossip, waiting {} ms for block arrival!", wait_time.as_millis());
-
-                            let sender = main_to_main_tx.clone();
-                            async_std::task::spawn(async move {
-                                async_std::task::sleep(
-                                    earliest_arrival_time
-                                        .checked_sub(genesis_instant.elapsed())
-                                        .unwrap_or_default(),
+                        if locked_ledger
+                            .is_valid_proposer_block_from_gossip(&block)
+                            .await
+                        {
+                            network
+                                .regossip(
+                                    &peer_addr,
+                                    GossipMessage::BlockProposal {
+                                        block: block.clone(),
+                                    },
                                 )
                                 .await;
 
-                                sender
-                                    .send(ProtocolMessage::BlockArrived {
-                                        block,
-                                        peer_addr,
-                                        cached: false,
-                                    })
-                                    .await;
-                            })
-                            .await;
+                            // stage the block
+                            locked_ledger.stage_block(&block).await;
 
-                            continue;
-                        }
-
-                        if block_arrival_time > latest_arrival_time {
-                            // block is too late, ignore
-                            error!("Received a late block via gossip, ignoring");
-                            continue;
-                        }
-
-                        // check that we have the randomness for the desired epoch
-                        // then apply the block
-
-                        let randomness_epoch =
-                            epoch_tracker.get_lookback_epoch(block.proof.epoch).await;
-
-                        if !randomness_epoch.is_closed {
-                            panic!("Unable to apply block received via gossip, the randomness epoch is still open!");
-                        }
-
-                        // TODO: important -- this may lead to forks if nodes are malicious
-
-                        // check if the block is valid and apply
-                        if ledger.validate_and_stage_remote_block(block.clone()).await {
-                            network
-                                .regossip(&peer_addr, GossipMessage::BlockProposal { block })
+                            // stage any cached children
+                            locked_ledger
+                                .stage_cached_children(block.content.get_id())
                                 .await;
                         }
                     }
@@ -234,9 +162,9 @@ pub async fn run(
 
                 async_std::task::spawn(async move {
                     match message {
-                        RequestMessage::Blocks(BlocksRequest { block_height }) => {
+                        RequestMessage::Blocks(BlocksRequest { timeslot }) => {
                             // TODO: check to make sure that the requested timeslot is not ahead of local timeslot
-                            let blocks = ledger.lock().await.get_blocks_by_height(block_height);
+                            let blocks = ledger.lock().await.get_blocks_by_timeslot(timeslot);
 
                             drop(
                                 response_sender
@@ -272,52 +200,27 @@ pub async fn run(
 
         loop {
             match any_to_main_rx.recv().await {
-                Ok(message) => {
-                    match message {
-                        ProtocolMessage::BlockArrived {
-                            block,
-                            peer_addr,
-                            cached: _,
-                        } => {
-                            let mut ledger = ledger.lock().await;
-                            info!(
-                                "A new block has arrived with id: {}",
-                                hex::encode(&block.get_id()[0..8])
-                            );
-
-                            if ledger.validate_and_stage_remote_block(block.clone()).await {
-                                network
-                                    .regossip(&peer_addr, GossipMessage::BlockProposal { block })
+                Ok(message) => match message {
+                    ProtocolMessage::BlockSolutions { solutions } => {
+                        if !solutions.is_empty() {
+                            let mut content_ids: Vec<ContentId> = Vec::new();
+                            for solution in solutions.into_iter() {
+                                let block = ledger
+                                    .lock()
+                                    .await
+                                    .create_and_apply_local_block(solution, content_ids.clone())
                                     .await;
-                            }
-
-                            // ToDo: Have to wipe cached blocks at some point to prevent memory leak
-
-                            // if cached {
-                            //     // block was cached and has arrived on sync
-                            //     // check for more cached pending children
-                            //     if let Some(children) =
-                            //         ledger.pending_children_for_parent.get(&block_id)
-                            //     {
-                            //         arrive_pending_children(ledger, children.clone(), &main_to_main_tx)
-                            //             .await;
-                            //     }
-                            // }
-                        }
-                        ProtocolMessage::BlockSolutions { solutions } => {
-                            if !solutions.is_empty() {
-                                for solution in solutions.into_iter() {
-                                    let block = ledger
-                                        .lock()
-                                        .await
-                                        .create_and_apply_local_block(solution)
-                                        .await;
-                                    network.gossip(GossipMessage::BlockProposal { block }).await;
-                                }
+                                network
+                                    .gossip(GossipMessage::BlockProposal {
+                                        block: block.clone(),
+                                    })
+                                    .await;
+                                content_ids.push(block.content.get_id());
+                                ledger.lock().await.stage_block(&block).await;
                             }
                         }
                     }
-                }
+                },
                 Err(error) => {
                     error!("Error in protocol messages handling: {}", error);
                 }
@@ -395,7 +298,7 @@ pub async fn run(
                                 }
 
                                 // apply all referenced blocks
-                                locked_ledger.apply_referenced_blocks().await;
+                                // locked_ledger.apply_referenced_blocks().await;
                             }
 
                             let next_timeslot_arrival_time = Duration::from_millis(
@@ -436,26 +339,26 @@ pub async fn run(
 
                                 // call sync and start timer
                                 info!("Applying cached blocks");
-                                match locked_ledger.apply_cached_blocks(block_height).await {
-                                    Ok(timeslot) => {
-                                        info!("Starting the timer from genesis time");
-
-                                        locked_ledger.timer_is_running = true;
-
-                                        // start the timer
-                                        start_timer(
-                                            timer_to_farmer_tx.clone(),
-                                            is_farming,
-                                            epoch_tracker.clone(),
-                                            locked_ledger.genesis_timestamp,
-                                            timeslot,
-                                            Arc::clone(&ledger),
-                                        );
-                                    }
-                                    Err(_) => {
-                                        panic!("Unable to sync the ledger, invalid blocks!");
-                                    }
-                                }
+                                // match locked_ledger.apply_cached_blocks(block_height).await {
+                                //     Ok(timeslot) => {
+                                //         info!("Starting the timer from genesis time");
+                                //
+                                //         locked_ledger.timer_is_running = true;
+                                //
+                                //         // start the timer
+                                //         start_timer(
+                                //             timer_to_farmer_tx.clone(),
+                                //             is_farming,
+                                //             epoch_tracker.clone(),
+                                //             locked_ledger.genesis_timestamp,
+                                //             timeslot,
+                                //             Arc::clone(&ledger),
+                                //         );
+                                //     }
+                                //     Err(_) => {
+                                //         panic!("Unable to sync the ledger, invalid blocks!");
+                                //     }
+                                // }
                                 break;
                             }
                         }

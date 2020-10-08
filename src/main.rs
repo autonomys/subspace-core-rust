@@ -16,8 +16,8 @@ use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::{
     console, crypto, farmer, manager, plotter, rpc, CONSOLE, DEV_GATEWAY_ADDR,
-    MAINTAIN_PEERS_INTERVAL, MAX_CONNECTED_PEERS, MAX_PEERS, MIN_CONNECTED_PEERS, MIN_PEERS,
-    PLOT_SIZE,
+    INITIAL_SOLUTION_RANGE, MAINTAIN_PEERS_INTERVAL, MAX_CONNECTED_PEERS, MAX_PEERS,
+    MIN_CONNECTED_PEERS, MIN_PEERS, PLOT_SIZE,
 };
 use tui_logger::{init_logger, set_default_level};
 
@@ -112,7 +112,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
 
     // create the randomness tracker
     let epoch_tracker = if node_type == NodeType::Gateway {
-        EpochTracker::new_genesis(u64::MAX / PLOT_SIZE as u64)
+        EpochTracker::new_genesis(INITIAL_SOLUTION_RANGE)
     } else {
         EpochTracker::new()
     };
