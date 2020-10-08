@@ -14,7 +14,7 @@ pub struct Epoch {
     pub is_closed: bool,
     /// timeslot indices and vec of block ids, some will be empty, some one, some many
     timeslots: HashMap<u64, Vec<BlockId>>,
-    block_heights: BTreeMap<BlockHeight, Vec<ProofId>>,
+    block_heights: BTreeMap<BlockHeight, ProofId>,
     /// challenges derived from randomness at closure, one per timeslot
     challenges: Vec<SlotChallenge>,
     /// overall randomness for this epoch
@@ -44,26 +44,8 @@ impl Epoch {
         self.timeslots.values().map(Vec::len).sum::<usize>() as u64
     }
 
-    /// Returns `true` in case no blocks for this timeslot existed before
-    pub(super) fn _add_block_to_timeslot(&mut self, timeslot: u64, block_id: BlockId) {
-        if self.is_closed {
-            warn!(
-                "Epoch already closed, skipping adding block to time slot {}",
-                timeslot
-            );
-            return;
-        }
-        debug!("Adding block to time slot");
-        let timeslot_index = timeslot % TIMESLOTS_PER_EPOCH;
-        self.timeslots
-            .entry(timeslot_index)
-            .and_modify(|list| {
-                list.push(block_id);
-            })
-            .or_insert_with(|| vec![block_id]);
-    }
-
     pub(super) fn add_block_at_height(&mut self, block_height: u64, proof_id: ProofId) {
+        // TODO: this is being invoked frequently, fix the parameters
         if self.is_closed {
             warn!(
                 "Epoch already closed, skipping adding block at height {}",
@@ -71,12 +53,20 @@ impl Epoch {
             );
             return;
         }
-        debug!("Adding block at block height {}", block_height);
+        debug!(
+            "Adding confirmed block to epoch_tracker at block height {}",
+            block_height
+        );
         self.block_heights
             .entry(block_height)
             // TODO: should be sorted on entry
-            .and_modify(|proof_ids| proof_ids.push(proof_id))
-            .or_insert(vec![proof_id]);
+            .and_modify(|_| {
+                panic!(
+                    "Two confirmed blocks in epoch tracker at block height: {}",
+                    block_height
+                )
+            })
+            .or_insert(proof_id);
     }
 
     pub fn get_challenge_for_timeslot(&self, timeslot: u64) -> SlotChallenge {
@@ -86,40 +76,15 @@ impl Epoch {
         self.challenges[timeslot_index as usize]
     }
 
-    pub(super) fn _close(&mut self) {
-        let xor_result =
-            self.timeslots
-                .values()
-                .flatten()
-                .fold(self.randomness, |mut randomness, block_id| {
-                    utils::xor_bytes(&mut randomness, &block_id[..]);
-                    randomness
-                });
-        self.randomness = crypto::digest_sha_256(&xor_result);
-
-        for timeslot_index in 0..TIMESLOTS_PER_EPOCH {
-            let slot_seed = [&self.randomness[..], &timeslot_index.to_le_bytes()[..]].concat();
-            self.challenges.push(crypto::digest_sha_256(&slot_seed));
-        }
-
-        self.is_closed = true;
-    }
-
-    pub(super) fn close_new(&mut self, blocks_on_longest_chain: &HashSet<ProofId>) {
-        let mut deepest_proof = ProofId::default();
-
-        // TODO: there is a rare case when there are no valid blocks in an epoch
-        // TODO: think more about ways this could fail with an attack or late blocks and handle
-        let first_block_top_height = self.block_heights.first_key_value();
-        if let Some((_, proof_ids)) = first_block_top_height {
-            for proof_id in proof_ids {
-                if blocks_on_longest_chain.contains(proof_id) {
-                    deepest_proof = *proof_id;
-                    break;
-                }
-                // TODO: add expect if not found
+    pub(super) fn close(&mut self) {
+        let deepest_proof: ProofId = match self.block_heights.first_key_value() {
+            Some((_, proof_id)) => *proof_id,
+            None => {
+                // TOOD: derive from last epoch randomness instead
+                error!("Unable to derive randomness for epoch, no blocks have been confirmed");
+                [0u8; 32]
             }
-        }
+        };
 
         self.randomness = crypto::digest_sha_256(&deepest_proof);
 

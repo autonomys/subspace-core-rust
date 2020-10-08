@@ -32,6 +32,7 @@ use std::{fmt, io, mem};
  * Handle empty block responses, currently that peer will randomly come again soon
  * Handle errors as results
  *
+
 */
 
 const MAX_MESSAGE_CONTENTS_LENGTH: usize = 2usize.pow(16) - 1;
@@ -687,14 +688,9 @@ impl Network {
         }
     }
 
-    pub(crate) async fn request_blocks(
-        &self,
-        block_height: u64,
-    ) -> Result<Vec<Block>, RequestError> {
+    pub(crate) async fn request_blocks(&self, timeslot: u64) -> Result<Vec<Block>, RequestError> {
         let response = self
-            .request(RequestMessage::Blocks(BlocksRequest {
-                timeslot: block_height,
-            }))
+            .request(RequestMessage::Blocks(BlocksRequest { timeslot }))
             .await?;
 
         match response {
@@ -968,7 +964,6 @@ mod tests {
             content: Content {
                 proof_id: ProofId::default(),
                 parent_id: ContentId::default(),
-                uncle_ids: vec![],
                 proof_signature: vec![],
                 timestamp: 0,
                 tx_ids: vec![],

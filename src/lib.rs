@@ -56,7 +56,7 @@ pub const MIN_PEERS: usize = 10;
 pub const MAX_PEERS: usize = 100;
 // TODO: Is this a good value?
 pub const MAINTAIN_PEERS_INTERVAL: Duration = Duration::from_secs(60);
-pub const CONFIRMATION_DEPTH: usize = 6;
+pub const CONFIRMATION_DEPTH: usize = 3;
 pub const DEV_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const DEV_WS_ADDR: &str = "127.0.0.1:8880";
@@ -67,15 +67,15 @@ pub const BLOCK_REWARD: u64 = 1;
 pub const MAX_EARLY_TIMESLOTS: u64 = 10;
 pub const MAX_LATE_TIMESLOTS: u64 = 10;
 pub const TIMESLOT_DURATION: u64 = 1000;
-pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 4;
+pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 3;
 // pub const EPOCH_CLOSE_WAIT_TIME: u64 = CHALLENGE_LOOKBACK - 2;
 /// Time in epochs
-pub const EPOCH_CLOSE_WAIT_TIME: u64 = 2;
-pub const TIMESLOTS_PER_EPOCH: u64 = 6;
+pub const EPOCH_CLOSE_WAIT_TIME: u64 = 3;
+pub const TIMESLOTS_PER_EPOCH: u64 = 32;
 
 pub const EPOCHS_PER_EON: u64 = 2016;
-pub const SOLUTION_RANGE_LOOKBACK_EONS: u64 = 3;
-pub const INITIAL_SOLUTION_RANGE: u64 = u64::MAX / PLOT_SIZE as u64 / 10u64;
+pub const SOLUTION_RANGE_LOOKBACK_EONS: u64 = 4;
+pub const INITIAL_SOLUTION_RANGE: u64 = u64::MAX / PLOT_SIZE as u64 / 5u64;
 
 // Assertions about acceptable values for above parameters:
 // Lookback should always be at least one

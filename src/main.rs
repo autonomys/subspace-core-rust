@@ -21,6 +21,23 @@ use subspace_core_rust::{
 };
 use tui_logger::{init_logger, set_default_level};
 
+/* Next Steps
+
+   X Single gateway node can farm from genesis
+   X A new peer can sync the ledger
+   X Derive randomness correctly for each epoch
+   X A new farmer can sync the ledger and co-farm
+   - recover from missed gossip (else diverges) -> request blocks for timeslot
+   - Fix dynamic work difficulty
+   - Encode state
+   - Solve from genesis state
+   - Split blocks in proposer and tx blocks
+   - Sync the state chain
+   - Switch to Schnorr signatures
+   - Improve tx script support
+
+*/
+
 /* ToDo
  * ----
  *

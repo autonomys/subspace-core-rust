@@ -43,7 +43,7 @@ impl Inner {
         }
     }
 
-    fn advance_epoch(&mut self, blocks_on_longest_chain: &HashSet<ProofId>) -> u64 {
+    fn advance_epoch(&mut self) -> u64 {
         if self.epochs.is_empty() {
             self.current_epoch = 0;
         } else {
@@ -71,8 +71,7 @@ impl Inner {
             let close_epoch_index = current_epoch - EPOCH_CLOSE_WAIT_TIME;
             let epoch = self.epochs.get_mut(&close_epoch_index).unwrap();
 
-            // TODO: pass in blocks_on_longest_chain
-            epoch.close_new(blocks_on_longest_chain);
+            epoch.close();
 
             debug!(
                 "Closed epoch with index {}, randomness is {}",
@@ -113,8 +112,11 @@ impl Inner {
                 let solution_range = lookback_solution_range as i64
                     + (new_solution_range as i64 - lookback_solution_range as i64) / 100 * 10;
 
-                // Should divide by 2 without remainder
-                solution_range as u64 / 2 * 2
+                // TODO: revert
+                lookback_solution_range
+
+            // Should divide by 2 without remainder
+            // solution_range as u64 / 2 * 2
             } else {
                 lookback_solution_range
             };
@@ -183,27 +185,18 @@ impl EpochTracker {
     /// Move to the next epoch
     ///
     /// Returns current epoch index
-    pub async fn advance_epoch(&self, blocks_on_longest_chain: &HashSet<ProofId>) -> u64 {
-        self.inner
-            .lock()
-            .await
-            .advance_epoch(blocks_on_longest_chain)
+    pub async fn advance_epoch(&self) -> u64 {
+        self.inner.lock().await.advance_epoch()
     }
 
     /// Returns `true` in case no blocks for this timeslot existed before
-    pub async fn add_block_to_epoch(
-        &self,
-        epoch_index: u64,
-        block_height: u64,
-        proof_id: ProofId,
-        blocks_on_longest_chain: &HashSet<ProofId>,
-    ) {
+    pub async fn add_block_to_epoch(&self, epoch_index: u64, block_height: u64, proof_id: ProofId) {
         let mut inner = self.inner.lock().await;
 
         if inner.eon_to_solution_range.is_empty() {
             inner.fill_initial_solution_range(INITIAL_SOLUTION_RANGE);
             // Create the initial epoch
-            inner.advance_epoch(blocks_on_longest_chain);
+            inner.advance_epoch();
         }
 
         inner

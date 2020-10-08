@@ -68,10 +68,10 @@ pub struct Ledger {
     pub cached_blocks_by_parent_content_id: HashMap<ContentId, Vec<Block>>,
     /// temporary container for blocks seen before their timeslot has arrived
     pub early_blocks_by_timeslot: BTreeMap<Timeslot, Vec<Block>>,
-    /// all confirmed proposer blocks
-    pub blocks_on_longest_chain: HashSet<ProofId>,
     /// fork tracker for pending blocks, used to find the current head of longest chain
     pub heads: Vec<Head>,
+    /// Proof ids of all k-deep (confirmed) blocks
+    confirmed_blocks: HashSet<ProofId>,
     /// container for all txs
     pub txs: HashMap<TxId, Transaction>,
     /// tracker for txs that have not yet been included in a tx block
@@ -131,8 +131,8 @@ impl Ledger {
             proof_ids_by_timeslot: BTreeMap::new(),
             cached_blocks_by_parent_content_id: HashMap::new(),
             early_blocks_by_timeslot: BTreeMap::new(),
-            blocks_on_longest_chain: HashSet::new(),
             heads: Vec::new(),
+            confirmed_blocks: HashSet::new(),
             txs: HashMap::new(),
             tx_mempool: HashSet::new(),
             genesis_timestamp: 0,
@@ -153,6 +153,7 @@ impl Ledger {
     /// Update the timeslot, then validates and stages all early blocks that have arrived
     pub async fn next_timeslot(&mut self) {
         self.current_timeslot += 1;
+        info!("Ledger has arrive at timeslot {}", self.current_timeslot);
 
         // apply all early blocks
         if self
@@ -191,12 +192,12 @@ impl Ledger {
     }
 
     /// returns the tip of the longest chain as seen by this node
-    pub fn get_head(&self) -> ContentId {
+    fn get_head(&self) -> ContentId {
         self.heads[0].content_id
     }
 
     /// updates an existing branch, setting to head if longest, or creates a new branch
-    pub fn update_heads(&mut self, parent_id: ContentId, content_id: ContentId, block_height: u64) {
+    fn update_heads(&mut self, parent_id: ContentId, content_id: ContentId, block_height: u64) {
         for (index, head) in self.heads.iter_mut().enumerate() {
             if head.content_id == parent_id {
                 // updated existing head
@@ -219,7 +220,7 @@ impl Ledger {
     }
 
     /// removes a branch that is equal to the current confirmed ledger
-    pub fn prune_branch(&mut self, content_id: ContentId) {
+    fn prune_branch(&mut self, content_id: ContentId) {
         let mut remove_index: Option<usize> = None;
         for (index, head) in self.heads.iter().enumerate() {
             if head.content_id == content_id {
@@ -246,10 +247,7 @@ impl Ledger {
         let mut parent_id: ContentId = [0u8; 32];
 
         for _ in 0..CHALLENGE_LOOKBACK_EPOCHS {
-            let current_epoch_index = self
-                .epoch_tracker
-                .advance_epoch(&self.blocks_on_longest_chain)
-                .await;
+            let current_epoch_index = self.epoch_tracker.advance_epoch().await;
             let current_epoch = self.epoch_tracker.get_epoch(current_epoch_index).await;
             info!(
                 "Advanced to epoch {} during genesis init",
@@ -421,6 +419,8 @@ impl Ledger {
 
     /// Validates that a block is internally consistent
     async fn validate_block(&self, block: &Block) -> bool {
+        // TODO: how to validate the genesis block, which has no lookback?
+
         // get correct randomness for this block
         let epoch = self
             .epoch_tracker
@@ -448,15 +448,23 @@ impl Ledger {
     }
 
     /// Validates a proposer block received via sync during startup
-    pub async fn is_valid_proposer_block_from_sync(&mut self, block: &Block) -> bool {
-        // TODO: is this from the timeslot requested? else error
+    pub async fn is_valid_proposer_block_from_sync(
+        &mut self,
+        block: &Block,
+        current_timeslot: Timeslot,
+    ) -> bool {
+        // is this from the timeslot requested? else error
+        if block.proof.timeslot != current_timeslot {
+            error!("Received a block via sync for block at incorrect timeslot");
+            return false;
+        }
 
         // is this a new block? else error
         let proof_id = block.proof.get_id();
 
         // is this a new block?
         if self.recent_proof_ids.contains(&proof_id) {
-            error!("Received a block proposal via gossip for known block, ignoring");
+            error!("Received a block proposal via sync for known block");
             return false;
         }
 
@@ -464,40 +472,44 @@ impl Ledger {
         // else add
         self.recent_proof_ids.insert(proof_id);
 
-        // have we already received parent? else error
-        if !self
-            .metablocks
-            .content_to_proof_map
-            .contains_key(&block.content.parent_id)
-        {
-            error!("Received a block via sync with unknown parent");
-            return false;
-        }
+        // if not the genesis block, get parent
+        if block.proof.timeslot > 0 {
+            // have we already received parent? else error
+            if !self
+                .metablocks
+                .content_to_proof_map
+                .contains_key(&block.content.parent_id)
+            {
+                error!("Received a block via sync with unknown parent");
+                return false;
+            }
 
-        let parent_proof_id = self
-            .metablocks
-            .content_to_proof_map
-            .get(&block.content.parent_id)
-            .unwrap();
-        let parent_metablock = self.metablocks.blocks.get(parent_proof_id).unwrap().clone();
+            let parent_proof_id = self
+                .metablocks
+                .content_to_proof_map
+                .get(&block.content.parent_id)
+                .unwrap();
+            let parent_metablock = self.metablocks.blocks.get(parent_proof_id).unwrap().clone();
 
-        // ensure the parent is from an earlier timeslot
-        if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
-            error!("Received a block via sync whose parent is in the future");
-            return false;
-        }
+            // ensure the parent is from an earlier timeslot
+            if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
+                error!("Received a block via sync whose parent is in the future");
+                return false;
+            }
 
-        // is the parent not too far back? (no deep forks)
-        // compare parent block height to current block height of longest chain
-        if parent_metablock.height + CONFIRMATION_DEPTH as u64 >= self.heads[0].block_height {
-            error!("Receive a block via sync that would cause a deep fork");
-            return false;
+            // is the parent not too far back? (no deep forks)
+            // compare parent block height to current block height of longest chain
+            if parent_metablock.height + (CONFIRMATION_DEPTH as u64) < self.heads[0].block_height {
+                error!("Received a block via sync that would cause a deep fork");
+                return false;
+            }
         }
 
         // block is valid?
-        if !(self.validate_block(block).await) {
-            return false;
-        }
+        // TODO: turn this back on
+        // if !(self.validate_block(block).await) {
+        //     return false;
+        // }
 
         true
     }
@@ -523,7 +535,7 @@ impl Ledger {
 
         // If node is still syncing the ledger, cache and apply on sync
         if !self.timer_is_running {
-            trace!("Caching a block received via gossip before the ledger is synced");
+            warn!("Caching a block received via gossip before the ledger is synced");
             self.cache_remote_block(block);
             return false;
         }
@@ -532,7 +544,7 @@ impl Ledger {
         if self.current_timeslot < block.proof.timeslot {
             if self.current_timeslot - MAX_EARLY_TIMESLOTS > block.proof.timeslot {
                 // TODO: flag this peer
-                debug!("Ignoring a block that is too early");
+                error!("Ignoring a block that is too early");
                 return false;
             }
 
@@ -542,7 +554,7 @@ impl Ledger {
                 .and_modify(|blocks| blocks.push(block.clone()))
                 .or_insert(vec![block.clone()]);
 
-            debug!("Caching a block that is early");
+            warn!("Caching a block that is early");
             return false;
         }
 
@@ -559,7 +571,7 @@ impl Ledger {
             .content_to_proof_map
             .contains_key(&block.content.parent_id)
         {
-            debug!("Caching a block received via gossip with unknown parent");
+            warn!("Caching a block received via gossip with unknown parent");
             self.cache_remote_block(block);
             return false;
         }
@@ -574,15 +586,15 @@ impl Ledger {
         // ensure the parent is from an earlier timeslot
         if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
             // TODO: blacklist this peer
-            debug!("Ignoring a block whose parent is in the future");
+            error!("Ignoring a block whose parent is in the future");
             return false;
         }
 
         // is the parent not too far back? (no deep forks)
         // compare parent block height to current block height of longest chain
-        if parent_metablock.height + CONFIRMATION_DEPTH as u64 >= self.heads[0].block_height {
+        if parent_metablock.height + (CONFIRMATION_DEPTH as u64) < self.heads[0].block_height {
             // TODO: blacklist this peer
-            debug!("Ignoring a block that would cause a deep fork");
+            error!("Ignoring a block that would cause a deep fork");
             return false;
         }
 
@@ -607,7 +619,7 @@ impl Ledger {
         // ensure the parent is from an earlier timeslot
         if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
             // TODO: blacklist this peer
-            debug!("Ignoring a block whose parent is in the future");
+            error!("Ignoring a block whose parent is in the future");
             return false;
         }
 
@@ -634,7 +646,7 @@ impl Ledger {
             .content_to_proof_map
             .contains_key(&block.content.parent_id)
         {
-            debug!("Caching a block received via gossip with unknown parent");
+            warn!("Caching a block received via gossip with unknown parent");
             self.cache_remote_block(block);
             return false;
         }
@@ -649,22 +661,22 @@ impl Ledger {
         // ensure the parent is from an earlier timeslot
         if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
             // TODO: blacklist this peer
-            debug!("Ignoring a block whose parent is in the future");
+            error!("Ignoring a block whose parent is in the future");
             return false;
         }
 
         // is the parent not too far back? (no deep forks)
         // compare parent block height to current block height of longest chain
-        if parent_metablock.height + CONFIRMATION_DEPTH as u64 >= self.heads[0].block_height {
+        if parent_metablock.height + (CONFIRMATION_DEPTH as u64) < self.heads[0].block_height {
             // TODO: blacklist this peer
-            debug!("Ignoring a block that would cause a deep fork");
+            error!("Ignoring a block that would cause a deep fork");
             return false;
         }
 
         true
     }
 
-    /// Prepare the block for application once it is "seen" by some other block
+    /// Save a block, update heads, and confirm the k-deep parent
     pub async fn stage_block(&mut self, block: &Block) {
         // TODO: this should be hardcoded into the reference implementation
         if self.genesis_timestamp == 0 {
@@ -685,7 +697,7 @@ impl Ledger {
 
         let proof_id = block.proof.get_id();
 
-        // TODO: make sure the branch will not below the current confirmed block height
+        // TODO: make sure the branch will not be below the current confirmed block height
 
         // check if block received during sync is in cached gossip and remove
         if self.metablocks.contains_key(&proof_id) {
@@ -721,6 +733,11 @@ impl Ledger {
             metablock.height,
         );
 
+        // TODO: don't confirm the parent mulitple times, if we have multiple solutions in the same timeslot
+        // same for gossip
+
+        // how do we know if the block is already confirmed?
+
         // confirm the k-deep parent
         let mut parent_content_id = metablock.block.content.parent_id;
         let mut confirmation_depth: usize = 0;
@@ -748,16 +765,6 @@ impl Ledger {
                 None => break,
             }
         }
-
-        // add to epoch tracker
-        self.epoch_tracker
-            .add_block_to_epoch(
-                block.proof.epoch,
-                metablock.height,
-                proof_id,
-                &self.blocks_on_longest_chain,
-            )
-            .await;
     }
 
     /// Stage all cached descendants for a given parent
@@ -791,7 +798,15 @@ impl Ledger {
     }
 
     /// Applies the txs in a block to balances when it is k-deep
-    pub async fn confirm_block(&mut self, metablock: &MetaBlock) -> bool {
+    async fn confirm_block(&mut self, metablock: &MetaBlock) -> bool {
+        // TODO: ensure there are no other confirmed blocks at this height
+
+        // ensure this block has not already been confirmed
+        if self.confirmed_blocks.contains(&metablock.proof_id) {
+            debug!("Staged block references a block that has already been confirmed");
+            return false;
+        }
+
         debug!(
             "Confirming block with proof_id: {}",
             hex::encode(&metablock.proof_id[0..8])
@@ -806,8 +821,16 @@ impl Ledger {
             }
         }
 
-        // add to longest chain
-        self.blocks_on_longest_chain.insert(metablock.proof_id);
+        self.confirmed_blocks.insert(metablock.proof_id);
+
+        // add to epoch tracker
+        self.epoch_tracker
+            .add_block_to_epoch(
+                metablock.block.proof.epoch,
+                metablock.height,
+                metablock.proof_id,
+            )
+            .await;
 
         // TODO: add block header to state buffer
 
@@ -878,6 +901,7 @@ impl Ledger {
             }
         }
 
+        // prune any siblings of this block
         if metablock.height > 0 {
             // get the parent_content_id of this block
             let parent_content_id = self
@@ -905,7 +929,7 @@ impl Ledger {
     }
 
     /// Recursively removes all siblings and their descendants when a new block is confirmed
-    pub fn prune_children(&mut self, proof_ids: Vec<ProofId>) {
+    fn prune_children(&mut self, proof_ids: Vec<ProofId>) {
         for child_proof_id in proof_ids.iter() {
             // remove from metablocks
             let metablock = self
@@ -931,57 +955,20 @@ impl Ledger {
 
     /// cache a block received via gossip ahead of the current epoch
     /// block will be staged once it's parent is seen
-    pub fn cache_remote_block(&mut self, block: &Block) {
+    fn cache_remote_block(&mut self, block: &Block) {
         self.cached_blocks_by_parent_content_id
             .entry(block.content.parent_id)
             .and_modify(|blocks| blocks.push(block.clone()))
             .or_insert(vec![block.clone()]);
     }
 
-    /// apply the cached block to the ledger
-    ///
-    /// Returns last (potentially unfinished) timeslot
-    // pub async fn apply_cached_blocks(&mut self, timeslot: u64) -> Result<u64, ()> {
-    //     for current_timeslot in timeslot.. {
-    //         if let Some(proof_ids) = self.cached_proof_ids_by_timeslot.remove(&current_timeslot) {
-    //             for proof_id in proof_ids.iter() {
-    //                 let cached_block = self.metablocks.blocks.get(proof_id).unwrap().block.clone();
-    //                 if !self.validate_and_stage_remote_block(cached_block).await {
-    //                     return Err(());
-    //                 }
-    //             }
-    //         }
-    //
-    //         if self.cached_proof_ids_by_timeslot.is_empty() {
-    //             return Ok(current_timeslot);
-    //         }
-    //
-    //         if current_timeslot % TIMESLOTS_PER_EPOCH as u64 == 0 {
-    //             // create the new epoch
-    //             let current_epoch = self
-    //                 .epoch_tracker
-    //                 .advance_epoch(&self.blocks_on_longest_chain)
-    //                 .await;
-    //
-    //             debug!(
-    //                 "Closed randomness for epoch {} during apply cached blocks",
-    //                 current_epoch - CHALLENGE_LOOKBACK_EPOCHS
-    //             );
-    //
-    //             debug!("Creating a new empty epoch for epoch {}", current_epoch);
-    //         }
-    //     }
-    //
-    //     Ok(timeslot)
-    // }
-
     /// Retrieve the balance for a given node id
-    pub fn get_account_state(&self, id: &[u8]) -> Option<AccountState> {
+    fn get_account_state(&self, id: &[u8]) -> Option<AccountState> {
         self.balances.get(id).copied()
     }
 
     /// Print the balance of all accounts in the ledger
-    pub fn print_balances(&self) {
+    fn print_balances(&self) {
         info!("Current balance of accounts:\n");
         for (id, account_state) in self.balances.iter() {
             info!(

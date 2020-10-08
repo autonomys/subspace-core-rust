@@ -45,17 +45,16 @@ pub async fn run(
         )
         .await;
 
+        debug!("Timer has arrived on timeslot: {}", next_timeslot);
+
         {
-            let mut locked_ledger = ledger.lock().await;
-            locked_ledger.next_timeslot().await;
+            ledger.lock().await.next_timeslot().await;
 
             // We are looking to epoch boundary, but also trying not to go ahead of clock
             if next_timeslot % TIMESLOTS_PER_EPOCH == 0
                 && (current_epoch_index < next_timeslot / TIMESLOTS_PER_EPOCH)
             {
-                current_epoch_index = epoch_tracker
-                    .advance_epoch(&locked_ledger.blocks_on_longest_chain)
-                    .await;
+                current_epoch_index = epoch_tracker.advance_epoch().await;
 
                 debug!(
                     "Timer is creating a new empty epoch at index {}",
@@ -64,7 +63,6 @@ pub async fn run(
             }
         }
 
-        debug!("Timer has arrived on timeslot: {}", next_timeslot);
         let epoch = epoch_tracker.get_lookback_epoch(current_epoch_index).await;
 
         if !epoch.is_closed {

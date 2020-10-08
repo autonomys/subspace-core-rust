@@ -90,7 +90,7 @@ impl Block {
 
         // is the epoch challenge correct?
         if epoch_randomness != &self.proof.randomness {
-            warn!("Invalid block, epoch randomness is incorrect!");
+            error!("Invalid block, epoch randomness is incorrect!");
             return false;
         }
 
@@ -154,7 +154,7 @@ impl Block {
 
         let decoding_hash = crypto::digest_sha_256(&decoding);
         if genesis_piece_hash != &decoding_hash {
-            warn!("Invalid block, encoding is invalid");
+            error!("Invalid block, encoding is invalid");
             // utils::compare_bytes(&proof.encoding, &proof.encoding, &decoding);
             return false;
         }
