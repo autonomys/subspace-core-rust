@@ -1,48 +1,17 @@
 use crate::timer::Epoch;
-use crate::{
-    ProofId, CHALLENGE_LOOKBACK_EPOCHS, EPOCHS_PER_EON, EPOCH_CLOSE_WAIT_TIME,
-    INITIAL_SOLUTION_RANGE, PIECE_SIZE, SOLUTION_RANGE_LOOKBACK_EONS, TIMESLOTS_PER_EPOCH,
-};
+use crate::{ProofId, CHALLENGE_LOOKBACK_EPOCHS, EPOCH_CLOSE_WAIT_TIME};
 use async_std::sync::Mutex;
 use log::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
-
-/*
-   Deriving randomness based on k-depth
-
-   Track proof_ids by confirmation depth when applied in a BTreeMap<BlockHeight, Vec<ProofId>>
-   At epoch closure, take the lowest block_height and the smallest proof_id
-   Check to ensure that the proof is on the longest chain using proof_id set
-   Use that proof_id as the epoch_randomness
-
-   Why not just use applied_blocks_by_height?
-   How do we know which timeslot this corresponds to?
-
-   The height of a block is always parent_height + 1
-   What if the block is seen late?
-
-
-
-
-*/
 
 #[derive(Default)]
 struct Inner {
     current_epoch: u64,
     epochs: HashMap<u64, Epoch>,
-    // TODO: Pruning, probably replace with VecDeque
-    /// Solution range for an eon (computed from lookback eon when it was closed)
-    eon_to_solution_range: HashMap<u64, u64>,
 }
 
 impl Inner {
-    fn fill_initial_solution_range(&mut self, solution_range: u64) {
-        for eon_index in 0..SOLUTION_RANGE_LOOKBACK_EONS {
-            self.eon_to_solution_range.insert(eon_index, solution_range);
-        }
-    }
-
     fn advance_epoch(&mut self) -> u64 {
         if self.epochs.is_empty() {
             self.current_epoch = 0;
@@ -52,88 +21,19 @@ impl Inner {
 
         // Create new epoch
         let current_epoch = self.current_epoch;
-        let current_eon_index = current_epoch / EPOCHS_PER_EON;
-        // Get solution range of lookback eon (fallback to eon 0 if necessary in case of first few eons)
-        let solution_range = *self
-            .eon_to_solution_range
-            .get(
-                &current_eon_index
-                    .checked_sub(SOLUTION_RANGE_LOOKBACK_EONS)
-                    .unwrap_or(0),
-            )
-            .expect("No solution range for lookback eon, this should never happen");
-
-        self.epochs
-            .insert(current_epoch, Epoch::new(current_epoch, solution_range));
+        self.epochs.insert(current_epoch, Epoch::new(current_epoch));
 
         // Close epoch at lookback offset if it exists
         if current_epoch >= EPOCH_CLOSE_WAIT_TIME {
             let close_epoch_index = current_epoch - EPOCH_CLOSE_WAIT_TIME;
             let epoch = self.epochs.get_mut(&close_epoch_index).unwrap();
 
-            epoch.close();
+            epoch.close(current_epoch);
 
             debug!(
                 "Closed epoch with index {}, randomness is {}",
                 current_epoch - EPOCH_CLOSE_WAIT_TIME,
                 &hex::encode(epoch.randomness)[0..8]
-            );
-        }
-
-        // Close an eon
-        if current_epoch >= EPOCHS_PER_EON * SOLUTION_RANGE_LOOKBACK_EONS
-            && current_epoch % EPOCHS_PER_EON == 0
-        {
-            let lookback_eon_start_epoch_index =
-                current_epoch - EPOCHS_PER_EON * SOLUTION_RANGE_LOOKBACK_EONS;
-            let lookback_eon_index = lookback_eon_start_epoch_index / EPOCHS_PER_EON;
-
-            let last_closed_epoch_index = current_epoch - EPOCH_CLOSE_WAIT_TIME;
-            // Sum up block count from all epochs starting with lookback eon and til last closed
-            // epoch
-            let block_count = (lookback_eon_start_epoch_index..=last_closed_epoch_index)
-                .map(|epoch_index| self.epochs.get(&epoch_index).unwrap().get_block_count())
-                .sum::<u64>();
-            // Get solution range of the lookback eon (fallback to eon 0 if necessary in case of
-            // first few eons)
-            let lookback_solution_range = *self
-                .eon_to_solution_range
-                .get(&lookback_eon_index)
-                .expect("No solution range for current eon, this should never happen");
-            // Re-adjust previous solution range based on new block count
-            let solution_range = if block_count > 0 {
-                let new_solution_range = (lookback_solution_range as f64 / block_count as f64
-                    * (TIMESLOTS_PER_EPOCH
-                        * (last_closed_epoch_index - lookback_eon_start_epoch_index + 1))
-                        as f64)
-                    .round() as u64;
-
-                // Apply 10% of the change to lookback solution range
-                let solution_range = lookback_solution_range as i64
-                    + (new_solution_range as i64 - lookback_solution_range as i64) / 100 * 10;
-
-                // TODO: revert
-                lookback_solution_range
-
-            // Should divide by 2 without remainder
-            // solution_range as u64 / 2 * 2
-            } else {
-                lookback_solution_range
-            };
-
-            self.eon_to_solution_range.insert(
-                lookback_eon_index + SOLUTION_RANGE_LOOKBACK_EONS,
-                solution_range,
-            );
-
-            let bytes_pledged = (u64::MAX / lookback_solution_range) * PIECE_SIZE as u64;
-
-            info!(
-                "Closed an eon, block count is {}, used solution range {}, new solution range is {}, ~{}MiB bytes pledged",
-                block_count,
-                lookback_solution_range,
-                solution_range,
-                bytes_pledged / 1024 / 1024,
             );
         }
 
@@ -153,10 +53,9 @@ impl EpochTracker {
         }
     }
 
-    pub fn new_genesis(initial_solution_range: u64) -> Self {
-        let mut inner = Inner::default();
-
-        inner.fill_initial_solution_range(initial_solution_range);
+    // TODO: does new and new_genesis still need to be seperate?
+    pub fn new_genesis() -> Self {
+        let inner = Inner::default();
 
         Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -192,12 +91,6 @@ impl EpochTracker {
     /// Returns `true` in case no blocks for this timeslot existed before
     pub async fn add_block_to_epoch(&self, epoch_index: u64, block_height: u64, proof_id: ProofId) {
         let mut inner = self.inner.lock().await;
-
-        if inner.eon_to_solution_range.is_empty() {
-            inner.fill_initial_solution_range(INITIAL_SOLUTION_RANGE);
-            // Create the initial epoch
-            inner.advance_epoch();
-        }
 
         inner
             .epochs

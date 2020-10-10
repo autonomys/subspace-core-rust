@@ -1,7 +1,7 @@
 use crate::block::Block;
 use crate::{BlockId, ContentId, ProofId};
 use log::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct MetaBlock {

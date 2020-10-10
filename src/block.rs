@@ -94,6 +94,8 @@ impl Block {
             return false;
         }
 
+        // TODO: should verify that the solution range is correct for this timeslot
+
         let target = u64::from_be_bytes(slot_challenge[0..8].try_into().unwrap());
         let tag = u64::from_be_bytes(self.proof.tag);
         let (lower, is_lower_overflowed) = target.overflowing_sub(self.proof.solution_range / 2);

@@ -16,25 +16,24 @@ use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::{
     console, crypto, farmer, manager, plotter, rpc, CONSOLE, DEV_GATEWAY_ADDR,
-    INITIAL_SOLUTION_RANGE, MAINTAIN_PEERS_INTERVAL, MAX_CONNECTED_PEERS, MAX_PEERS,
-    MIN_CONNECTED_PEERS, MIN_PEERS, PLOT_SIZE,
+    MAINTAIN_PEERS_INTERVAL, MAX_CONNECTED_PEERS, MAX_PEERS, MIN_CONNECTED_PEERS, MIN_PEERS,
 };
 use tui_logger::{init_logger, set_default_level};
 
 /* Next Steps
 
-   X Single gateway node can farm from genesis
-   X A new peer can sync the ledger
-   X Derive randomness correctly for each epoch
-   X A new farmer can sync the ledger and co-farm
    - recover from missed gossip (else diverges) -> request blocks for timeslot
-   - Fix dynamic work difficulty
+   - validate blocks via sync
+   X Fix dynamic work difficulty
    - Encode state
    - Solve from genesis state
    - Split blocks in proposer and tx blocks
+   - Add nonce to tag computation
    - Sync the state chain
    - Switch to Schnorr signatures
    - Improve tx script support
+   - Storage accounts
+
 
 */
 
@@ -129,7 +128,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
 
     // create the randomness tracker
     let epoch_tracker = if node_type == NodeType::Gateway {
-        EpochTracker::new_genesis(INITIAL_SOLUTION_RANGE)
+        EpochTracker::new_genesis()
     } else {
         EpochTracker::new()
     };
@@ -152,7 +151,6 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(32);
     let (timer_to_farmer_tx, timer_to_farmer_rx) = channel::<FarmerMessage>(32);
     let solver_to_main_tx = any_to_main_tx.clone();
-    let main_to_main_tx = any_to_main_tx.clone();
 
     let network_fut = Network::new(
         node_id,
@@ -191,7 +189,6 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         ledger,
         any_to_main_rx,
         network.clone(),
-        main_to_main_tx,
         state_sender,
         timer_to_farmer_tx,
         epoch_tracker,

@@ -4,8 +4,9 @@ use crate::timer::EpochTracker;
 use crate::transaction::{AccountAddress, AccountState, CoinbaseTx, Transaction, TxId};
 use crate::{
     crypto, sloth, ContentId, ProofId, Tag, BLOCK_REWARD, CHALLENGE_LOOKBACK_EPOCHS,
-    CONFIRMATION_DEPTH, MAX_EARLY_TIMESLOTS, MAX_LATE_TIMESLOTS, PRIME_SIZE_BITS,
-    TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+    CONFIRMATION_DEPTH, EXPECTED_TIMESLOTS_PER_EON, GENESIS_OFFSET, INITIAL_SOLUTION_RANGE,
+    MAX_EARLY_TIMESLOTS, MAX_LATE_TIMESLOTS, PRIME_SIZE_BITS, PROPOSER_BLOCKS_PER_EON,
+    SOLUTION_RANGE_UPDATE_DELAY_IN_TIMESLOTS, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 
 use crate::metablocks::{MetaBlock, MetaBlocks};
@@ -41,6 +42,22 @@ pub struct Head {
     content_id: ContentId,
 }
 
+pub struct SolutionRangeUpdate {
+    next_timeslot: u64,
+    block_height: u64,
+    solution_range: u64,
+}
+
+impl SolutionRangeUpdate {
+    pub fn new(next_timeslot: u64, block_height: u64, solution_range: u64) -> Self {
+        SolutionRangeUpdate {
+            next_timeslot,
+            block_height,
+            solution_range,
+        }
+    }
+}
+
 // block: cached || staged
 // cached due to: received before sync or blocks found close together
 
@@ -72,6 +89,12 @@ pub struct Ledger {
     pub heads: Vec<Head>,
     /// Proof ids of all k-deep (confirmed) blocks
     confirmed_blocks: HashSet<ProofId>,
+    // data for next solution range
+    pub solution_range_update: SolutionRangeUpdate,
+    /// solution range being used at this time
+    pub current_solution_range: u64,
+    /// solution range tracker for each eon
+    pub solution_ranges_by_eon: HashMap<u64, u64>,
     /// container for all txs
     pub txs: HashMap<TxId, Transaction>,
     /// tracker for txs that have not yet been included in a tx block
@@ -88,6 +111,7 @@ pub struct Ledger {
     pub tx_payload: Vec<u8>,
     pub current_timeslot: u64,
     timer_handle: Option<JoinHandle<()>>,
+    last_eon_close_timeslot: u64,
 }
 
 impl Drop for Ledger {
@@ -112,19 +136,15 @@ impl Ledger {
         let prime_size = PRIME_SIZE_BITS;
         let sloth = sloth::Sloth::init(prime_size);
 
-        // spawn a background task
-        // assign to join_handle
-
         let timer_handle = async_std::task::spawn(async {
             // TODO: listen on the channel
-
             // listen for the next timeslot
             // increment the timeslot count
             // stage early blocks for that timeslot
         });
 
         // TODO: all of these data structures need to be periodically truncated
-        Ledger {
+        let mut ledger = Ledger {
             balances: HashMap::new(),
             metablocks: MetaBlocks::new(),
             recent_proof_ids: HashSet::new(),
@@ -133,6 +153,9 @@ impl Ledger {
             early_blocks_by_timeslot: BTreeMap::new(),
             heads: Vec::new(),
             confirmed_blocks: HashSet::new(),
+            solution_range_update: SolutionRangeUpdate::new(0, 0, 0),
+            current_solution_range: INITIAL_SOLUTION_RANGE,
+            solution_ranges_by_eon: HashMap::new(),
             txs: HashMap::new(),
             tx_mempool: HashSet::new(),
             genesis_timestamp: 0,
@@ -147,13 +170,31 @@ impl Ledger {
             merkle_proofs,
             current_timeslot: 0,
             timer_handle: Some(timer_handle),
-        }
+            last_eon_close_timeslot: GENESIS_OFFSET,
+        };
+
+        ledger
+            .solution_ranges_by_eon
+            .insert(0, INITIAL_SOLUTION_RANGE);
+
+        ledger
     }
 
     /// Update the timeslot, then validates and stages all early blocks that have arrived
     pub async fn next_timeslot(&mut self) {
         self.current_timeslot += 1;
         info!("Ledger has arrive at timeslot {}", self.current_timeslot);
+
+        // apply solution range changes with delay
+        if self.current_timeslot == self.solution_range_update.next_timeslot {
+            self.current_solution_range = self.solution_range_update.solution_range;
+
+            // track the current eon_index
+            let eon_index = (self.solution_range_update.block_height - GENESIS_OFFSET)
+                / PROPOSER_BLOCKS_PER_EON;
+            self.solution_ranges_by_eon
+                .insert(eon_index, self.current_solution_range);
+        }
 
         // apply all early blocks
         if self
@@ -168,7 +209,7 @@ impl Ledger {
             {
                 debug!("Timeslot has arrived for early block, validating and staging");
 
-                if self.is_valid_proposer_block_that_has_arrived(&block).await {
+                if self.validate_proposer_block_that_has_arrived(&block).await {
                     // TODO: have to make sure we don't reference the block (just check for last timeslot in create block)
                     self.stage_block(&block).await;
                 }
@@ -178,7 +219,7 @@ impl Ledger {
         }
     }
 
-    /// Returns all blocks seen for a given timeslot
+    /// Returns all (valid) blocks seen for a given timeslot
     pub fn get_blocks_by_timeslot(&self, timeslot: u64) -> Vec<Block> {
         self.proof_ids_by_timeslot
             .get(&timeslot)
@@ -248,7 +289,6 @@ impl Ledger {
 
         for _ in 0..CHALLENGE_LOOKBACK_EPOCHS {
             let current_epoch_index = self.epoch_tracker.advance_epoch().await;
-            let current_epoch = self.epoch_tracker.get_epoch(current_epoch_index).await;
             info!(
                 "Advanced to epoch {} during genesis init",
                 current_epoch_index
@@ -270,7 +310,7 @@ impl Ledger {
                             .unwrap(),
                     ),
                     piece_index: 0,
-                    solution_range: current_epoch.solution_range,
+                    solution_range: self.current_solution_range,
                 };
 
                 let proof_id = proof.get_id();
@@ -448,7 +488,7 @@ impl Ledger {
     }
 
     /// Validates a proposer block received via sync during startup
-    pub async fn is_valid_proposer_block_from_sync(
+    pub async fn validate_proposer_block_from_sync(
         &mut self,
         block: &Block,
         current_timeslot: Timeslot,
@@ -459,7 +499,6 @@ impl Ledger {
             return false;
         }
 
-        // is this a new block? else error
         let proof_id = block.proof.get_id();
 
         // is this a new block?
@@ -473,6 +512,7 @@ impl Ledger {
         self.recent_proof_ids.insert(proof_id);
 
         // if not the genesis block, get parent
+        // TODO: this will need to be adjusted once we are solving from genesis
         if block.proof.timeslot > 0 {
             // have we already received parent? else error
             if !self
@@ -506,7 +546,7 @@ impl Ledger {
         }
 
         // block is valid?
-        // TODO: turn this back on
+        // TODO: turn this back on, once we include proofs via sync
         // if !(self.validate_block(block).await) {
         //     return false;
         // }
@@ -515,7 +555,7 @@ impl Ledger {
     }
 
     /// Validates a proposer block received via gossip
-    pub async fn is_valid_proposer_block_from_gossip(&mut self, block: &Block) -> bool {
+    pub async fn validate_proposer_block_from_gossip(&mut self, block: &Block) -> bool {
         debug!(
             "Validating remote block for epoch: {} at timeslot {}",
             block.proof.epoch, block.proof.timeslot
@@ -607,7 +647,7 @@ impl Ledger {
     }
 
     /// Completes validation for a cached proposer block received via gossip whose parent has been staged
-    pub async fn is_valid_proposer_block_from_cache(&mut self, block: &Block) -> bool {
+    pub async fn validate_proposer_block_from_cache(&mut self, block: &Block) -> bool {
         // is parent from earlier timeslot?
         let parent_proof_id = self
             .metablocks
@@ -634,7 +674,7 @@ impl Ledger {
     }
 
     /// Completes validation for a proposer block received via gossip that was ahead of the timeslot received in and has now arrived
-    pub async fn is_valid_proposer_block_that_has_arrived(&mut self, block: &Block) -> bool {
+    pub async fn validate_proposer_block_that_has_arrived(&mut self, block: &Block) -> bool {
         // block is valid
         if !(self.validate_block(block).await) {
             return false;
@@ -689,6 +729,7 @@ impl Ledger {
             Transaction::Coinbase(block.coinbase_tx.clone()),
         );
 
+        // TODO: stop pruning the block
         let mut pruned_block = block.clone();
         pruned_block.prune();
         // TODO: Everything that happens here may need to be reversed if `add_block_to_epoch()` at
@@ -733,13 +774,7 @@ impl Ledger {
             metablock.height,
         );
 
-        // TODO: don't confirm the parent mulitple times, if we have multiple solutions in the same timeslot
-        // same for gossip
-
-        // how do we know if the block is already confirmed?
-
         // confirm the k-deep parent
-        let mut parent_content_id = metablock.block.content.parent_id;
         let mut confirmation_depth: usize = 0;
         loop {
             match self
@@ -755,7 +790,6 @@ impl Ledger {
                         .expect("Must have block if in content_to_proof_map")
                         .clone();
 
-                    parent_content_id = parent_block.block.content.parent_id;
                     confirmation_depth += 1;
                     if confirmation_depth == CONFIRMATION_DEPTH {
                         self.confirm_block(&parent_block).await;
@@ -779,7 +813,7 @@ impl Ledger {
             let mut additional_blocks: Vec<Block> = Vec::new();
             for block in blocks.drain(..) {
                 if self
-                    .is_valid_proposer_block_from_cache(&block.clone())
+                    .validate_proposer_block_from_cache(&block.clone())
                     .await
                 {
                     self.stage_block(&block.clone()).await;
@@ -810,6 +844,55 @@ impl Ledger {
         debug!(
             "Confirming block with proof_id: {}",
             hex::encode(&metablock.proof_id[0..8])
+        );
+
+        // TODO: do we need to account for the timeslot offset here?
+        // update the solution range on Eon boundary
+        if metablock.height > GENESIS_OFFSET
+            && (metablock.height - GENESIS_OFFSET) % PROPOSER_BLOCKS_PER_EON == 0
+        {
+            /* Hypothesize as to why expected and actual differ...
+             * as plot size increases, variance does not appear to change
+             * as timeslots_per_block increases, adjustment decreases
+             * as blocks_per_eon increase, variance decreases
+             * as the size of the domain increases, does the variance decrease?
+             * reducing the lag between calculation and implementation
+             * all of these things are amplifying each other
+             */
+
+            // a new eon has arrived
+            let elapsed_timeslots = self.current_timeslot - self.last_eon_close_timeslot;
+            self.last_eon_close_timeslot = self.current_timeslot;
+            let mut range_adjustment = elapsed_timeslots as f64 / EXPECTED_TIMESLOTS_PER_EON as f64;
+
+            // ensure the range does not change more than a factor 4
+            if range_adjustment > 4.0f64 {
+                range_adjustment = 4.0f64;
+            }
+
+            if range_adjustment < 0.25f64 {
+                range_adjustment = 0.25f64;
+            }
+
+            // stage the new solution range for update after timeslots expire
+            self.solution_range_update = SolutionRangeUpdate::new(
+                self.current_timeslot + SOLUTION_RANGE_UPDATE_DELAY_IN_TIMESLOTS,
+                metablock.height,
+                (self.current_solution_range as f64 * range_adjustment) as u64,
+            );
+
+            warn!(
+                "Eon has closed.
+                Expected timeslots elapsed is: {}
+                Actual timeslots elapsed is: {}
+                Range adjustment is: {}",
+                EXPECTED_TIMESLOTS_PER_EON, elapsed_timeslots, range_adjustment,
+            )
+        }
+
+        info!(
+            "Confirmed block with height {} at timeslot {}",
+            metablock.height, self.current_timeslot
         );
 
         // TODO: modify to verify tx blocks and that the first tx is always a coinbase tx
@@ -963,12 +1046,12 @@ impl Ledger {
     }
 
     /// Retrieve the balance for a given node id
-    fn get_account_state(&self, id: &[u8]) -> Option<AccountState> {
+    fn _get_account_state(&self, id: &[u8]) -> Option<AccountState> {
         self.balances.get(id).copied()
     }
 
     /// Print the balance of all accounts in the ledger
-    fn print_balances(&self) {
+    fn _print_balances(&self) {
         info!("Current balance of accounts:\n");
         for (id, account_state) in self.balances.iter() {
             info!(

@@ -28,13 +28,13 @@ pub mod utils;
 // TODO: Should make into actual structs
 pub type Piece = [u8; PIECE_SIZE];
 pub type IV = [u8; IV_SIZE];
+pub type ExpandedIV = [u8; PRIME_SIZE_BYTES];
+pub type PublicKey = [u8; 32];
 pub type NodeID = IV;
 pub type Tag = [u8; 8];
 pub type BlockId = [u8; 32];
 pub type ProofId = [u8; 32];
 pub type ContentId = [u8; 32];
-pub type PublicKey = [u8; 32];
-pub type ExpandedIV = [u8; PRIME_SIZE_BYTES];
 pub type EpochRandomness = Arc<Mutex<HashMap<u64, [u8; 32]>>>;
 pub type EpochChallenge = [u8; 32];
 pub type SlotChallenge = [u8; 32];
@@ -56,8 +56,9 @@ pub const MIN_PEERS: usize = 10;
 pub const MAX_PEERS: usize = 100;
 // TODO: Is this a good value?
 pub const MAINTAIN_PEERS_INTERVAL: Duration = Duration::from_secs(60);
-pub const CONFIRMATION_DEPTH: usize = 3;
-pub const DEV_GATEWAY_ADDR: &str = "127.0.0.1:8080";
+// TODO: revert to six, just for testing now
+pub const CONFIRMATION_DEPTH: usize = 1;
+pub const DEV_GATEWAY_ADDR: &str = "127.0.0.1:8081";
 pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const DEV_WS_ADDR: &str = "127.0.0.1:8880";
 pub const CONSOLE: bool = false;
@@ -66,29 +67,32 @@ pub const BLOCK_REWARD: u64 = 1;
 // TODO: add documentation on allowed parameters for time
 pub const MAX_EARLY_TIMESLOTS: u64 = 10;
 pub const MAX_LATE_TIMESLOTS: u64 = 10;
-pub const TIMESLOT_DURATION: u64 = 1000;
+pub const TIMESLOT_DURATION: u64 = 5;
 pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 3;
 // pub const EPOCH_CLOSE_WAIT_TIME: u64 = CHALLENGE_LOOKBACK - 2;
 /// Time in epochs
 pub const EPOCH_CLOSE_WAIT_TIME: u64 = 3;
 pub const TIMESLOTS_PER_EPOCH: u64 = 32;
 
-pub const EPOCHS_PER_EON: u64 = 2016;
-pub const SOLUTION_RANGE_LOOKBACK_EONS: u64 = 4;
-pub const INITIAL_SOLUTION_RANGE: u64 = u64::MAX / PLOT_SIZE as u64 / 5u64;
+// current plot is 65k encodings with 268 MB of disk
+// test plot is 1M encodings with 4 GB of disk
+
+/// Solution Range
+pub const GENESIS_OFFSET: u64 = TIMESLOTS_PER_EPOCH * CHALLENGE_LOOKBACK_EPOCHS;
+pub const TIMESLOTS_PER_PROPOSER_BLOCK: u64 = 5;
+pub const PROPOSER_BLOCKS_PER_EON: u64 = 2016 * 4;
+pub const ADJUSTMENT_FACTOR: f64 = 1.105;
+pub const EXPECTED_TIMESLOTS_PER_EON: u64 = (TIMESLOTS_PER_PROPOSER_BLOCK as f64
+    * PROPOSER_BLOCKS_PER_EON as f64
+    * ADJUSTMENT_FACTOR) as u64;
+pub const INITIAL_SOLUTION_RANGE: u64 = u64::MAX / PLOT_SIZE as u64 / TIMESLOTS_PER_PROPOSER_BLOCK;
+pub const SOLUTION_RANGE_UPDATE_DELAY_IN_TIMESLOTS: u64 = 10;
 
 // Assertions about acceptable values for above parameters:
 // Lookback should always be at least one
 const_assert!(EPOCH_CLOSE_WAIT_TIME >= 1);
 // Epoch must be closed by the time we do lookback to it
 const_assert!(CHALLENGE_LOOKBACK_EPOCHS >= EPOCH_CLOSE_WAIT_TIME);
-
-// Eon should have epochs
-const_assert!(EPOCHS_PER_EON >= 1);
-// Eon must be closed by the time we do lookback to it
-const_assert!(SOLUTION_RANGE_LOOKBACK_EONS > EPOCH_CLOSE_WAIT_TIME);
-
-// CONSTANT_FOR_LAST_EON = BLOCKS_PER_EON / TIMESLOTS_PER_EON = 1
 
 pub const EPOCH_GRACE_PERIOD: Duration =
     Duration::from_millis(TIMESLOTS_PER_EPOCH * TIMESLOT_DURATION);

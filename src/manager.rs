@@ -1,4 +1,3 @@
-use crate::block::Block;
 use crate::console::AppState;
 use crate::farmer::{FarmerMessage, Solution};
 use crate::ledger::Ledger;
@@ -9,8 +8,8 @@ use crate::network::{Network, NodeType};
 use crate::timer::EpochTracker;
 use crate::transaction::Transaction;
 use crate::{
-    timer, ContentId, CHALLENGE_LOOKBACK_EPOCHS, CONSOLE, EPOCH_GRACE_PERIOD, MAX_EARLY_TIMESLOTS,
-    MAX_LATE_TIMESLOTS, MIN_CONNECTED_PEERS, PLOT_SIZE, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+    timer, ContentId, CHALLENGE_LOOKBACK_EPOCHS, CONSOLE, MIN_CONNECTED_PEERS, PLOT_SIZE,
+    TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
@@ -19,21 +18,9 @@ use futures::lock::Mutex;
 use log::*;
 use std::fmt;
 use std::fmt::Display;
-use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/*
- * Sync Workflow
- *
- * Peer requests block at height 0
- * GW sends block 0
- * Peer checks to see if has any cached blocks that reference the block received
- * If yes, peer recursively applies cached blocks
- * If no, peer requests the next block
-*/
-
-// TODO: Split this into multiple enums
 pub enum ProtocolMessage {
     /// Solver sends a set of solutions back to main for application
     BlockSolutions { solutions: Vec<Solution> },
@@ -53,6 +40,7 @@ impl Display for ProtocolMessage {
 
 pub type SharedLedger = Arc<Mutex<Ledger>>;
 
+// TODO: start the timer once
 /// start the timer after syncing the ledger
 pub fn start_timer(
     timer_to_farmer_tx: Sender<FarmerMessage>,
@@ -79,7 +67,6 @@ pub async fn run(
     ledger: Ledger,
     any_to_main_rx: Receiver<ProtocolMessage>,
     network: Network,
-    main_to_main_tx: Sender<ProtocolMessage>,
     state_sender: crossbeam_channel::Sender<AppState>,
     timer_to_farmer_tx: Sender<FarmerMessage>,
     epoch_tracker: EpochTracker,
@@ -87,7 +74,6 @@ pub async fn run(
     let ledger: SharedLedger = Arc::new(Mutex::new(ledger));
     {
         let network = network.clone();
-        let epoch_tracker = epoch_tracker.clone();
         let ledger = Arc::clone(&ledger);
 
         async_std::task::spawn(async move {
@@ -99,7 +85,7 @@ pub async fn run(
                         let mut locked_ledger = ledger.lock().await;
 
                         if locked_ledger
-                            .is_valid_proposer_block_from_gossip(&block)
+                            .validate_proposer_block_from_gossip(&block)
                             .await
                         {
                             network
@@ -270,7 +256,7 @@ pub async fn run(
 
                                 // validate the block
                                 if !locked_ledger
-                                    .is_valid_proposer_block_from_sync(&block, timeslot)
+                                    .validate_proposer_block_from_sync(&block, timeslot)
                                     .await
                                 {
                                     // TODO: start over with a different peer
@@ -319,12 +305,11 @@ pub async fn run(
                                         .await;
                                 }
 
-                                info!("Starting the timer from genesis time");
-
                                 locked_ledger.timer_is_running = true;
                                 locked_ledger.current_timeslot = timeslot - 1;
 
                                 // start the timer
+                                info!("Starting the timer from genesis time");
                                 start_timer(
                                     timer_to_farmer_tx.clone(),
                                     is_farming,

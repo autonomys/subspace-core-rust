@@ -9,7 +9,7 @@ pub use epoch_tracker::EpochTracker;
 use log::*;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-// timer is a struct
+// TODO: make timer into a struct
 // has a channel which is a beacon
 // sends a message on every timeslot arrival
 // where does the receiver go?
@@ -36,8 +36,6 @@ pub async fn run(
 
     // advance through timeslots on set interval
     loop {
-        // TODO: this is fast forwarding if timeslot is incorrect
-
         async_std::task::sleep(
             (next_timeslot as u32 * Duration::from_millis(TIMESLOT_DURATION))
                 .checked_sub(genesis_instant.elapsed())
@@ -76,13 +74,17 @@ pub async fn run(
             let slot_challenge = epoch.get_challenge_for_timeslot(next_timeslot);
             // TODO: This doesn't wait until we solve, so in case disk is overloaded, this
             //  will cause DoS
+
+            // TODO: this should not take effect until N timeslots after the new range has been calculated
+            let solution_range = ledger.lock().await.current_solution_range;
+
             timer_to_farmer_tx
                 .send(FarmerMessage::SlotChallenge {
                     epoch_index: current_epoch_index,
                     timeslot: next_timeslot,
                     randomness: epoch.randomness,
                     slot_challenge,
-                    solution_range: epoch.solution_range,
+                    solution_range,
                 })
                 .await;
         }
