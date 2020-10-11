@@ -646,9 +646,7 @@ impl Network {
                             });
                         }
 
-                        while network.inner.peers_store.lock().await.peers.len()
-                            < network.inner.min_connected_peers
-                        {
+                        while peers_store.peers.len() < network.inner.min_connected_peers {
                             trace!("Low on connections, trying to establish more");
                             if let Some(peer) = network.get_random_disconnected_peer().await {
                                 // TODO: Probably count number of errors for peer and remove it if
@@ -659,9 +657,7 @@ impl Network {
                             }
                         }
 
-                        if network.inner.peers_store.lock().await.nodes.len()
-                            < network.inner.min_nodes
-                        {
+                        if peers_store.nodes.len() < network.inner.min_nodes {
                             trace!("Low on peers, trying to request more");
                             if let Some(connected_peer) = network.get_random_connected_peer().await
                             {
