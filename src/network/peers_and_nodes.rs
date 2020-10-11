@@ -7,20 +7,7 @@ use lru::LruCache;
 use rand::seq::IteratorRandom;
 use std::collections::hash_map::Values;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
-
-const INITIAL_BACKOFF_INTERVAL: Duration = Duration::from_secs(1);
-const MAX_BACKOFF_INTERVAL: Duration = Duration::from_secs(60);
-const BACKOFF_MULTIPLIER: f64 = 10_f64;
-
-// TODO: Instead of hardcoded, this should be customizable
-fn create_backoff() -> ExponentialBackoff {
-    let mut backoff = ExponentialBackoff::default();
-    backoff.initial_interval = INITIAL_BACKOFF_INTERVAL;
-    backoff.max_interval = MAX_BACKOFF_INTERVAL;
-    backoff.multiplier = BACKOFF_MULTIPLIER;
-    backoff
-}
+use std::time::Instant;
 
 fn try_to_reconnect(network_weak: NetworkWeak, peer_addr: SocketAddr) {
     // TODO: Should be possible to cancel this background task early
@@ -79,15 +66,20 @@ pub(super) struct PeersAndNodes {
     dropped_peers: HashMap<SocketAddr, ExponentialBackoff>,
     /// All known nodes on the network
     pub(super) nodes: LruCache<SocketAddr, Option<Instant>>,
+    create_backoff: Box<dyn (Fn() -> ExponentialBackoff) + Send + Sync>,
 }
 
 impl PeersAndNodes {
-    pub(super) fn new(
+    pub(super) fn new<CB>(
         min_connected_peers: usize,
         max_connected_peers: usize,
         min_nodes: usize,
         max_nodes: usize,
-    ) -> Self {
+        create_backoff: CB,
+    ) -> Self
+    where
+        CB: (Fn() -> ExponentialBackoff) + Send + Sync + 'static,
+    {
         Self {
             min_connected_peers,
             max_connected_peers,
@@ -95,6 +87,7 @@ impl PeersAndNodes {
             peers: HashMap::new(),
             dropped_peers: HashMap::new(),
             nodes: LruCache::new(max_nodes),
+            create_backoff: Box::new(create_backoff),
         }
     }
 
@@ -162,7 +155,8 @@ impl PeersAndNodes {
 
         // TODO: avoid inspecting inner
         if self.peers.len() < network.inner.min_connected_peers {
-            self.dropped_peers.insert(peer_addr, create_backoff());
+            self.dropped_peers
+                .insert(peer_addr, (self.create_backoff)());
             try_to_reconnect(network.downgrade(), peer_addr);
         }
     }

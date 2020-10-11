@@ -61,6 +61,7 @@ use async_std::net::{TcpListener, TcpStream};
 use async_std::stream;
 use async_std::sync::{channel, Receiver, Sender};
 use async_std::task::JoinHandle;
+use backoff::ExponentialBackoff;
 use bytes::{Bytes, BytesMut};
 use futures::lock::Mutex as AsyncMutex;
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
@@ -92,6 +93,9 @@ use std::{fmt, io, mem};
 const MAX_MESSAGE_CONTENTS_LENGTH: usize = 2usize.pow(16) - 1;
 // TODO: Consider adaptive request timeout for more efficient sync
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+const INITIAL_BACKOFF_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_BACKOFF_INTERVAL: Duration = Duration::from_secs(60);
+const BACKOFF_MULTIPLIER: f64 = 10_f64;
 
 pub type NodeID = [u8; 32];
 
@@ -123,6 +127,14 @@ impl FromStr for NodeType {
             _ => Err(()),
         }
     }
+}
+
+pub fn create_backoff() -> ExponentialBackoff {
+    let mut backoff = ExponentialBackoff::default();
+    backoff.initial_interval = INITIAL_BACKOFF_INTERVAL;
+    backoff.max_interval = MAX_BACKOFF_INTERVAL;
+    backoff.multiplier = BACKOFF_MULTIPLIER;
+    backoff
 }
 
 /// Returns Option<(message_bytes, consumed_bytes)>
@@ -517,7 +529,7 @@ pub struct Network {
 }
 
 impl Network {
-    pub async fn new(
+    pub async fn new<CB>(
         node_id: NodeID,
         addr: SocketAddr,
         min_connected_peers: usize,
@@ -525,7 +537,11 @@ impl Network {
         min_nodes: usize,
         max_nodes: usize,
         maintain_peers_interval: Duration,
-    ) -> io::Result<Self> {
+        create_backoff: CB,
+    ) -> io::Result<Self>
+    where
+        CB: (Fn() -> ExponentialBackoff) + Send + Sync + 'static,
+    {
         let listener = TcpListener::bind(addr).await?;
         let (gossip_sender, gossip_receiver) =
             async_channel::bounded::<(SocketAddr, GossipMessage)>(32);
@@ -541,6 +557,7 @@ impl Network {
                 max_connected_peers,
                 min_nodes,
                 max_nodes,
+                create_backoff,
             ))),
             background_tasks: StdMutex::default(),
             handlers,
@@ -1020,6 +1037,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_secs(60),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1038,6 +1056,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_secs(60),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1094,6 +1113,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_secs(60),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1107,6 +1127,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_secs(60),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1184,6 +1205,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_secs(60),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1197,6 +1219,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_secs(60),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1249,6 +1272,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_secs(60),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1261,6 +1285,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_secs(60),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1278,6 +1303,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_secs(60),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1312,6 +1338,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_secs(60),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1326,6 +1353,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_secs(60),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1343,6 +1371,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_secs(60),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1405,6 +1434,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_millis(100),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1419,6 +1449,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_millis(100),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1438,6 +1469,7 @@ mod tests {
                 2,
                 10,
                 Duration::from_millis(100),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
@@ -1483,6 +1515,7 @@ mod tests {
                 5,
                 10,
                 Duration::from_millis(100),
+                create_backoff,
             )
             .await
             .expect("Network failed to start");
