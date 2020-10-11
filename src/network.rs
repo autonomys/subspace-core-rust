@@ -1,3 +1,56 @@
+//! Network module
+//!
+//! Network module manages TCP connections to other nodes on Subspace network and is used to
+//! exchange gossip as well as request/response messages.
+//!
+//! During the first startup network instance needs to connect to one or more gateway nodes on order
+//! to discover more nodes on the network and establish more connections (for reliability,
+//! performance and security purposes).
+//!
+//! Once connections to other nodes on the network are established, gateway nodes are no longer
+//! required for operation (upon restart network will try to reconnect to previously known nodes;
+//! TODO: not implemented at the moment), but may be used as a fallback if needed.
+//!
+//! Every connection starts with node address exchange (as remote address of incoming connection
+//! will not match publicly reachable address), after which communication consists of binary
+//! messages prepended by 2-byte little-endian message length header. Messages are Rust enums and
+//! are encoded using [bincode](https://crates.io/crates/bincode) (TODO: will probably change in
+//! future).
+//!
+//! There are 2 somewhat distinct kinds of messages:
+//! 1) Gossip: broadcast messages about blocks and transactions that should be propagated across the
+//!   network, received messages can be re-gossiped
+//! 2) Request/response: sometimes node needs to request something from another node (a block for
+//!   instance), in this case special request message is sent with an ID and matching response is
+//!   expected back
+//! 3) Internal request/response: some internal mechanisms of the network like maintaining peers
+//!   require additional request/response messages that are not a part of the public API; they are
+//!   processed completely internally, but otherwise are identical to public request/response
+//!   messages
+//!
+//! Gossip messages
+//! Gossip messages are sent using public API (specific for each message) of network instance and
+//! behave as fire and forget. They are sent to all connected peers without any acknowledgement.
+//! There is a channel exposed by network instance that allows reading received gossip messages for
+//! further processing. Re-gossiping is decided externally to the network instance and can be
+//! triggered the same way as regular gossip, but with original sender node excluded from the list
+//! of connected peers that should receive gossip.
+//!
+//! Request/response
+//! Request/response API on the network instance looks like a regular async function on one side and
+//! a channel with incoming requests on the other side that produces pairs of request message and
+//! one-shot channel through which response must be provided.
+//!
+//! In order to maintain connectivity with the rest of the network a background process is running
+//! that periodically tries to establish a TCP connection with nodes it is aware of (but doesn't
+//! have an active connection to) to make sure information is not stale.
+//! Same process also checks if the network instance is below desired number of known nodes and
+//! actively connected peers and will proactively try to request peers and establish necessary
+//! connections.
+//!
+//! External RPC interface is not part of the network, but can be built using event handlers and
+//! public methods provided.
+
 pub(crate) mod messages;
 
 use crate::block::Block;
