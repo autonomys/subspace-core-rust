@@ -620,15 +620,13 @@ impl Network {
                 let mut interval = stream::interval(maintain_peers_interval);
                 while let Some(_) = interval.next().await {
                     if let Some(network) = network_weak.upgrade() {
-                        for peer in network
-                            .inner
-                            .peers_store
-                            .lock()
-                            .await
-                            .peers
-                            .iter()
-                            .map(|(&addr, _)| addr)
-                        {
+                        let peers_store = network.inner.peers_store.lock().await;
+                        for peer in peers_store.peers.iter().map(|(&addr, _)| addr) {
+                            if peers_store.connections.contains_key(&peer) {
+                                // Already connected to, no need to check
+                                continue;
+                            }
+
                             let peers_store = Arc::clone(&network.inner.peers_store);
                             async_std::task::spawn(async move {
                                 // TODO: Timeout?
@@ -644,8 +642,6 @@ impl Network {
                                 } else {
                                     trace!("Dropping unreachable peer {}", peer);
                                     // TODO: Some number of attempts instead of removing immediately
-                                    // TODO: Dropping connection here will not cause disconnection
-                                    //  if peer is still connected for some reason
                                     peers_store.connections.remove(&peer);
                                     peers_store.peers.pop(&peer);
                                 }
