@@ -149,9 +149,12 @@ impl PeersAndNodes {
     }
 
     pub(super) fn mark_peer_as_dropped(&mut self, network: Network, peer_addr: SocketAddr) {
-        self.peers.remove(&peer_addr);
-        self.nodes.pop(&peer_addr);
         info!("Broker has dropped a peer who disconnected");
+
+        self.peers.remove(&peer_addr);
+        if let Some(node) = self.nodes.peek_mut(&peer_addr) {
+            node.take();
+        }
 
         // TODO: avoid inspecting inner
         if self.peers.len() < network.inner.min_connected_peers {

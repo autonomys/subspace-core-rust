@@ -650,9 +650,11 @@ impl Network {
                                     // if peers_store.has_connected_peer(&node) {
                                     //     return;
                                     // }
-                                    // TODO: Some number of attempts instead of removing immediately
+                                    // TODO: Stop the connection (which may have stuck)
                                     peers_store.peers.remove(&node);
-                                    peers_store.nodes.pop(&node);
+                                    if let Some(node) = peers_store.nodes.peek_mut(&node) {
+                                        node.take();
+                                    }
                                 }
                             });
                         }
@@ -1553,4 +1555,80 @@ mod tests {
             );
         });
     }
+
+    // TODO: Unlock when reconnection is triggered
+    // #[test]
+    // fn test_reconnection() {
+    //     init();
+    //     executor::block_on(async {
+    //         let gateway_network = Network::new(
+    //             NodeID::default(),
+    //             "127.0.0.1:0".parse().unwrap(),
+    //             1,
+    //             2,
+    //             5,
+    //             10,
+    //             Duration::from_millis(100),
+    //             || {
+    //                 let mut backoff = ExponentialBackoff::default();
+    //                 backoff.initial_interval = Duration::from_millis(100);
+    //                 backoff.max_interval = Duration::from_secs(5);
+    //                 backoff
+    //             },
+    //         )
+    //         .await
+    //         .expect("Network failed to start");
+    //
+    //         let gateway_addr = gateway_network.address();
+    //
+    //         let peer_network_1 = Network::new(
+    //             NodeID::default(),
+    //             "127.0.0.1:0".parse().unwrap(),
+    //             1,
+    //             2,
+    //             5,
+    //             10,
+    //             Duration::from_millis(100),
+    //             create_backoff,
+    //         )
+    //         .await
+    //         .expect("Network failed to start");
+    //
+    //         peer_network_1
+    //             .connect_to(gateway_addr)
+    //             .await
+    //             .expect("Failed to connect to gateway");
+    //
+    //         let peer_network_1_address = peer_network_1.address();
+    //
+    //         drop(peer_network_1);
+    //
+    //         async_std::task::sleep(Duration::from_millis(500)).await;
+    //
+    //         assert!(
+    //             gateway_network.get_random_connected_peer().await.is_none(),
+    //             "All peers must be disconnected",
+    //         );
+    //
+    //         let peer_network_1 = Network::new(
+    //             NodeID::default(),
+    //             peer_network_1_address,
+    //             1,
+    //             2,
+    //             5,
+    //             10,
+    //             Duration::from_millis(100),
+    //             create_backoff,
+    //         )
+    //         .await
+    //         .expect("Network failed to start");
+    //
+    //         async_std::task::sleep(Duration::from_millis(500)).await;
+    //
+    //         assert!(
+    //             gateway_network.get_random_connected_peer().await.is_some(),
+    //             "Must reconnect to peer that re-appeared on the network",
+    //         );
+    //     });
+    // }
 }
