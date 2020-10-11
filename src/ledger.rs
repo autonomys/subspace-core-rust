@@ -88,7 +88,9 @@ pub struct Ledger {
     /// fork tracker for pending blocks, used to find the current head of longest chain
     pub heads: Vec<Head>,
     /// Proof ids of all k-deep (confirmed) blocks
+    // TODO: may be able to remove this
     confirmed_blocks: HashSet<ProofId>,
+    last_eon_close_timeslot: u64,
     // data for next solution range
     pub solution_range_update: SolutionRangeUpdate,
     /// solution range being used at this time
@@ -111,7 +113,6 @@ pub struct Ledger {
     pub tx_payload: Vec<u8>,
     pub current_timeslot: u64,
     timer_handle: Option<JoinHandle<()>>,
-    last_eon_close_timeslot: u64,
 }
 
 impl Drop for Ledger {
@@ -394,6 +395,8 @@ impl Ledger {
             .as_millis() as u64;
 
         let mut longest_content_id = self.get_head();
+
+        // edge case
         if sibling_content_ids
             .iter()
             .any(|content_id| content_id == &longest_content_id)

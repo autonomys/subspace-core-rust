@@ -92,6 +92,10 @@ impl EpochTracker {
     pub async fn add_block_to_epoch(&self, epoch_index: u64, block_height: u64, proof_id: ProofId) {
         let mut inner = self.inner.lock().await;
 
+        if inner.epochs.is_empty() {
+            inner.advance_epoch();
+        }
+
         inner
             .epochs
             .get_mut(&epoch_index)

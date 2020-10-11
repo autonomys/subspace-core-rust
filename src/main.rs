@@ -22,14 +22,13 @@ use tui_logger::{init_logger, set_default_level};
 
 /* Next Steps
 
-   - recover from missed gossip (else diverges) -> request blocks for timeslot
+   - recover from missed gossip (else diverges) -> request blocks by parent_id
    - validate blocks via sync
-   X Fix dynamic work difficulty
+   - Split blocks in proposer and tx blocks
    - Encode state
    - Solve from genesis state
-   - Split blocks in proposer and tx blocks
-   - Add nonce to tag computation
    - Sync the state chain
+   - Add nonce to tag computation
    - Switch to Schnorr signatures
    - Improve tx script support
    - Storage accounts
