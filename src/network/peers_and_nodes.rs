@@ -4,6 +4,7 @@ use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
 use log::*;
 use lru::LruCache;
+use std::collections::hash_map::Values;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -69,20 +70,48 @@ fn try_to_reconnect(network_weak: NetworkWeak, peer_addr: SocketAddr) {
 }
 
 pub(super) struct PeersAndNodes {
+    min_connected_peers: usize,
+    max_connected_peers: usize,
     /// Actively connected peers
-    pub(super) peers: HashMap<SocketAddr, ConnectedPeer>,
-    pub(super) dropped_peers: HashMap<SocketAddr, ExponentialBackoff>,
+    peers: HashMap<SocketAddr, ConnectedPeer>,
+    dropped_peers: HashMap<SocketAddr, ExponentialBackoff>,
     /// All known nodes on the network
     pub(super) nodes: LruCache<SocketAddr, Option<Instant>>,
 }
 
 impl PeersAndNodes {
-    pub(super) fn new(max_nodes: usize) -> Self {
+    pub(super) fn new(
+        min_connected_peers: usize,
+        max_connected_peers: usize,
+        max_nodes: usize,
+    ) -> Self {
         Self {
+            min_connected_peers,
+            max_connected_peers,
             peers: HashMap::new(),
             dropped_peers: HashMap::new(),
             nodes: LruCache::new(max_nodes),
         }
+    }
+
+    pub(super) fn has_connected_peer(&self, node: &SocketAddr) -> bool {
+        self.peers.contains_key(node)
+    }
+
+    pub(super) fn get_connected_peers(&self) -> Values<SocketAddr, ConnectedPeer> {
+        self.peers.values()
+    }
+
+    pub(super) fn connected_or_dropped(&self, node: &SocketAddr) -> bool {
+        self.peers.contains_key(node) || self.dropped_peers.contains_key(node)
+    }
+
+    pub(super) fn has_enough_connected_peers(&self) -> bool {
+        self.peers.len() >= self.min_connected_peers
+    }
+
+    pub(super) fn has_max_connected_peers(&self) -> bool {
+        self.peers.len() >= self.max_connected_peers
     }
 
     /// Returns `false` if peer already exists and was not registered

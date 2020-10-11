@@ -495,7 +495,6 @@ struct Inner {
     internal_requests_container: Arc<AsyncMutex<RequestsContainer<InternalResponseMessage>>>,
     node_addr: SocketAddr,
     min_connected_peers: usize,
-    max_connected_peers: usize,
     min_nodes: usize,
     max_nodes: usize,
 }
@@ -538,7 +537,11 @@ impl Network {
         let handlers = Handlers::default();
         let inner = Arc::new(Inner {
             node_id,
-            peers_store: Arc::new(AsyncMutex::new(PeersAndNodes::new(max_nodes))),
+            peers_store: Arc::new(AsyncMutex::new(PeersAndNodes::new(
+                min_connected_peers,
+                max_connected_peers,
+                max_nodes,
+            ))),
             background_tasks: StdMutex::default(),
             handlers,
             gossip_sender,
@@ -549,7 +552,6 @@ impl Network {
             internal_requests_container: Arc::default(),
             node_addr,
             min_connected_peers,
-            max_connected_peers,
             min_nodes,
             max_nodes,
         });
@@ -569,8 +571,13 @@ impl Network {
 
                     let mut stream = stream.unwrap();
                     if let Some(network) = network_weak.upgrade() {
-                        let connected_peers = network.inner.peers_store.lock().await.peers.len();
-                        if connected_peers >= network.inner.max_connected_peers {
+                        if network
+                            .inner
+                            .peers_store
+                            .lock()
+                            .await
+                            .has_max_connected_peers()
+                        {
                             // Ignore connection, we've reached a limit for connected peers
                             continue;
                         }
@@ -597,9 +604,7 @@ impl Network {
                     if let Some(network) = network_weak.upgrade() {
                         let peers_store = network.inner.peers_store.lock().await;
                         for node in peers_store.nodes.iter().map(|(&addr, _)| addr) {
-                            if peers_store.peers.contains_key(&node)
-                                || peers_store.dropped_peers.contains_key(&node)
-                            {
+                            if peers_store.connected_or_dropped(&node) {
                                 // Already connected to or dropped from, no need to check
                                 continue;
                             }
@@ -618,16 +623,16 @@ impl Network {
                                     }
                                 } else {
                                     trace!("Dropping unreachable peer {}", node);
-                                    // TODO: Some number of attempts instead of removing immediately
-                                    if peers_store.peers.get(&node).is_some() {
+                                    if peers_store.has_connected_peer(&node) {
                                         return;
                                     }
+                                    // TODO: Some number of attempts instead of removing immediately
                                     peers_store.nodes.pop(&node);
                                 }
                             });
                         }
 
-                        while peers_store.peers.len() < network.inner.min_connected_peers {
+                        while peers_store.has_enough_connected_peers() {
                             trace!("Low on connections, trying to establish more");
                             if let Some(peer) = network.get_random_disconnected_peer().await {
                                 // TODO: Probably count number of errors for peer and remove it if
@@ -673,7 +678,14 @@ impl Network {
 
         let message = Message::Gossip(message);
         let bytes = message.to_bytes();
-        for connected_peer in self.inner.peers_store.lock().await.peers.values().cloned() {
+        for connected_peer in self
+            .inner
+            .peers_store
+            .lock()
+            .await
+            .get_connected_peers()
+            .cloned()
+        {
             trace!("Sending a {} message to {}", message, connected_peer.addr);
             let bytes = bytes.clone();
             async_std::task::spawn(async move {
@@ -690,7 +702,14 @@ impl Network {
 
         let message = Message::Gossip(message);
         let bytes = message.to_bytes();
-        for connected_peer in self.inner.peers_store.lock().await.peers.values().cloned() {
+        for connected_peer in self
+            .inner
+            .peers_store
+            .lock()
+            .await
+            .get_connected_peers()
+            .cloned()
+        {
             if &connected_peer.addr != sender {
                 trace!("Sending a {} message to {}", message, connected_peer.addr);
                 let bytes = bytes.clone();
@@ -731,7 +750,7 @@ impl Network {
             node_type: String::from(""),
             node_id: hex::encode(&self.inner.node_id[0..8]),
             node_addr: self.inner.node_addr.to_string(),
-            connections: peers.peers.len().to_string(),
+            connections: peers.get_connected_peers().len().to_string(),
             peers: peers.nodes.len().to_string(),
             pieces: String::from(""),
             blocks: String::from(""),
@@ -826,8 +845,7 @@ impl Network {
             .peers_store
             .lock()
             .await
-            .peers
-            .values()
+            .get_connected_peers()
             .choose(&mut rand::thread_rng())
             .cloned();
         if let Some(connected_peer) = connected_peer {
@@ -918,8 +936,7 @@ impl Network {
             .peers_store
             .lock()
             .await
-            .peers
-            .values()
+            .get_connected_peers()
             .choose(&mut rand::thread_rng())
             .cloned()
     }
@@ -930,7 +947,7 @@ impl Network {
             .nodes
             .iter()
             .map(|(addr, _)| addr)
-            .filter(|addr| !peers_store.peers.contains_key(addr))
+            .filter(|addr| !peers_store.has_connected_peer(addr))
             .choose(&mut rand::thread_rng())
             .cloned()
     }
