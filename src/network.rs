@@ -495,7 +495,6 @@ struct Inner {
     internal_requests_container: Arc<AsyncMutex<RequestsContainer<InternalResponseMessage>>>,
     node_addr: SocketAddr,
     min_connected_peers: usize,
-    min_nodes: usize,
     max_nodes: usize,
 }
 
@@ -540,6 +539,7 @@ impl Network {
             peers_store: Arc::new(AsyncMutex::new(PeersAndNodes::new(
                 min_connected_peers,
                 max_connected_peers,
+                min_nodes,
                 max_nodes,
             ))),
             background_tasks: StdMutex::default(),
@@ -552,7 +552,6 @@ impl Network {
             internal_requests_container: Arc::default(),
             node_addr,
             min_connected_peers,
-            min_nodes,
             max_nodes,
         });
 
@@ -604,10 +603,11 @@ impl Network {
                     if let Some(network) = network_weak.upgrade() {
                         let peers_store = network.inner.peers_store.lock().await;
                         for node in peers_store.nodes.iter().map(|(&addr, _)| addr) {
-                            if peers_store.connected_or_dropped(&node) {
-                                // Already connected to or dropped from, no need to check
-                                continue;
-                            }
+                            // TODO: TCP connections will get stuck for a long time
+                            // if peers_store.connected_or_dropped(&node) {
+                            //     // Already connected to or dropped from, no need to check
+                            //     continue;
+                            // }
 
                             let peers_store = Arc::clone(&network.inner.peers_store);
                             async_std::task::spawn(async move {
@@ -623,18 +623,19 @@ impl Network {
                                     }
                                 } else {
                                     trace!("Dropping unreachable peer {}", node);
-                                    if peers_store.has_connected_peer(&node) {
-                                        return;
-                                    }
+                                    // if peers_store.has_connected_peer(&node) {
+                                    //     return;
+                                    // }
                                     // TODO: Some number of attempts instead of removing immediately
+                                    peers_store.peers.remove(&node);
                                     peers_store.nodes.pop(&node);
                                 }
                             });
                         }
 
-                        while peers_store.has_enough_connected_peers() {
+                        while !peers_store.has_enough_connected_peers() {
                             trace!("Low on connections, trying to establish more");
-                            if let Some(peer) = network.get_random_disconnected_peer().await {
+                            if let Some(peer) = network.pull_random_disconnected_node().await {
                                 // TODO: Probably count number of errors for peer and remove it if
                                 //  fails all the time
                                 drop(network.connect_to(peer).await);
@@ -643,8 +644,11 @@ impl Network {
                             }
                         }
 
-                        if peers_store.nodes.len() < network.inner.min_nodes {
+                        if !peers_store.has_enough_known_nodes() {
+                            // TODO: Hack to avoid deadlock
+                            drop(peers_store);
                             trace!("Low on peers, trying to request more");
+                            // TODO: We need to kill broken connection
                             if let Some(connected_peer) = network.get_random_connected_peer().await
                             {
                                 request_more_peers(network_weak.clone(), connected_peer);
@@ -941,15 +945,12 @@ impl Network {
             .cloned()
     }
 
-    pub async fn get_random_disconnected_peer(&self) -> Option<SocketAddr> {
-        let peers_store = self.inner.peers_store.lock().await;
-        peers_store
-            .nodes
-            .iter()
-            .map(|(addr, _)| addr)
-            .filter(|addr| !peers_store.has_connected_peer(addr))
-            .choose(&mut rand::thread_rng())
-            .cloned()
+    pub async fn pull_random_disconnected_node(&self) -> Option<SocketAddr> {
+        self.inner
+            .peers_store
+            .lock()
+            .await
+            .pull_random_disconnected_node()
     }
 }
 
@@ -1464,11 +1465,14 @@ mod tests {
 
             drop(second_peer_receiver.await);
 
-            assert!(
+            assert_eq!(
                 peer_network_2
-                    .get_random_disconnected_peer()
+                    .inner
+                    .peers_store
+                    .lock()
                     .await
-                    .is_some(),
+                    .get_number_of_disconnected_nodes(),
+                1,
                 "Must have disconnected peer received from gateway",
             );
 
@@ -1476,11 +1480,9 @@ mod tests {
 
             async_std::task::sleep(Duration::from_millis(500)).await;
 
-            assert!(
-                peer_network_2
-                    .get_random_disconnected_peer()
-                    .await
-                    .is_none(),
+            assert_eq!(
+                peer_network_2.pull_random_disconnected_node().await,
+                None,
                 "Must have no disconnected peers",
             );
 
@@ -1505,7 +1507,7 @@ mod tests {
 
             assert!(
                 peer_network_2
-                    .get_random_disconnected_peer()
+                    .pull_random_disconnected_node()
                     .await
                     .is_some(),
                 "Must have disconnected peer received from gateway",

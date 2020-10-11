@@ -4,6 +4,7 @@ use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
 use log::*;
 use lru::LruCache;
+use rand::seq::IteratorRandom;
 use std::collections::hash_map::Values;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -72,8 +73,9 @@ fn try_to_reconnect(network_weak: NetworkWeak, peer_addr: SocketAddr) {
 pub(super) struct PeersAndNodes {
     min_connected_peers: usize,
     max_connected_peers: usize,
+    min_nodes: usize,
     /// Actively connected peers
-    peers: HashMap<SocketAddr, ConnectedPeer>,
+    pub(super) peers: HashMap<SocketAddr, ConnectedPeer>,
     dropped_peers: HashMap<SocketAddr, ExponentialBackoff>,
     /// All known nodes on the network
     pub(super) nodes: LruCache<SocketAddr, Option<Instant>>,
@@ -83,11 +85,13 @@ impl PeersAndNodes {
     pub(super) fn new(
         min_connected_peers: usize,
         max_connected_peers: usize,
+        min_nodes: usize,
         max_nodes: usize,
     ) -> Self {
         Self {
             min_connected_peers,
             max_connected_peers,
+            min_nodes,
             peers: HashMap::new(),
             dropped_peers: HashMap::new(),
             nodes: LruCache::new(max_nodes),
@@ -112,6 +116,36 @@ impl PeersAndNodes {
 
     pub(super) fn has_max_connected_peers(&self) -> bool {
         self.peers.len() >= self.max_connected_peers
+    }
+
+    pub(super) fn has_enough_known_nodes(&self) -> bool {
+        self.nodes.len() >= self.min_nodes
+    }
+
+    /// Removes and returns random disconnected node
+    pub(super) fn get_number_of_disconnected_nodes(&mut self) -> usize {
+        self.nodes
+            .iter()
+            .map(|(addr, _)| addr)
+            .filter(|addr| !self.connected_or_dropped(addr))
+            .count()
+    }
+
+    /// Removes and returns random disconnected node
+    pub(super) fn pull_random_disconnected_node(&mut self) -> Option<SocketAddr> {
+        let node = self
+            .nodes
+            .iter()
+            .map(|(addr, _)| addr)
+            .filter(|addr| !self.connected_or_dropped(addr))
+            .choose(&mut rand::thread_rng())
+            .cloned();
+
+        if let Some(node) = &node {
+            self.nodes.pop(node);
+        }
+
+        node
     }
 
     /// Returns `false` if peer already exists and was not registered

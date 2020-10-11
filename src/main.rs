@@ -175,7 +175,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
 
         // Connect to more peers if possible
         for _ in 0..MIN_CONNECTED_PEERS {
-            if let Some(peer) = network.get_random_disconnected_peer().await {
+            if let Some(peer) = network.pull_random_disconnected_node().await {
                 drop(network.connect_to(peer).await);
             }
         }
