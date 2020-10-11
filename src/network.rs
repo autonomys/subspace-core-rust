@@ -618,8 +618,15 @@ impl Network {
                 let mut interval = stream::interval(maintain_peers_interval);
                 while let Some(_) = interval.next().await {
                     if let Some(network) = network_weak.upgrade() {
-                        let peers_store = network.inner.peers_store.lock().await;
-                        for node in peers_store.nodes.iter().map(|(&addr, _)| addr) {
+                        for node in network
+                            .inner
+                            .peers_store
+                            .lock()
+                            .await
+                            .nodes
+                            .iter()
+                            .map(|(&addr, _)| addr)
+                        {
                             // TODO: TCP connections will get stuck for a long time
                             // if peers_store.connected_or_dropped(&node) {
                             //     // Already connected to or dropped from, no need to check
@@ -650,7 +657,13 @@ impl Network {
                             });
                         }
 
-                        while !peers_store.has_enough_connected_peers() {
+                        while !network
+                            .inner
+                            .peers_store
+                            .lock()
+                            .await
+                            .has_enough_connected_peers()
+                        {
                             trace!("Low on connections, trying to establish more");
                             if let Some(peer) = network.pull_random_disconnected_node().await {
                                 // TODO: Probably count number of errors for peer and remove it if
@@ -661,9 +674,13 @@ impl Network {
                             }
                         }
 
-                        if !peers_store.has_enough_known_nodes() {
-                            // TODO: Hack to avoid deadlock
-                            drop(peers_store);
+                        if !network
+                            .inner
+                            .peers_store
+                            .lock()
+                            .await
+                            .has_enough_known_nodes()
+                        {
                             trace!("Low on peers, trying to request more");
                             // TODO: We need to kill broken connection
                             if let Some(connected_peer) = network.get_random_connected_peer().await
