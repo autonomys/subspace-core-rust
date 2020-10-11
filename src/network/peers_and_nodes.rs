@@ -123,15 +123,6 @@ impl PeersAndNodes {
     }
 
     /// Removes and returns random disconnected node
-    pub(super) fn get_number_of_disconnected_nodes(&mut self) -> usize {
-        self.nodes
-            .iter()
-            .map(|(addr, _)| addr)
-            .filter(|addr| !self.connected_or_dropped(addr))
-            .count()
-    }
-
-    /// Removes and returns random disconnected node
     pub(super) fn pull_random_disconnected_node(&mut self) -> Option<SocketAddr> {
         let node = self
             .nodes

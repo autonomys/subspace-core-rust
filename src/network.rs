@@ -1465,17 +1465,6 @@ mod tests {
 
             drop(second_peer_receiver.await);
 
-            assert_eq!(
-                peer_network_2
-                    .inner
-                    .peers_store
-                    .lock()
-                    .await
-                    .get_number_of_disconnected_nodes(),
-                1,
-                "Must have disconnected peer received from gateway",
-            );
-
             drop(peer_network_1);
 
             async_std::task::sleep(Duration::from_millis(500)).await;
