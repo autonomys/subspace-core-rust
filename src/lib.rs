@@ -68,10 +68,10 @@ pub const BLOCK_REWARD: u64 = 1;
 pub const MAX_EARLY_TIMESLOTS: u64 = 10;
 pub const MAX_LATE_TIMESLOTS: u64 = 10;
 pub const TIMESLOT_DURATION: u64 = 100;
-pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 1;
+pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 2;
 // pub const EPOCH_CLOSE_WAIT_TIME: u64 = CHALLENGE_LOOKBACK - 2;
 /// Time in epochs
-pub const EPOCH_CLOSE_WAIT_TIME: u64 = 1;
+pub const EPOCH_CLOSE_WAIT_TIME: u64 = 2;
 pub const TIMESLOTS_PER_EPOCH: u64 = 128;
 
 /// Solution Range
