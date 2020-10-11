@@ -254,7 +254,9 @@ fn request_more_peers(network_weak: NetworkWeak, connected_peer: ConnectedPeer) 
                         .filter(|&peer| peer != network.inner.node_addr)
                     {
                         let mut peers_store = network.inner.peers_store.lock().await;
-                        // TODO: Check and don't override if it is already full
+                        if peers_store.peers.contains(&peer) {
+                            continue;
+                        }
                         if peers_store.peers.put(peer, None).is_none() {
                             for callback in network.inner.handlers.peer.lock().await.iter() {
                                 callback(peer);
@@ -634,8 +636,11 @@ impl Network {
 
                                 let mut peers_store = peers_store.lock().await;
                                 if result {
-                                    // TODO: Only override if it is None
-                                    peers_store.peers.put(peer, Some(Instant::now()));
+                                    if let Some(instant) = peers_store.peers.get_mut(&peer) {
+                                        if instant.is_none() {
+                                            instant.replace(Instant::now());
+                                        }
+                                    }
                                 } else {
                                     trace!("Dropping unreachable peer {}", peer);
                                     // TODO: Some number of attempts instead of removing immediately
