@@ -60,6 +60,8 @@ use async_std::net::{TcpListener, TcpStream};
 use async_std::stream;
 use async_std::sync::{channel, Receiver, Sender};
 use async_std::task::JoinHandle;
+use backoff::backoff::Backoff;
+use backoff::ExponentialBackoff;
 use bytes::{Bytes, BytesMut};
 use futures::lock::Mutex as AsyncMutex;
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
@@ -91,6 +93,9 @@ use std::{fmt, io, mem};
 const MAX_MESSAGE_CONTENTS_LENGTH: usize = 2usize.pow(16) - 1;
 // TODO: Consider adaptive request timeout for more efficient sync
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+const INITIAL_BACKOFF_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_BACKOFF_INTERVAL: Duration = Duration::from_secs(60);
+const BACKOFF_MULTIPLIER: f64 = 10_f64;
 
 pub type NodeID = [u8; 32];
 
@@ -271,6 +276,62 @@ fn request_more_peers(network_weak: NetworkWeak, connected_peer: ConnectedPeer) 
     });
 }
 
+fn create_backoff() -> ExponentialBackoff {
+    let mut backoff = ExponentialBackoff::default();
+    backoff.initial_interval = INITIAL_BACKOFF_INTERVAL;
+    backoff.max_interval = MAX_BACKOFF_INTERVAL;
+    backoff.multiplier = BACKOFF_MULTIPLIER;
+    backoff
+}
+
+fn try_to_reconnect(network_weak: NetworkWeak, peer_addr: SocketAddr) {
+    // TODO: Should be possible to cancel this background task early
+    async_std::task::spawn(async move {
+        loop {
+            let next_backoff = {
+                let network = match network_weak.upgrade() {
+                    Some(network) => network,
+                    None => {
+                        break;
+                    }
+                };
+                let next_backoff = network
+                    .inner
+                    .peers_store
+                    .lock()
+                    .await
+                    .dropped_peers
+                    .get_mut(&peer_addr)
+                    .and_then(|backoff| backoff.next_backoff());
+
+                match next_backoff {
+                    Some(next_backoff) => next_backoff,
+                    None => {
+                        break;
+                    }
+                }
+            };
+
+            async_std::task::sleep(next_backoff).await;
+
+            debug!("Trying to reconnect to peer {}", peer_addr);
+
+            if let Some(network) = network_weak.upgrade() {
+                match network.connect_to(peer_addr).await {
+                    Ok(_) => {
+                        break;
+                    }
+                    Err(error) => {
+                        debug!("Failed to reconnect to peer {}: {:?}", peer_addr, error);
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+    });
+}
+
 async fn on_connected(
     network: Network,
     peer_addr: SocketAddr,
@@ -290,6 +351,7 @@ async fn on_connected(
             sender: client_sender.clone(),
         };
         peers_store.peers.insert(peer_addr, connected_peer.clone());
+        peers_store.dropped_peers.remove(&peer_addr);
 
         peers_store.nodes.put(peer_addr, Some(Instant::now()));
         for callback in network.inner.handlers.peer.lock().await.iter() {
@@ -433,8 +495,13 @@ async fn on_connected(
             peers_store.nodes.pop(&peer_addr);
             info!("Broker has dropped a peer who disconnected");
 
-            // TODO: Proactive establishment of new connections if number of connections went below
-            //  desired
+            if peers_store.peers.len() < network.inner.min_connected_peers {
+                peers_store
+                    .dropped_peers
+                    .insert(peer_addr, create_backoff());
+                try_to_reconnect(network_weak, peer_addr);
+            }
+
             // TODO: Fallback to bootstrap nodes in case we can't reconnect at all
         }
     });
@@ -488,6 +555,7 @@ pub struct ConnectedPeer {
 struct PeersAndNodes {
     /// Actively connected peers
     peers: HashMap<SocketAddr, ConnectedPeer>,
+    dropped_peers: HashMap<SocketAddr, ExponentialBackoff>,
     /// All known nodes on the network
     nodes: LruCache<SocketAddr, Option<Instant>>,
 }
@@ -496,6 +564,7 @@ impl PeersAndNodes {
     fn new(max_nodes: usize) -> Self {
         Self {
             peers: HashMap::new(),
+            dropped_peers: HashMap::new(),
             nodes: LruCache::new(max_nodes),
         }
     }
@@ -618,8 +687,10 @@ impl Network {
                     if let Some(network) = network_weak.upgrade() {
                         let peers_store = network.inner.peers_store.lock().await;
                         for node in peers_store.nodes.iter().map(|(&addr, _)| addr) {
-                            if peers_store.peers.contains_key(&node) {
-                                // Already connected to, no need to check
+                            if peers_store.peers.contains_key(&node)
+                                || peers_store.dropped_peers.contains_key(&node)
+                            {
+                                // Already connected to or dropped from, no need to check
                                 continue;
                             }
 

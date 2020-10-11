@@ -145,6 +145,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9bcd47d94aa4eb8c076b50fc61a75020789394ffb9bd74a180b3379130f6569"
 
 [[package]]
+name = "backoff"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "721c249ab59cbc483ad4294c9ee2671835c1e43e9ffc277e6b4ecfef733cfdc5"
+dependencies = [
+ "instant",
+ "rand",
+]
+
+[[package]]
 name = "base64"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2010,6 +2020,7 @@ dependencies = [
  "async-io",
  "async-oneshot",
  "async-std",
+ "backoff",
  "bincode",
  "bitintr",
  "bytes 0.5.6",
