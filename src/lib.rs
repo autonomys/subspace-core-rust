@@ -52,8 +52,8 @@ pub const ENCODING_LAYERS_PROD: usize = BLOCKS_PER_ENCODING;
 pub const PLOT_UPDATE_INTERVAL: usize = 10000;
 pub const MIN_CONNECTED_PEERS: usize = 4;
 pub const MAX_CONNECTED_PEERS: usize = 20;
-pub const MIN_PEERS: usize = 10;
-pub const MAX_PEERS: usize = 100;
+pub const MIN_NODES: usize = 10;
+pub const MAX_NODES: usize = 100;
 // TODO: Is this a good value?
 pub const MAINTAIN_PEERS_INTERVAL: Duration = Duration::from_secs(60);
 // TODO: revert to six, just for testing now
