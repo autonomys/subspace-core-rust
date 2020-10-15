@@ -1,12 +1,15 @@
 use crate::block::{Block, Content, Data, Proof};
 use crate::farmer::Solution;
 use crate::timer::EpochTracker;
-use crate::transaction::{AccountAddress, AccountState, CoinbaseTx, Transaction, TxId};
+use crate::transaction::{
+    AccountAddress, AccountState, CoinbaseTx, SimpleCreditTx, Transaction, TxId,
+};
 use crate::{
     crypto, sloth, ContentId, ProofId, Tag, BLOCK_REWARD, CHALLENGE_LOOKBACK_EPOCHS,
     CONFIRMATION_DEPTH, EXPECTED_TIMESLOTS_PER_EON, GENESIS_OFFSET, INITIAL_SOLUTION_RANGE,
     MAX_EARLY_TIMESLOTS, MAX_LATE_TIMESLOTS, PRIME_SIZE_BITS, PROPOSER_BLOCKS_PER_EON,
     SOLUTION_RANGE_UPDATE_DELAY_IN_TIMESLOTS, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+    TX_BLOCKS_PER_PROPOSER_BLOCK,
 };
 
 use crate::metablocks::{MetaBlock, MetaBlocks};
@@ -37,6 +40,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub type BlockHeight = u64;
 pub type Timeslot = u64;
 
+#[derive(Debug, Clone)]
 pub struct Head {
     block_height: u64,
     content_id: ContentId,
@@ -81,8 +85,10 @@ pub struct Ledger {
     pub recent_proof_ids: HashSet<ProofId>,
     /// record that allows for syncing the ledger by timeslot
     pub proof_ids_by_timeslot: BTreeMap<Timeslot, Vec<ProofId>>,
-    /// container for blocks received who have an unknown parent
-    pub cached_blocks_by_parent_content_id: HashMap<ContentId, Vec<Block>>,
+    /// container for proposer blocks received who have an unknown parent
+    pub cached_proposer_blocks_by_parent_content_id: HashMap<ContentId, Vec<Block>>,
+    /// container for tx blocks received via gossip during sync
+    pub cached_tx_blocks_by_content_id: HashMap<ContentId, Block>,
     /// temporary container for blocks seen before their timeslot has arrived
     pub early_blocks_by_timeslot: BTreeMap<Timeslot, Vec<Block>>,
     /// fork tracker for pending blocks, used to find the current head of longest chain
@@ -99,8 +105,18 @@ pub struct Ledger {
     pub solution_ranges_by_eon: HashMap<u64, u64>,
     /// container for all txs
     pub txs: HashMap<TxId, Transaction>,
-    /// tracker for txs that have not yet been included in a tx block
-    pub tx_mempool: HashSet<TxId>,
+    /// tracker for txs that have not yet been referenced in a tx block
+    pub unclaimed_tx_ids: HashSet<TxId>,
+    /// tracker for txs that have been referenced in a tx block but have not been seen yet
+    pub unknown_tx_ids: HashSet<TxId>,
+    /// tracker for all txs that have been applied to the ledger
+    pub applied_tx_ids: HashSet<TxId>,
+    /// tracker for tx blocks that have not yet been referenced in a proposer block
+    pub unclaimed_tx_block_ids: HashSet<ContentId>,
+    /// tracker for tx blocks that have been referenced in a proposer block buy have not been seen yet
+    pub unknown_tx_block_ids: HashSet<ContentId>,
+    /// tracker for tx blocks that have been applied to the ledger
+    pub applied_tx_block_ids: HashSet<ContentId>,
     pub epoch_tracker: EpochTracker,
     pub timer_is_running: bool,
     pub quality: u32,
@@ -150,7 +166,8 @@ impl Ledger {
             metablocks: MetaBlocks::new(),
             recent_proof_ids: HashSet::new(),
             proof_ids_by_timeslot: BTreeMap::new(),
-            cached_blocks_by_parent_content_id: HashMap::new(),
+            cached_proposer_blocks_by_parent_content_id: HashMap::new(),
+            cached_tx_blocks_by_content_id: HashMap::new(),
             early_blocks_by_timeslot: BTreeMap::new(),
             heads: Vec::new(),
             confirmed_blocks: HashSet::new(),
@@ -158,7 +175,12 @@ impl Ledger {
             current_solution_range: INITIAL_SOLUTION_RANGE,
             solution_ranges_by_eon: HashMap::new(),
             txs: HashMap::new(),
-            tx_mempool: HashSet::new(),
+            unclaimed_tx_ids: HashSet::new(),
+            unknown_tx_ids: HashSet::new(),
+            applied_tx_ids: HashSet::new(),
+            unclaimed_tx_block_ids: HashSet::new(),
+            unknown_tx_block_ids: HashSet::new(),
+            applied_tx_block_ids: HashSet::new(),
             genesis_timestamp: 0,
             timer_is_running: false,
             quality: 0,
@@ -184,7 +206,7 @@ impl Ledger {
     /// Update the timeslot, then validates and stages all early blocks that have arrived
     pub async fn next_timeslot(&mut self) {
         self.current_timeslot += 1;
-        info!("Ledger has arrive at timeslot {}", self.current_timeslot);
+        info!("Ledger has arrived at timeslot {}", self.current_timeslot);
 
         // apply solution range changes with delay
         if self.current_timeslot == self.solution_range_update.next_timeslot {
@@ -210,9 +232,13 @@ impl Ledger {
             {
                 debug!("Timeslot has arrived for early block, validating and staging");
 
-                if self.validate_proposer_block_that_has_arrived(&block).await {
+                if self.validate_block_that_has_arrived(&block).await {
                     // TODO: have to make sure we don't reference the block (just check for last timeslot in create block)
-                    self.stage_block(&block).await;
+                    if block.content.parent_id.is_some() {
+                        self.stage_proposer_block(&block).await;
+                    } else {
+                        self.stage_tx_block(&block).await;
+                    }
                 }
             }
 
@@ -227,10 +253,52 @@ impl Ledger {
             .map(|proof_ids| {
                 proof_ids
                     .iter()
-                    .map(|proof_id| self.metablocks.blocks.get(proof_id).unwrap().block.clone())
+                    .map(|proof_id| self.metablocks.get_metablock_from_proof_id(proof_id).block)
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Returns all txs ref'd by a set of tx blocks for a given timeslot
+    pub fn get_txs_for_sync(&self, blocks: &Vec<Block>) -> Vec<SimpleCreditTx> {
+        let mut txs: HashMap<ContentId, SimpleCreditTx> = HashMap::new();
+
+        blocks
+            .iter()
+            .filter(|block| block.content.parent_id.is_none())
+            .map(|block| {
+                self.metablocks
+                    .get_metablock_from_content_id(&block.content.get_id())
+            })
+            .for_each(|tx_metablock| {
+                tx_metablock
+                    .block
+                    .content
+                    .refs
+                    .iter()
+                    .skip(1)
+                    .for_each(|tx_id| {
+                        let tx = self.txs.get(tx_id).expect("Should have tx").clone();
+                        match tx {
+                            Transaction::Credit(tx) => {
+                                txs.insert(*tx_id, tx);
+                            }
+                            _ => {
+                                panic!("Coinbase tx should not be ref'd in a tx block!");
+                            }
+                        }
+                    })
+            });
+
+        txs.into_values().collect()
+    }
+
+    /// Add a block to a given timeslot, to allow other nodes to sync the ledger
+    fn add_block_to_timeslot(&mut self, timeslot: Timeslot, proof_id: ProofId) {
+        self.proof_ids_by_timeslot
+            .entry(timeslot)
+            .and_modify(|blocks| blocks.push(proof_id))
+            .or_insert(vec![proof_id]);
     }
 
     /// returns the tip of the longest chain as seen by this node
@@ -239,9 +307,14 @@ impl Ledger {
     }
 
     /// updates an existing branch, setting to head if longest, or creates a new branch
-    fn update_heads(&mut self, parent_id: ContentId, content_id: ContentId, block_height: u64) {
+    fn update_heads(
+        &mut self,
+        parent_content_id: ContentId,
+        content_id: ContentId,
+        block_height: u64,
+    ) {
         for (index, head) in self.heads.iter_mut().enumerate() {
-            if head.content_id == parent_id {
+            if head.content_id == parent_content_id {
                 // updated existing head
                 head.block_height += 1;
                 head.content_id = content_id;
@@ -259,22 +332,28 @@ impl Ledger {
             content_id,
             block_height,
         });
+
+        debug!(
+            "Added a new head at height: {} w/content_id: {}!",
+            block_height,
+            hex::encode(&content_id[0..8])
+        );
     }
 
     /// removes a branch that is equal to the current confirmed ledger
     fn prune_branch(&mut self, content_id: ContentId) {
-        let mut remove_index: Option<usize> = None;
+        let mut remove_index = 0;
         for (index, head) in self.heads.iter().enumerate() {
             if head.content_id == content_id {
-                if index == 0 {
-                    panic!("Cannot prune head of the longest chain!");
-                }
-
-                remove_index = Some(index);
+                remove_index = index;
             }
         }
 
-        self.heads.remove(remove_index.expect("Branch must exist"));
+        if remove_index == 0 {
+            panic!("Cannot prune head of the longest chain!");
+        }
+
+        self.heads.remove(remove_index);
     }
 
     /// Start a new chain from genesis as a gateway node
@@ -318,11 +397,11 @@ impl Ledger {
                 let coinbase_tx = CoinbaseTx::new(BLOCK_REWARD, self.keys.public, proof_id);
 
                 let mut content = Content {
-                    parent_id,
+                    parent_id: Some(parent_id),
                     proof_id,
                     proof_signature: self.keys.sign(&proof_id).to_bytes().to_vec(),
                     timestamp,
-                    tx_ids: vec![coinbase_tx.get_id()],
+                    refs: vec![coinbase_tx.get_id()],
                     signature: Vec::new(),
                 };
 
@@ -341,7 +420,7 @@ impl Ledger {
                 };
 
                 // prepare the block for application to the ledger
-                self.stage_block(&block).await;
+                self.stage_proposer_block(&block).await;
 
                 parent_id = block.content.get_id();
 
@@ -394,58 +473,102 @@ impl Ledger {
             .expect("Time went backwards")
             .as_millis() as u64;
 
-        let mut longest_content_id = self.get_head();
-
-        // edge case
-        if sibling_content_ids
-            .iter()
-            .any(|content_id| content_id == &longest_content_id)
-        {
-            // the block is referencing a sibling, get its parent instead
-            let sibling_proof_id = self
-                .metablocks
-                .content_to_proof_map
-                .get(&longest_content_id)
-                .expect("Sibling is in metablocks");
-
-            let sibling_metablock = self
-                .metablocks
-                .blocks
-                .get(sibling_proof_id)
-                .expect("Sibling is in metablocks");
-
-            longest_content_id = sibling_metablock.block.content.parent_id;
-        }
-
-        debug!(
-            "Parent content id for locally created block is: {}",
-            hex::encode(&longest_content_id[0..8])
-        );
-
         // create the coinbase tx
         let proof_id = proof.get_id();
         let coinbase_tx = CoinbaseTx::new(BLOCK_REWARD, self.keys.public, proof_id);
-        let mut tx_ids = vec![coinbase_tx.get_id()];
+        let mut refs = vec![coinbase_tx.get_id()];
 
-        // TODO: split between proposer and tx block
+        // sortition between proposer blocks and tx blocks
 
-        // add all txs in the mempool, sorted by hash
-        let mut pending_tx_ids: Vec<TxId> = self.tx_mempool.iter().cloned().collect();
-        pending_tx_ids.sort();
-        for tx_id in pending_tx_ids.into_iter() {
-            tx_ids.push(tx_id);
-        }
+        let target = u64::from_be_bytes(solution.target);
+        let tag = u64::from_be_bytes(solution.tag);
+
+        let proposer_block_solution_range =
+            solution.solution_range / (TX_BLOCKS_PER_PROPOSER_BLOCK + 1);
+        let (lower, is_lower_overflowed) =
+            target.overflowing_sub(proposer_block_solution_range / 2);
+        let (upper, is_upper_overflowed) =
+            target.overflowing_add(proposer_block_solution_range / 2);
+        let within_proposer_block_solution_range = if is_lower_overflowed || is_upper_overflowed {
+            upper <= tag || tag <= lower
+        } else {
+            lower <= tag && tag <= upper
+        };
+
+        let parent_id: Option<ContentId> = if within_proposer_block_solution_range {
+            // proposer block
+
+            // ref the tip of the longest chain
+            let mut longest_content_id = self.get_head();
+
+            debug!("Tracking {} heads", { self.heads.len() });
+            for head in self.heads.iter() {
+                debug!(
+                    "Block height: {} and content_id: {}",
+                    head.block_height,
+                    hex::encode(&head.content_id[0..8])
+                );
+            }
+
+            // edge case where this node farms multiple proposer blocks in the same timeslot
+            if sibling_content_ids
+                .iter()
+                .any(|content_id| content_id == &longest_content_id)
+            {
+                // the block is referencing a sibling, get its parent instead
+                let sibling_metablock = self
+                    .metablocks
+                    .get_metablock_from_content_id(&longest_content_id);
+
+                longest_content_id = sibling_metablock
+                    .block
+                    .content
+                    .parent_id
+                    .expect("Sibling will be a proposer block");
+
+                debug!("Found two proposer blocks at the same height with shared parent");
+            }
+
+            debug!(
+                "Parent content id for locally created block is: {}",
+                hex::encode(&longest_content_id[0..8])
+            );
+
+            // ref all unseen tx blocks
+            let mut pending_tx_block_ids: Vec<TxId> = self.unclaimed_tx_block_ids.drain().collect();
+            pending_tx_block_ids.sort();
+            for tx_block_id in pending_tx_block_ids.into_iter() {
+                refs.push(tx_block_id);
+            }
+
+            Some(longest_content_id)
+        } else {
+            // tx block
+
+            // ref all unseen txs in the mempool, sorted by hash
+            let mut pending_tx_ids: Vec<TxId> = self.unclaimed_tx_ids.drain().collect();
+            pending_tx_ids.sort();
+            for tx_id in pending_tx_ids.into_iter() {
+                refs.push(tx_id);
+            }
+
+            None
+        };
 
         let mut content = Content {
-            parent_id: longest_content_id,
+            parent_id,
             proof_id,
             proof_signature: self.keys.sign(&proof.get_id()).to_bytes().to_vec(),
             timestamp,
-            tx_ids,
+            refs,
             signature: Vec::new(),
         };
 
         content.signature = self.keys.sign(&content.get_id()).to_bytes().to_vec();
+
+        if content.parent_id.is_none() {
+            self.unclaimed_tx_block_ids.insert(content.get_id());
+        }
 
         let block = Block {
             proof,
@@ -483,15 +606,15 @@ impl Ledger {
             &epoch.get_challenge_for_timeslot(block.proof.timeslot),
             &self.sloth,
         ) {
-            // TODO: blacklist this peer
+            // TODO: block list this peer
             return false;
         }
 
         true
     }
 
-    /// Validates a proposer block received via sync during startup
-    pub async fn validate_proposer_block_from_sync(
+    /// Validates a proposer or tx block received via sync during startup
+    pub async fn validate_block_from_sync(
         &mut self,
         block: &Block,
         current_timeslot: Timeslot,
@@ -516,23 +639,19 @@ impl Ledger {
 
         // if not the genesis block, get parent
         // TODO: this will need to be adjusted once we are solving from genesis
-        if block.proof.timeslot > 0 {
+        if block.proof.timeslot > 0 && block.content.parent_id.is_some() {
             // have we already received parent? else error
             if !self
                 .metablocks
-                .content_to_proof_map
-                .contains_key(&block.content.parent_id)
+                .contains_content_id(&block.content.parent_id.expect("Is proposer block"))
             {
                 error!("Received a block via sync with unknown parent");
                 return false;
             }
 
-            let parent_proof_id = self
-                .metablocks
-                .content_to_proof_map
-                .get(&block.content.parent_id)
-                .unwrap();
-            let parent_metablock = self.metablocks.blocks.get(parent_proof_id).unwrap().clone();
+            let parent_metablock = self.metablocks.get_metablock_from_content_id(
+                &block.content.parent_id.expect("Already checked above"),
+            );
 
             // ensure the parent is from an earlier timeslot
             if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
@@ -548,17 +667,18 @@ impl Ledger {
             }
         }
 
-        // block is valid?
-        // TODO: turn this back on, once we include proofs via sync
-        // if !(self.validate_block(block).await) {
-        //     return false;
-        // }
+        if block.proof.timeslot >= (CHALLENGE_LOOKBACK_EPOCHS * TIMESLOTS_PER_EPOCH) {
+            // block is valid?
+            if !(self.validate_block(block).await) {
+                return false;
+            }
+        }
 
         true
     }
 
-    /// Validates a proposer block received via gossip
-    pub async fn validate_proposer_block_from_gossip(&mut self, block: &Block) -> bool {
+    /// Validates a proposer or tx block received via gossip
+    pub async fn validate_block_from_gossip(&mut self, block: &Block) -> bool {
         debug!(
             "Validating remote block for epoch: {} at timeslot {}",
             block.proof.epoch, block.proof.timeslot
@@ -566,6 +686,7 @@ impl Ledger {
 
         let proof_id = block.proof.get_id();
 
+        // TODO: handle the case where we get two different content_ids for the same proof_id
         // is this a new block?
         if self.recent_proof_ids.contains(&proof_id) {
             warn!("Received a block proposal via gossip for known block, ignoring");
@@ -576,10 +697,16 @@ impl Ledger {
         // else add
         self.recent_proof_ids.insert(proof_id);
 
-        // If node is still syncing the ledger, cache and apply on sync
+        // If node is still syncing the ledger and is a proposer block, cache and apply on sync
         if !self.timer_is_running {
-            warn!("Caching a block received via gossip before the ledger is synced");
-            self.cache_remote_block(block);
+            if block.content.parent_id.is_some() {
+                warn!("Caching a proposer block received via gossip before the ledger is synced");
+                self.cache_remote_proposer_block(block);
+            } else {
+                warn!("Caching a tx block received via gossip before the ledger is synced");
+                self.cached_tx_blocks_by_content_id
+                    .insert(block.content.get_id(), block.clone());
+            }
             return false;
         }
 
@@ -608,37 +735,39 @@ impl Ledger {
             return false;
         }
 
-        // If we are not aware of the blocks parent, cache and apply once parent is seen
-        if !self
-            .metablocks
-            .content_to_proof_map
-            .contains_key(&block.content.parent_id)
-        {
-            warn!("Caching a block received via gossip with unknown parent");
-            self.cache_remote_block(block);
-            return false;
-        }
+        // if a proposer block, validate parent
+        if block.content.parent_id.is_some() {
+            // If we are not aware of the blocks parent, cache and apply once parent is seen
+            if !self
+                .metablocks
+                .contains_content_id(&block.content.parent_id.expect("Already checked above"))
+            {
+                panic!(
+                    "Caching a block received via gossip with unknown parent content id: {}",
+                    hex::encode(&block.content.parent_id.expect("Is Some")[0..8])
+                );
+                self.cache_remote_proposer_block(block);
+                return false;
+            }
 
-        let parent_proof_id = self
-            .metablocks
-            .content_to_proof_map
-            .get(&block.content.parent_id)
-            .unwrap();
-        let parent_metablock = self.metablocks.blocks.get(parent_proof_id).unwrap().clone();
+            let parent_metablock = self.metablocks.get_metablock_from_content_id(
+                &block.content.parent_id.expect("Already checked above"),
+            );
 
-        // ensure the parent is from an earlier timeslot
-        if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
-            // TODO: blacklist this peer
-            error!("Ignoring a block whose parent is in the future");
-            return false;
-        }
+            // ensure the parent is from an earlier timeslot
+            if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
+                // TODO: blacklist this peer
+                error!("Ignoring a block whose parent is in the future");
+                return false;
+            }
 
-        // is the parent not too far back? (no deep forks)
-        // compare parent block height to current block height of longest chain
-        if parent_metablock.height + (CONFIRMATION_DEPTH as u64) < self.heads[0].block_height {
-            // TODO: blacklist this peer
-            error!("Ignoring a block that would cause a deep fork");
-            return false;
+            // is the parent not too far back? (no deep forks)
+            // compare parent block height to current block height of longest chain
+            if parent_metablock.height + (CONFIRMATION_DEPTH as u64) < self.heads[0].block_height {
+                // TODO: blacklist this peer
+                error!("Ignoring a block that would cause a deep fork");
+                return false;
+            }
         }
 
         // is the block valid?
@@ -650,23 +779,22 @@ impl Ledger {
     }
 
     /// Completes validation for a cached proposer block received via gossip whose parent has been staged
-    pub async fn validate_proposer_block_from_cache(&mut self, block: &Block) -> bool {
-        // is parent from earlier timeslot?
-        let parent_proof_id = self
-            .metablocks
-            .content_to_proof_map
-            .get(&block.content.parent_id)
-            .unwrap();
-        let parent_metablock = self.metablocks.blocks.get(parent_proof_id).unwrap().clone();
+    pub async fn validate_block_from_cache(&mut self, block: &Block) -> bool {
+        if block.content.parent_id.is_some() {
+            // is parent from earlier timeslot?
+            let parent_metablock = self.metablocks.get_metablock_from_content_id(
+                &block.content.parent_id.expect("Already checked above"),
+            );
 
-        // ensure the parent is from an earlier timeslot
-        if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
-            // TODO: blacklist this peer
-            error!("Ignoring a block whose parent is in the future");
-            return false;
+            // ensure the parent is from an earlier timeslot
+            if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
+                // TODO: blacklist this peer
+                error!("Ignoring a block whose parent is in the future");
+                return false;
+            }
+
+            // removed check for arrival time window, as this doesn't seem to apply to cached blocks
         }
-
-        // removed check for arrival time window, as this doesn't seem to apply to cached blocks
 
         // is the block valid?
         if !(self.validate_block(block).await) {
@@ -677,54 +805,70 @@ impl Ledger {
     }
 
     /// Completes validation for a proposer block received via gossip that was ahead of the timeslot received in and has now arrived
-    pub async fn validate_proposer_block_that_has_arrived(&mut self, block: &Block) -> bool {
+    pub async fn validate_block_that_has_arrived(&mut self, block: &Block) -> bool {
         // block is valid
         if !(self.validate_block(block).await) {
             return false;
         }
 
-        // If we are not aware of the blocks parent, cache and apply once parent is seen
-        if !self
-            .metablocks
-            .content_to_proof_map
-            .contains_key(&block.content.parent_id)
-        {
-            warn!("Caching a block received via gossip with unknown parent");
-            self.cache_remote_block(block);
-            return false;
-        }
+        // only for proposer blocks
+        if block.content.parent_id.is_some() {
+            // If we are not aware of the blocks parent, cache and apply once parent is seen
+            if !self
+                .metablocks
+                .contains_content_id(&block.content.parent_id.expect("Already checked above"))
+            {
+                panic!(
+                    "Caching a block received via gossip with unknown parent content id: {}",
+                    hex::encode(&block.content.parent_id.expect("Is Some")[0..8])
+                );
+                self.cache_remote_proposer_block(block);
+                return false;
+            }
 
-        let parent_proof_id = self
-            .metablocks
-            .content_to_proof_map
-            .get(&block.content.parent_id)
-            .unwrap();
-        let parent_metablock = self.metablocks.blocks.get(parent_proof_id).unwrap().clone();
+            let parent_metablock = self.metablocks.get_metablock_from_content_id(
+                &block.content.parent_id.expect("Already checked above"),
+            );
 
-        // ensure the parent is from an earlier timeslot
-        if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
-            // TODO: blacklist this peer
-            error!("Ignoring a block whose parent is in the future");
-            return false;
-        }
+            // ensure the parent is from an earlier timeslot
+            if parent_metablock.block.proof.timeslot >= block.proof.timeslot {
+                // TODO: blacklist this peer
+                error!("Ignoring a block whose parent is in the future");
+                return false;
+            }
 
-        // is the parent not too far back? (no deep forks)
-        // compare parent block height to current block height of longest chain
-        if parent_metablock.height + (CONFIRMATION_DEPTH as u64) < self.heads[0].block_height {
-            // TODO: blacklist this peer
-            error!("Ignoring a block that would cause a deep fork");
-            return false;
+            // is the parent not too far back? (no deep forks)
+            // compare parent block height to current block height of longest chain
+            if parent_metablock.height + (CONFIRMATION_DEPTH as u64) < self.heads[0].block_height {
+                // TODO: blacklist this peer
+                error!("Ignoring a block that would cause a deep fork");
+                return false;
+            }
         }
 
         true
     }
 
-    /// Save a block, update heads, and confirm the k-deep parent
-    pub async fn stage_block(&mut self, block: &Block) {
+    /// Stage a new valid proposer block and confirm its k-deep parent
+    pub async fn stage_proposer_block(&mut self, block: &Block) {
+        info!(
+            "Staging a new proposer block with {} tx blocks",
+            block.content.refs.len() - 1
+        );
+
+        let mut parent_content_id = block
+            .content
+            .parent_id
+            .expect("Proposers always have a parent");
+
         // TODO: this should be hardcoded into the reference implementation
         if self.genesis_timestamp == 0 {
             self.genesis_timestamp = block.content.timestamp;
         }
+
+        // save block -> metablocks, blocks by timeslot
+        let metablock = self.metablocks.save(block.clone());
+        self.add_block_to_timeslot(block.proof.timeslot, metablock.proof_id);
 
         // save the coinbase tx
         self.txs.insert(
@@ -732,23 +876,28 @@ impl Ledger {
             Transaction::Coinbase(block.coinbase_tx.clone()),
         );
 
-        // TODO: stop pruning the block
-        let mut pruned_block = block.clone();
-        pruned_block.prune();
-        // TODO: Everything that happens here may need to be reversed if `add_block_to_epoch()` at
-        //  the end fails, which implies that this function should have a lock and not be called
-        //  concurrently
+        // for each tx block, remove from unclaimed or add to unknown
+        for tx_block_id in block.content.refs.iter().skip(1) {
+            if self.metablocks.contains_content_id(tx_block_id) {
+                self.unclaimed_tx_block_ids.remove(tx_block_id);
+            } else {
+                self.unknown_tx_block_ids.insert(*tx_block_id);
+            }
+        }
 
         let proof_id = block.proof.get_id();
 
         // TODO: make sure the branch will not be below the current confirmed block height
 
         // check if block received during sync is in cached gossip and remove
-        if self.metablocks.contains_key(&proof_id) {
+        if self
+            .cached_proposer_blocks_by_parent_content_id
+            .contains_key(&proof_id)
+        {
             // remove from cached gossip
             let mut is_empty = false;
-            self.cached_blocks_by_parent_content_id
-                .entry(block.content.parent_id)
+            self.cached_proposer_blocks_by_parent_content_id
+                .entry(parent_content_id)
                 .and_modify(|blocks| {
                     blocks
                         .iter()
@@ -758,42 +907,28 @@ impl Ledger {
                 });
 
             if is_empty {
-                self.cached_blocks_by_parent_content_id
-                    .remove(&block.content.parent_id);
+                self.cached_proposer_blocks_by_parent_content_id
+                    .remove(&parent_content_id);
             }
         }
 
-        // save block -> metablocks, blocks by timeslot
-        let metablock = self.metablocks.save(pruned_block);
-        self.proof_ids_by_timeslot
-            .entry(block.proof.timeslot)
-            .and_modify(|blocks| blocks.push(metablock.proof_id))
-            .or_insert(vec![metablock.proof_id]);
-
         // update head of this branch
-        self.update_heads(
-            metablock.block.content.parent_id,
-            metablock.content_id,
-            metablock.height,
-        );
+        self.update_heads(parent_content_id, metablock.content_id, metablock.height);
 
         // confirm the k-deep parent
-        let mut confirmation_depth: usize = 0;
+        let mut confirmation_depth = 0;
         loop {
             match self
                 .metablocks
-                .content_to_proof_map
-                .get(&metablock.block.content.parent_id)
+                .get_metablock_from_content_id_as_option(&parent_content_id)
             {
-                Some(parent_proof_id) => {
-                    let parent_block = self
-                        .metablocks
-                        .blocks
-                        .get(parent_proof_id)
-                        .expect("Must have block if in content_to_proof_map")
-                        .clone();
-
+                Some(parent_block) => {
                     confirmation_depth += 1;
+                    parent_content_id = parent_block
+                        .block
+                        .content
+                        .parent_id
+                        .expect("Is proposer block");
                     if confirmation_depth == CONFIRMATION_DEPTH {
                         self.confirm_block(&parent_block).await;
                         break;
@@ -804,10 +939,52 @@ impl Ledger {
         }
     }
 
-    /// Stage all cached descendants for a given parent
+    /// Stage a new valid transaction block
+    pub async fn stage_tx_block(&mut self, block: &Block) {
+        info!("Staging a new tx block");
+
+        // TODO: this only has to be checked when the timer is not running
+        // check if block received during sync is in cached gossip and remove
+        if self
+            .cached_tx_blocks_by_content_id
+            .contains_key(&block.content.get_id())
+        {
+            // remove from cached gossip
+            self.cached_tx_blocks_by_content_id
+                .remove(&block.content.get_id());
+        }
+
+        // save block -> metablocks, blocks by timeslot
+        let metablock = self.metablocks.save(block.clone());
+        self.add_block_to_timeslot(block.proof.timeslot, metablock.proof_id);
+
+        // save the coinbase tx
+        self.txs.insert(
+            block.coinbase_tx.get_id(),
+            Transaction::Coinbase(block.coinbase_tx.clone()),
+        );
+
+        // remove from unknown or add to claimed tx blocks
+        if self.unknown_tx_block_ids.contains(&metablock.content_id) {
+            self.unknown_tx_block_ids.remove(&metablock.content_id);
+        } else {
+            self.unclaimed_tx_block_ids.insert(metablock.content_id);
+        }
+
+        // add to unknown or remove from claimed txs
+        for tx_id in block.content.refs.iter().skip(1) {
+            if self.txs.contains_key(tx_id) {
+                self.unclaimed_tx_ids.remove(tx_id);
+            } else {
+                self.unknown_tx_ids.insert(*tx_id);
+            }
+        }
+    }
+
+    /// Stage all cached descendants for a given parent proposer block
     pub async fn stage_cached_children(&mut self, parent_id: ContentId) {
         let mut blocks = self
-            .cached_blocks_by_parent_content_id
+            .cached_proposer_blocks_by_parent_content_id
             .get(&parent_id)
             .cloned()
             .unwrap_or_default();
@@ -815,13 +992,10 @@ impl Ledger {
         while blocks.len() > 0 {
             let mut additional_blocks: Vec<Block> = Vec::new();
             for block in blocks.drain(..) {
-                if self
-                    .validate_proposer_block_from_cache(&block.clone())
-                    .await
-                {
-                    self.stage_block(&block.clone()).await;
+                if self.validate_block_from_cache(&block.clone()).await {
+                    self.stage_proposer_block(&block.clone()).await;
 
-                    self.cached_blocks_by_parent_content_id
+                    self.cached_proposer_blocks_by_parent_content_id
                         .get(&block.content.get_id())
                         .cloned()
                         .unwrap_or_default()
@@ -835,24 +1009,20 @@ impl Ledger {
     }
 
     /// Applies the txs in a block to balances when it is k-deep
-    async fn confirm_block(&mut self, metablock: &MetaBlock) -> bool {
+    async fn confirm_block(&mut self, proposer_metablock: &MetaBlock) -> bool {
         // TODO: ensure there are no other confirmed blocks at this height
 
         // ensure this block has not already been confirmed
-        if self.confirmed_blocks.contains(&metablock.proof_id) {
+        if self.confirmed_blocks.contains(&proposer_metablock.proof_id) {
             debug!("Staged block references a block that has already been confirmed");
             return false;
         }
 
-        debug!(
-            "Confirming block with proof_id: {}",
-            hex::encode(&metablock.proof_id[0..8])
-        );
-
         // TODO: do we need to account for the timeslot offset here?
+        // TODO: this should be a separate function
         // update the solution range on Eon boundary
-        if metablock.height > GENESIS_OFFSET
-            && (metablock.height - GENESIS_OFFSET) % PROPOSER_BLOCKS_PER_EON == 0
+        if proposer_metablock.height > GENESIS_OFFSET
+            && (proposer_metablock.height - GENESIS_OFFSET) % PROPOSER_BLOCKS_PER_EON == 0
         {
             /* Hypothesize as to why expected and actual differ...
              * as plot size increases, variance does not appear to change
@@ -880,7 +1050,7 @@ impl Ledger {
             // stage the new solution range for update after timeslots expire
             self.solution_range_update = SolutionRangeUpdate::new(
                 self.current_timeslot + SOLUTION_RANGE_UPDATE_DELAY_IN_TIMESLOTS,
-                metablock.height,
+                proposer_metablock.height,
                 (self.current_solution_range as f64 * range_adjustment) as u64,
             );
 
@@ -895,118 +1065,250 @@ impl Ledger {
 
         info!(
             "Confirmed block with height {} at timeslot {}",
-            metablock.height, self.current_timeslot
+            proposer_metablock.height, self.current_timeslot
         );
 
-        // TODO: modify to verify tx blocks and that the first tx is always a coinbase tx
-        // do we have all txs referenced?
-        for tx_id in metablock.block.content.tx_ids.iter() {
-            if !self.txs.contains_key(tx_id) {
-                error!("Cannot confirm block, includes unknown txs");
-                return false;
+        // first have to make sure that we have all tx blocks and txs, else we discard the block
+        // also need to ensure that we have exactly one coinbase tx per block
+        // if we already have applied the tx block we can skip checking for those txs
+        for (index, ref_id) in proposer_metablock.block.content.refs.iter().enumerate() {
+            // first ref is always the coinbase tx
+            if index == 0 {
+                match self.txs.get(ref_id) {
+                    Some(tx) => match tx {
+                        Transaction::Coinbase(_) => {}
+                        Transaction::Credit(_) => {
+                            error!("Cannot confirm proposer block, first ref is not a coinbase tx");
+                            return false;
+                        }
+                    },
+                    None => {
+                        error!("Cannot confirm proposer block, first ref is an unknown tx");
+                        return false;
+                    }
+                }
+            } else {
+                // remaining refs are tx blocks
+
+                // has this tx block already been applied?
+                if self.applied_tx_block_ids.contains(ref_id) {
+                    warn!("Tx block has already been applied applied by a previous proposer blocks, skipping");
+                    continue;
+                }
+
+                // get the tx block from metablocks and check for all txs
+                match self
+                    .metablocks
+                    .get_metablock_from_content_id_as_option(ref_id)
+                {
+                    Some(tx_block) => {
+                        // do we have all txs referenced?
+                        for (index, tx_id) in tx_block.block.content.refs.iter().enumerate() {
+                            match self.txs.get(tx_id) {
+                                Some(tx) => {
+                                    match tx {
+                                        Transaction::Coinbase(_) => {
+                                            if index != 0 {
+                                                error!(
+                                                    "Cannot confirm proposer block, tx block does not have a coinbase tx"
+                                                );
+                                                return false;
+                                            }
+                                        }
+                                        Transaction::Credit(_) => {
+                                            if index == 0 {
+                                                error!(
+                                                    "Cannot confirm proposer block, tx block has multiple coinbase txs"
+                                                );
+                                                return false;
+                                            }
+                                        }
+                                    };
+                                }
+                                None => {
+                                    error!(
+                                        "Cannot confirm proposer block, tx block refs an unknown tx"
+                                    );
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        error!("Cannot confirm proposer block, includes unknown tx block");
+                        return false;
+                    }
+                }
             }
         }
 
-        self.confirmed_blocks.insert(metablock.proof_id);
+        // for each tx block
+        // coinbase tx
+        // remaining txs by hash
+        // proposer block coinbase tx
+        // filter out txs that have been applied
+
+        // order un-applied tx blocks by timeslot then by proof id
+        let mut tx_blocks_by_height: BTreeMap<Timeslot, Vec<ProofId>> = BTreeMap::new();
+        proposer_metablock
+            .block
+            .content
+            .refs
+            .iter()
+            .skip(1)
+            .filter(|content_id| !self.applied_tx_block_ids.contains(*content_id))
+            .for_each(|content_id| {
+                let tx_block = self
+                    .metablocks
+                    .get_metablock_from_content_id(content_id)
+                    .block;
+
+                tx_blocks_by_height
+                    .entry(tx_block.proof.timeslot)
+                    .and_modify(|tx_blocks| {
+                        tx_blocks.push(tx_block.proof.get_id());
+                        tx_blocks.sort();
+                    })
+                    .or_insert(vec![tx_block.proof.get_id()]);
+            });
+
+        tx_blocks_by_height
+            .values()
+            .flatten()
+            .for_each(|tx_block_proof_id| {
+                let tx_block = self
+                    .metablocks
+                    .get_metablock_from_proof_id(tx_block_proof_id)
+                    .block;
+
+                // validate and apply each tx
+                for tx_id in tx_block.content.refs.iter() {
+                   match self.txs.get(tx_id).expect("Already checked") {
+                       Transaction::Coinbase(tx) => {
+                           // create or update account state
+                           self.balances
+                               .entry(tx.to_address)
+                               .and_modify(|account_state| account_state.balance += BLOCK_REWARD)
+                               .or_insert(AccountState {
+                                   nonce: 0,
+                                   balance: BLOCK_REWARD,
+                               });
+
+                           debug!("Applied a coinbase tx to balances");
+                       }
+                       Transaction::Credit(tx) => {
+                           // check if the tx has already been applied
+                           let tx_id = tx.get_id();
+                           if self.applied_tx_ids.contains(&tx_id) {
+                               warn!(
+                                   "Transaction has already been referenced by a previous block, skipping"
+                               );
+                               continue;
+                           }
+
+                           // ensure the tx is still valid
+                           let sender_account_state = self
+                               .balances
+                               .get(&tx.from_address)
+                               .expect("Existence of account state has already been validated");
+
+                           if sender_account_state.balance < tx.amount {
+                               error!("Invalid transaction, from account state has insufficient funds, transaction will not be applied");
+                               continue;
+                           }
+
+                           if sender_account_state.nonce >= tx.nonce {
+                               error!("Invalid transaction, tx nonce has already been used, transaction will not be applied");
+                               continue;
+                           }
+
+                           // debit the sender
+                           self.balances
+                               .entry(tx.from_address)
+                               .and_modify(|account_state| account_state.balance -= tx.amount);
+
+                           // credit  the receiver
+                           self.balances
+                               .entry(tx.to_address)
+                               .and_modify(|account_state| account_state.balance += tx.amount)
+                               .or_insert(AccountState {
+                                   nonce: 0,
+                                   balance: tx.amount,
+                               });
+
+                           // TODO: pay tx fee to farmer
+                       }
+                   }
+
+                    // TODO: add tx to state buffer
+
+                    // TODO: what do we do with invalid txs?
+                    // normally we would just include them but not apply them
+                    // then someone could upload a storage tx for free
+                    // if we don't include the content we could deal with that
+
+                    // track each applied tx
+                    self.applied_tx_ids.insert(*tx_id);
+                }
+
+                // TODO: add each tx block header to state buffer
+
+                // track each applied tx block
+                self.applied_tx_block_ids.insert(tx_block.content.get_id());
+            });
+
+        // add in the proposer block coinbase tx
+        match self
+            .txs
+            .get(&proposer_metablock.block.content.refs[0])
+            .expect("Already checked")
+        {
+            Transaction::Coinbase(tx) => {
+                self.balances
+                    .entry(tx.to_address)
+                    .and_modify(|account_state| account_state.balance += BLOCK_REWARD)
+                    .or_insert(AccountState {
+                        nonce: 0,
+                        balance: BLOCK_REWARD,
+                    });
+
+                self.applied_tx_ids.insert(tx.get_id());
+                // TODO: add to state
+            }
+            Transaction::Credit(_) => {
+                error!("First ref in proposer block must be a coinbase tx");
+            }
+        }
+
+        // TODO: add proposer block header to state buffer
+
+        self.confirmed_blocks.insert(proposer_metablock.proof_id);
 
         // add to epoch tracker
         self.epoch_tracker
             .add_block_to_epoch(
-                metablock.block.proof.epoch,
-                metablock.height,
-                metablock.proof_id,
+                proposer_metablock.block.proof.epoch,
+                proposer_metablock.height,
+                proposer_metablock.proof_id,
             )
             .await;
 
-        // TODO: add block header to state buffer
-
-        // TODO: order all tx blocks
-        // apply all tx (confirm balance is still available and not already applied)
-        for tx_id in metablock.block.content.tx_ids.iter() {
-            match self.txs.get(tx_id).unwrap() {
-                Transaction::Coinbase(tx) => {
-                    // create or update account state
-                    self.balances
-                        .entry(tx.to_address)
-                        .and_modify(|account_state| account_state.balance += BLOCK_REWARD)
-                        .or_insert(AccountState {
-                            nonce: 0,
-                            balance: BLOCK_REWARD,
-                        });
-
-                    debug!("Applied a coinbase tx to balances");
-
-                    // TODO: add to state, may remove from tx db here
-                }
-                Transaction::Credit(tx) => {
-                    // TODO: apply tx to state buffer, may remove from tx db here...
-
-                    // check if the tx has already been applied
-                    if !self.tx_mempool.contains(tx_id) {
-                        warn!(
-                            "Transaction has already been referenced by a previous block, skipping"
-                        );
-                        continue;
-                    }
-
-                    // remove from mem pool
-                    self.tx_mempool.remove(tx_id);
-
-                    // ensure the tx is still valid
-                    let sender_account_state = self
-                        .balances
-                        .get(&tx.from_address)
-                        .expect("Existence of account state has already been validated");
-
-                    if sender_account_state.balance < tx.amount {
-                        error!("Invalid transaction, from account state has insufficient funds, transaction will not be applied");
-                        continue;
-                    }
-
-                    if sender_account_state.nonce >= tx.nonce {
-                        error!("Invalid transaction, tx nonce has already been used, transaction will not be applied");
-                        continue;
-                    }
-
-                    // debit the sender
-                    self.balances
-                        .entry(tx.from_address)
-                        .and_modify(|account_state| account_state.balance -= tx.amount);
-
-                    // credit  the receiver
-                    self.balances
-                        .entry(tx.to_address)
-                        .and_modify(|account_state| account_state.balance += tx.amount)
-                        .or_insert(AccountState {
-                            nonce: 0,
-                            balance: tx.amount,
-                        });
-
-                    // TODO: pay tx fee to farmer
-                }
-            }
-        }
-
         // prune any siblings of this block
-        if metablock.height > 0 {
-            // get the parent_content_id of this block
-            let parent_content_id = self
+        if proposer_metablock.height > 0 {
+            let siblings = self
                 .metablocks
-                .content_to_proof_map
-                .get(&metablock.block.content.parent_id)
-                .expect("Parent will be in metablocks");
-
-            // fetch the parent block and drain all children that are not this block
-            let siblings: Vec<ProofId> = self
-                .metablocks
-                .blocks
-                .get_mut(parent_content_id)
-                .expect("Parent will be in metablocks")
+                .get_metablock_from_content_id(
+                    &proposer_metablock
+                        .block
+                        .content
+                        .parent_id
+                        .expect("Only proposer blocks are confirmed"),
+                )
                 .children
-                .drain_filter(|proof_id| proof_id != &metablock.proof_id)
+                .drain_filter(|proof_id| proof_id != &proposer_metablock.proof_id)
                 .collect();
 
-            self.prune_children(siblings);
+            self.prune_blocks_recursive(siblings);
         }
 
         // TODO: update chain quality
@@ -1015,35 +1317,41 @@ impl Ledger {
     }
 
     /// Recursively removes all siblings and their descendants when a new block is confirmed
-    fn prune_children(&mut self, proof_ids: Vec<ProofId>) {
+    fn prune_blocks_recursive(&mut self, proof_ids: Vec<ProofId>) {
         for child_proof_id in proof_ids.iter() {
-            // remove from metablocks
-            let metablock = self
-                .metablocks
-                .blocks
-                .remove(child_proof_id)
-                .expect("Child will be in metablocks");
+            let metablock = self.metablocks.remove(child_proof_id);
 
-            // remove from content to proof map
-            self.metablocks
-                .content_to_proof_map
-                .remove(&metablock.content_id);
+            // remove from blocks by timeslot
+            self.proof_ids_by_timeslot
+                .entry(metablock.block.proof.timeslot)
+                .and_modify(|proof_ids| {
+                    let index = proof_ids
+                        .iter()
+                        .position(|proof_id| proof_id == metablock.proof_id.as_ref())
+                        .unwrap();
+                    proof_ids.remove(index);
+                });
 
-            if metablock.children.is_empty() {
+            if metablock.children.len() > 0 {
+                // repeat with this blocks children
+                self.prune_blocks_recursive(metablock.children);
+            } else {
                 // leaf node, remove the branch from heads
                 self.prune_branch(metablock.content_id);
-            } else {
-                // repeat with this blocks children
-                self.prune_children(metablock.children);
             }
         }
     }
 
     /// cache a block received via gossip ahead of the current epoch
     /// block will be staged once it's parent is seen
-    fn cache_remote_block(&mut self, block: &Block) {
-        self.cached_blocks_by_parent_content_id
-            .entry(block.content.parent_id)
+    fn cache_remote_proposer_block(&mut self, block: &Block) {
+        self.cached_proposer_blocks_by_parent_content_id
+            .entry(
+                block
+                    .content
+                    .parent_id
+                    .expect("only called on proposer blocks"),
+            )
             .and_modify(|blocks| blocks.push(block.clone()))
             .or_insert(vec![block.clone()]);
     }

@@ -1,5 +1,8 @@
-use crate::transaction::{CoinbaseTx, TxId};
-use crate::{crypto, sloth, utils, BlockId, ContentId, ProofId, Tag, ENCODING_LAYERS_TEST};
+use crate::transaction::CoinbaseTx;
+use crate::{
+    crypto, sloth, utils, BlockId, ContentId, ProofId, Tag, ENCODING_LAYERS_TEST,
+    TX_BLOCKS_PER_PROPOSER_BLOCK,
+};
 use ed25519_dalek::{PublicKey, Signature};
 use log::error;
 use log::warn;
@@ -26,9 +29,7 @@ impl Block {
     }
 
     pub fn get_id(&self) -> BlockId {
-        let mut pruned_block = self.clone();
-        pruned_block.prune();
-        crypto::digest_sha_256(&pruned_block.to_bytes())
+        crypto::digest_sha_256(&self.to_bytes())
     }
 
     pub fn is_valid(
@@ -83,8 +84,8 @@ impl Block {
         }
 
         // is coinbase first tx in the block
-        if self.coinbase_tx.get_id() != self.content.tx_ids[0] {
-            error!("Invalid block, coinbase tx is not the first tx referenced in content!");
+        if self.coinbase_tx.get_id() != self.content.refs[0] {
+            error!("Invalid block, coinbase tx is not the first ref in content!");
             return false;
         }
 
@@ -96,23 +97,53 @@ impl Block {
 
         // TODO: should verify that the solution range is correct for this timeslot
 
+        // ensure block is sortitioned properly based on range
         let target = u64::from_be_bytes(slot_challenge[0..8].try_into().unwrap());
         let tag = u64::from_be_bytes(self.proof.tag);
-        let (lower, is_lower_overflowed) = target.overflowing_sub(self.proof.solution_range / 2);
-        let (upper, is_upper_overflowed) = target.overflowing_add(self.proof.solution_range / 2);
-        let within_solution_range = if is_lower_overflowed || is_upper_overflowed {
-            upper <= tag || tag <= lower
-        } else {
-            lower <= tag && tag <= upper
-        };
 
-        if !within_solution_range {
-            error!(
-                "Invalid block, tag does not meet the solution range ±{} for challenge {}!",
-                self.proof.solution_range / 2,
-                hex::encode(&slot_challenge[0..8]),
-            );
-            return false;
+        if self.content.parent_id.is_some() {
+            // compute proposer block solution range
+            let proposer_block_solution_range =
+                self.proof.solution_range / (TX_BLOCKS_PER_PROPOSER_BLOCK + 1);
+            let (lower, is_lower_overflowed) =
+                target.overflowing_sub(proposer_block_solution_range / 2);
+            let (upper, is_upper_overflowed) =
+                target.overflowing_add(proposer_block_solution_range / 2);
+            let within_proposer_block_solution_range = if is_lower_overflowed || is_upper_overflowed
+            {
+                upper <= tag || tag <= lower
+            } else {
+                lower <= tag && tag <= upper
+            };
+
+            if !within_proposer_block_solution_range {
+                error!(
+                    "Invalid proposer block, tag does not meet the proposer solution range ±{} for challenge {}!",
+                    proposer_block_solution_range / 2,
+                    hex::encode(&slot_challenge[0..8]),
+                );
+                return false;
+            }
+        } else {
+            // does it fall into larger range (valid tx block)
+            let (lower, is_lower_overflowed) =
+                target.overflowing_sub(self.proof.solution_range / 2);
+            let (upper, is_upper_overflowed) =
+                target.overflowing_add(self.proof.solution_range / 2);
+            let within_solution_range = if is_lower_overflowed || is_upper_overflowed {
+                upper <= tag || tag <= lower
+            } else {
+                lower <= tag && tag <= upper
+            };
+
+            if !within_solution_range {
+                error!(
+                    "Invalid tx block, tag does not meet the tx block solution range ±{} for challenge {}!",
+                    self.proof.solution_range / 2,
+                    hex::encode(&slot_challenge[0..8]),
+                );
+                return false;
+            }
         }
 
         // is the tag valid for the encoding and salt?
@@ -163,10 +194,6 @@ impl Block {
 
         true
     }
-
-    pub fn prune(&mut self) {
-        self.data = None;
-    }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
@@ -211,14 +238,15 @@ impl Proof {
 pub struct Content {
     /// id of matching proof
     pub proof_id: ProofId,
-    /// content id of parent block that is seen as head of the longest chain
-    pub parent_id: ContentId,
+    /// content id of parent block that is seen as head of the longest chain (only for proposer block)
+    pub parent_id: Option<ContentId>,
     /// signature of the proof with same public key
     pub proof_signature: Vec<u8>,
     /// when this block was created (from Nodes local view)
     pub timestamp: u64,
-    /// ids of all unseen transactions seen by this block
-    pub tx_ids: Vec<TxId>,
+    /// ids of all unseen tx blocks (proposer blocks) or all unseen txs (tx block)
+    /// first ref is always the coinbase tx for this block
+    pub refs: Vec<[u8; 32]>,
     // TODO: account for farmers who sign the same proof with two different contents
     /// signature of the content with same public key
     pub signature: Vec<u8>,

@@ -3,6 +3,7 @@ pub(crate) mod messages;
 use crate::block::Block;
 use crate::console;
 use crate::network::messages::{InternalRequestMessage, InternalResponseMessage};
+use crate::transaction::SimpleCreditTx;
 use async_std::net::{TcpListener, TcpStream};
 use async_std::stream;
 use async_std::sync::{channel, Receiver, Sender};
@@ -688,13 +689,16 @@ impl Network {
         }
     }
 
-    pub(crate) async fn request_blocks(&self, timeslot: u64) -> Result<Vec<Block>, RequestError> {
+    pub(crate) async fn request_blocks(
+        &self,
+        timeslot: u64,
+    ) -> Result<(Vec<Block>, Vec<SimpleCreditTx>), RequestError> {
         let response = self
             .request(RequestMessage::Blocks(BlocksRequest { timeslot }))
             .await?;
 
         match response {
-            ResponseMessage::Blocks(response) => Ok(response.blocks),
+            ResponseMessage::Blocks(response) => Ok((response.blocks, response.transactions)),
             // _ => Err(RequestError::BadResponse),
         }
     }
@@ -939,7 +943,7 @@ mod tests {
     use super::*;
     use crate::block::{Block, Content, Proof};
     use crate::network::messages::BlocksResponse;
-    use crate::transaction::{AccountAddress, CoinbaseTx};
+    use crate::transaction::{AccountAddress, CoinbaseTx, SimpleCreditTx};
     use crate::{ContentId, ProofId, Tag};
     use futures::executor;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -963,10 +967,10 @@ mod tests {
             },
             content: Content {
                 proof_id: ProofId::default(),
-                parent_id: ContentId::default(),
+                parent_id: Some(ContentId::default()),
                 proof_signature: vec![],
                 timestamp: 0,
-                tx_ids: vec![],
+                refs: vec![],
                 signature: vec![],
             },
             coinbase_tx: CoinbaseTx {
@@ -975,6 +979,10 @@ mod tests {
                 proof_id: ProofId::default(),
             },
         }
+    }
+
+    fn fake_tx() -> SimpleCreditTx {
+        SimpleCreditTx::new(0, [0u8; 32], 0, &crate::crypto::gen_keys_random())
     }
 
     #[test]
@@ -1176,12 +1184,13 @@ mod tests {
                 .expect("Failed to connect to gateway");
 
             {
-                let (response_sender, response_receiver) = async_oneshot::oneshot::<Vec<Block>>();
+                let (response_sender, response_receiver) =
+                    async_oneshot::oneshot::<(Vec<Block>, Vec<SimpleCreditTx>)>();
                 {
                     let peer_network = peer_network.clone();
                     async_std::task::spawn(async move {
-                        let blocks = peer_network.request_blocks(0).await.unwrap();
-                        response_sender.send(blocks).unwrap();
+                        let bundle = peer_network.request_blocks(0).await.unwrap();
+                        response_sender.send(bundle).unwrap();
                     });
                 }
 
@@ -1195,13 +1204,18 @@ mod tests {
                     sender
                         .send(ResponseMessage::Blocks(BlocksResponse {
                             blocks: vec![fake_block()],
+                            transactions: vec![fake_tx()],
                         }))
                         .unwrap();
                 }
 
                 let blocks = response_receiver.await.unwrap();
 
-                assert_eq!(vec![fake_block()], blocks, "Bad blocks response");
+                assert_eq!(
+                    (vec![fake_block()], vec![fake_tx()]),
+                    blocks,
+                    "Bad blocks response"
+                );
             }
         });
     }
