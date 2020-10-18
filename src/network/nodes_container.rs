@@ -118,7 +118,7 @@ impl NodesContainer {
         self.block_list.put(node_addr, ());
     }
 
-    pub fn check_in_block_list(&mut self, node_addr: &SocketAddr) -> bool {
+    pub fn is_in_block_list(&mut self, node_addr: &SocketAddr) -> bool {
         self.block_list.get(node_addr).is_some()
     }
 
@@ -136,7 +136,9 @@ impl NodesContainer {
     pub(super) fn add_contacts(&mut self, contacts: &[SocketAddr]) {
         let contacts_until_max = self.max_contacts - self.contacts.len();
         for node_addr in contacts.iter().take(contacts_until_max).copied() {
-            if !(self.pending_peers.contains_key(&node_addr) || self.peers.contains_key(&node_addr))
+            if !(self.pending_peers.contains_key(&node_addr)
+                || self.peers.contains_key(&node_addr)
+                || self.is_in_block_list(&node_addr))
             {
                 self.contacts.insert(
                     node_addr,

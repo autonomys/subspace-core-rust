@@ -637,6 +637,9 @@ impl StartupNetwork {
                                 let mut nodes_container =
                                     network.inner.nodes_container.lock().await;
 
+                                if nodes_container.is_in_block_list(&peer_addr) {
+                                    return;
+                                }
                                 nodes_container.add_contacts(&[peer_addr]);
                                 for callback in network.handlers().contact.lock().await.iter() {
                                     callback(peer_addr);
@@ -698,7 +701,7 @@ impl StartupNetwork {
                     nodes_container.add_contacts(&contacts);
                     for callback in self.handlers().contact.lock().await.iter() {
                         for &contact in &contacts {
-                            callback(peer_addr);
+                            callback(contact);
                         }
                     }
 
