@@ -58,7 +58,7 @@ mod peers_and_nodes;
 use crate::block::Block;
 use crate::console;
 use crate::network::messages::{InternalRequestMessage, InternalResponseMessage};
-use crate::network::nodes_container::NodesContainer;
+use crate::network::nodes_container::{NodesContainer, PeersLevel};
 use crate::transaction::SimpleCreditTx;
 use crate::NodeID;
 use async_std::net::{TcpListener, TcpStream};
@@ -157,7 +157,7 @@ fn extract_message(input: &[u8]) -> Option<(Result<Message, ()>, usize)> {
     }
 }
 
-fn read_messages(mut stream: TcpStream) -> Receiver<Result<Message, ()>> {
+fn read_messages(mut stream: TcpStream) -> Receiver<Message> {
     let (messages_sender, messages_receiver) = channel(10);
 
     async_std::task::spawn(async move {
@@ -187,7 +187,9 @@ fn read_messages(mut stream: TcpStream) -> Receiver<Result<Message, ()>> {
                     while let Some((message, consumed_bytes)) =
                         extract_message(&buffer[offset..buffer_contents_bytes])
                     {
-                        messages_sender.send(message).await;
+                        if let Ok(message) = message {
+                            messages_sender.send(message).await;
+                        }
                         // Move cursor forward
                         offset += consumed_bytes;
                     }
@@ -321,7 +323,7 @@ async fn on_connected(
         callback(&connected_peer);
     }
 
-    let mut messages_receiver = read_messages(stream.clone());
+    let messages_receiver = read_messages(stream.clone());
 
     // listen for new messages from the broker and send back to peer over stream
     async_std::task::spawn(async move {
@@ -338,6 +340,17 @@ async fn on_connected(
     });
 
     let network_weak = network.downgrade();
+    handle_messages(network_weak, messages_receiver, peer_addr, client_sender);
+
+    Ok(connected_peer)
+}
+
+fn handle_messages(
+    network_weak: NetworkWeak,
+    mut messages_receiver: Receiver<Message>,
+    peer_addr: SocketAddr,
+    client_sender: Sender<Bytes>,
+) {
     async_std::task::spawn(async move {
         while let Some(message) = messages_receiver.next().await {
             // TODO: This is probably suboptimal, we can probably get rid of it if we have special
@@ -349,91 +362,89 @@ async fn on_connected(
                     return;
                 }
             };
-            if let Ok(message) = message {
-                match message {
-                    Message::Gossip(message) => {
-                        drop(network.inner.gossip_sender.send((peer_addr, message)).await);
+            match message {
+                Message::Gossip(message) => {
+                    drop(network.inner.gossip_sender.send((peer_addr, message)).await);
+                }
+                Message::Request { id, message } => {
+                    let (response_sender, response_receiver) = async_oneshot::oneshot();
+                    drop(
+                        network
+                            .inner
+                            .request_sender
+                            .send((message, response_sender))
+                            .await,
+                    );
+                    {
+                        let client_sender = client_sender.clone();
+                        async_std::task::spawn(async move {
+                            if let Ok(message) = response_receiver.await {
+                                drop(
+                                    client_sender
+                                        .send(Message::Response { id, message }.to_bytes())
+                                        .await,
+                                );
+                            }
+                        });
                     }
-                    Message::Request { id, message } => {
-                        let (response_sender, response_receiver) = async_oneshot::oneshot();
-                        drop(
+                }
+                Message::Response { id, message } => {
+                    if let Some(response_sender) = network
+                        .inner
+                        .requests_container
+                        .lock()
+                        .await
+                        .handlers
+                        .remove(&id)
+                    {
+                        drop(response_sender.send(message));
+                    } else {
+                        debug!("Received response for unknown request {}", id);
+                    }
+                }
+                Message::InternalRequest { id, message } => {
+                    let response = match message {
+                        InternalRequestMessage::Peers => InternalResponseMessage::Peers(
                             network
                                 .inner
-                                .request_sender
-                                .send((message, response_sender))
-                                .await,
-                        );
-                        {
-                            let client_sender = client_sender.clone();
-                            async_std::task::spawn(async move {
-                                if let Ok(message) = response_receiver.await {
-                                    drop(
-                                        client_sender
-                                            .send(Message::Response { id, message }.to_bytes())
-                                            .await,
-                                    );
+                                .peers_store
+                                .lock()
+                                .await
+                                .nodes
+                                .iter()
+                                .filter(|(&address, instant)| {
+                                    instant.is_some()
+                                        && address != network.inner.node_addr
+                                        && address != peer_addr
+                                })
+                                .map(|(&addr, _)| addr)
+                                .collect(),
+                        ),
+                    };
+                    drop(
+                        client_sender
+                            .send(
+                                Message::InternalResponse {
+                                    id,
+                                    message: response,
                                 }
-                            });
-                        }
-                    }
-                    Message::Response { id, message } => {
-                        if let Some(response_sender) = network
-                            .inner
-                            .requests_container
-                            .lock()
-                            .await
-                            .handlers
-                            .remove(&id)
-                        {
-                            drop(response_sender.send(message));
-                        } else {
-                            debug!("Received response for unknown request {}", id);
-                        }
-                    }
-                    Message::InternalRequest { id, message } => {
-                        let response = match message {
-                            InternalRequestMessage::Peers => InternalResponseMessage::Peers(
-                                network
-                                    .inner
-                                    .peers_store
-                                    .lock()
-                                    .await
-                                    .nodes
-                                    .iter()
-                                    .filter(|(&address, instant)| {
-                                        instant.is_some()
-                                            && address != network.inner.node_addr
-                                            && address != peer_addr
-                                    })
-                                    .map(|(&addr, _)| addr)
-                                    .collect(),
-                            ),
-                        };
-                        drop(
-                            client_sender
-                                .send(
-                                    Message::InternalResponse {
-                                        id,
-                                        message: response,
-                                    }
-                                    .to_bytes(),
-                                )
-                                .await,
-                        );
-                    }
-                    Message::InternalResponse { id, message } => {
-                        if let Some(response_sender) = network
-                            .inner
-                            .internal_requests_container
-                            .lock()
-                            .await
-                            .handlers
-                            .remove(&id)
-                        {
-                            drop(response_sender.send(message));
-                        } else {
-                            debug!("Received response for unknown request {}", id);
-                        }
+                                .to_bytes(),
+                            )
+                            .await,
+                    );
+                }
+                Message::InternalResponse { id, message } => {
+                    if let Some(response_sender) = network
+                        .inner
+                        .internal_requests_container
+                        .lock()
+                        .await
+                        .handlers
+                        .remove(&id)
+                    {
+                        drop(response_sender.send(message));
+                    } else {
+                        debug!("Received response for unknown request {}", id);
                     }
                 }
             }
@@ -447,8 +458,6 @@ async fn on_connected(
             // TODO: Fallback to bootstrap nodes in case we can't reconnect at all
         }
     });
-
-    Ok(connected_peer)
 }
 
 #[derive(Debug)]
@@ -496,7 +505,7 @@ pub struct ConnectedPeer {
 
 struct Inner {
     node_id: NodeID,
-    nodes_container: NodesContainer,
+    nodes_container: AsyncMutex<NodesContainer>,
     peers_store: Arc<AsyncMutex<PeersAndNodes>>,
     background_tasks: StdMutex<Vec<JoinHandle<()>>>,
     handlers: Handlers,
@@ -555,7 +564,12 @@ impl Network {
         let handlers = Handlers::default();
         let inner = Arc::new(Inner {
             node_id,
-            nodes_container: NodesContainer::new(min_contacts, max_contacts, min_peers, max_peers),
+            nodes_container: AsyncMutex::new(NodesContainer::new(
+                min_contacts,
+                max_contacts,
+                min_peers,
+                max_peers,
+            )),
             peers_store: Arc::new(AsyncMutex::new(PeersAndNodes::new(
                 min_peers,
                 max_peers,
@@ -714,6 +728,48 @@ impl Network {
         self.inner.node_addr
     }
 
+    // TODO: Maybe some kind of parameter to make sure this can only be called during bootstrap
+    //  process
+    /// Connect during bootstrap process
+    pub(crate) async fn bootstrap_connect(
+        &self,
+        node_addr: SocketAddr,
+    ) -> Result<PeersLevel, ConnectionError> {
+        let mut nodes_container = self.inner.nodes_container.lock().await;
+
+        nodes_container.add_contacts(&[node_addr]);
+        let (pending_peer, _) = nodes_container
+            .connect_to_specific_contact(&node_addr)
+            .unwrap();
+        drop(nodes_container);
+
+        match self.connect_simple(node_addr).await {
+            Ok((bytes_sender, messages_receiver)) => {
+                if let Some((peer, peers_level)) = self
+                    .inner
+                    .nodes_container
+                    .lock()
+                    .await
+                    .finish_successful_connection_attempt(&pending_peer, bytes_sender)
+                {
+                    // TODO: Handle `messages_receiver`
+
+                    Ok(peers_level)
+                } else {
+                    Err(ConnectionError::AlreadyConnected)
+                }
+            }
+            Err(error) => {
+                self.inner
+                    .nodes_container
+                    .lock()
+                    .await
+                    .finish_failed_connection_attempt(&pending_peer);
+                Err(error)
+            }
+        }
+    }
+
     /// Send a message to all peers
     pub(crate) async fn gossip(&self, message: GossipMessage) {
         for callback in self.inner.handlers.gossip.lock().await.iter() {
@@ -860,6 +916,39 @@ impl Network {
 
         match exchange_peer_addr(self.inner.node_addr, &mut stream).await {
             Some(peer_addr) => on_connected(self.clone(), peer_addr, stream).await,
+            None => Err(ConnectionError::FailedToExchangeAddress),
+        }
+    }
+
+    async fn connect_simple(
+        &self,
+        peer_addr: SocketAddr,
+    ) -> Result<(Sender<Bytes>, Receiver<Message>), ConnectionError> {
+        let mut stream = TcpStream::connect(peer_addr)
+            .await
+            .map_err(|error| ConnectionError::IO { error })?;
+
+        match exchange_peer_addr(self.inner.node_addr, &mut stream).await {
+            Some(_) => {
+                let (bytes_sender, mut bytes_receiver) = channel::<Bytes>(32);
+
+                let messages_receiver = read_messages(stream.clone());
+
+                async_std::task::spawn(async move {
+                    while let Some(bytes) = bytes_receiver.next().await {
+                        let length = bytes.len() as u16;
+                        let result: io::Result<()> = try {
+                            stream.write_all(&length.to_le_bytes()).await?;
+                            stream.write_all(&bytes).await?
+                        };
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                });
+
+                Ok((bytes_sender, messages_receiver))
+            }
             None => Err(ConnectionError::FailedToExchangeAddress),
         }
     }
