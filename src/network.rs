@@ -413,17 +413,15 @@ fn handle_messages(
                         InternalRequestMessage::Contacts => InternalResponseMessage::Contacts(
                             network
                                 .inner
-                                .peers_store
+                                .nodes_container
                                 .lock()
                                 .await
-                                .nodes
-                                .iter()
-                                .filter(|(&address, instant)| {
-                                    instant.is_some()
-                                        && address != network.inner.node_addr
-                                        && address != peer_addr
+                                .get_contacts()
+                                .filter(|&address| {
+                                    address != &network.inner.node_addr && address != &peer_addr
                                 })
-                                .map(|(&addr, _)| addr)
+                                // TODO: Limit the number of nodes
+                                .copied()
                                 .collect(),
                         ),
                     };

@@ -3,10 +3,13 @@ use bytes::Bytes;
 use rand::seq::IteratorRandom;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::time::Instant;
 
 #[derive(Debug, Copy, Clone)]
 pub(super) struct Contact {
     node_addr: SocketAddr,
+    // TODO: Use this field for periodic pings
+    first_checked: Option<Instant>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -30,7 +33,7 @@ pub(super) struct PendingPeer {
 }
 
 impl From<Contact> for PendingPeer {
-    fn from(Contact { node_addr }: Contact) -> Self {
+    fn from(Contact { node_addr, .. }: Contact) -> Self {
         PendingPeer { node_addr }
     }
 }
@@ -104,13 +107,29 @@ impl NodesContainer {
         }
     }
 
+    // TODO: Should this return contact structs?
+    /// Returns all known contacts, including those that are already connected or pending
+    pub(super) fn get_contacts(&self) -> impl Iterator<Item = &SocketAddr> {
+        self.peers.keys().chain(self.pending_peers.keys()).chain(
+            self.contacts
+                .iter()
+                .filter_map(|(addr, contact)| contact.first_checked.map(|_| addr)),
+        )
+    }
+
     /// Add contacts to the list (will skip contacts that are already connected or pending)
     pub(super) fn add_contacts(&mut self, contacts: &[SocketAddr]) -> ContactsLevel {
         let contacts_until_max = self.max_contacts - self.contacts.len();
         for node_addr in contacts.iter().take(contacts_until_max).copied() {
             if !(self.pending_peers.contains_key(&node_addr) || self.peers.contains_key(&node_addr))
             {
-                self.contacts.insert(node_addr, Contact { node_addr });
+                self.contacts.insert(
+                    node_addr,
+                    Contact {
+                        node_addr,
+                        first_checked: None,
+                    },
+                );
             }
         }
 
