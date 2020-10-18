@@ -74,6 +74,7 @@ use log::*;
 use messages::{BlocksRequest, GossipMessage, Message, RequestMessage, ResponseMessage};
 use peers_and_nodes::PeersAndNodes;
 use rand::prelude::*;
+use static_assertions::_core::marker::PhantomData;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt::{Debug, Display};
@@ -543,12 +544,11 @@ impl Drop for Inner {
     }
 }
 
-#[derive(Clone)]
-pub struct Network {
+pub struct StartupNetwork {
     inner: Arc<Inner>,
 }
 
-impl Network {
+impl StartupNetwork {
     pub async fn new<CB>(
         node_id: NodeID,
         addr: SocketAddr,
@@ -732,10 +732,6 @@ impl Network {
         Ok(network)
     }
 
-    pub fn address(&self) -> SocketAddr {
-        self.inner.node_addr
-    }
-
     // TODO: Maybe some kind of parameter to make sure this can only be called during bootstrap
     //  process
     /// Connect during bootstrap process
@@ -838,6 +834,121 @@ impl Network {
                 Err(error)
             }
         }
+    }
+
+    pub fn finish_startup(self) -> Network {
+        Network::new(self.inner)
+    }
+
+    async fn request_contacts_v2(&self, peer: Peer) -> Result<Vec<SocketAddr>, RequestError> {
+        let response = self
+            .internal_request_v2(peer, InternalRequestMessage::Contacts)
+            .await?;
+
+        match response {
+            InternalResponseMessage::Contacts(peers) => Ok(peers),
+            // _ => Err(RequestError::BadResponse),
+        }
+    }
+
+    async fn connect_simple(
+        &self,
+        peer_addr: SocketAddr,
+    ) -> Result<(Sender<Bytes>, Receiver<Message>), ConnectionError> {
+        let mut stream = TcpStream::connect(peer_addr)
+            .await
+            .map_err(|error| ConnectionError::IO { error })?;
+
+        match exchange_peer_addr(self.inner.node_addr, &mut stream).await {
+            Some(_) => {
+                let bytes_sender = create_bytes_sender(stream.clone());
+                let message_receiver = create_message_receiver(stream);
+
+                Ok((bytes_sender, message_receiver))
+            }
+            None => Err(ConnectionError::FailedToExchangeAddress),
+        }
+    }
+
+    /// Non-generic method to avoid significant duplication in final binary
+    async fn internal_request_v2(
+        &self,
+        peer: Peer,
+        message: InternalRequestMessage,
+    ) -> Result<InternalResponseMessage, RequestError> {
+        let id;
+        let (response_sender, response_receiver) = async_oneshot::oneshot();
+        let internal_requests_container = &self.inner.internal_requests_container;
+
+        {
+            let mut internal_requests_container = internal_requests_container.lock().await;
+
+            id = internal_requests_container.next_id;
+
+            internal_requests_container.next_id =
+                internal_requests_container.next_id.wrapping_add(1);
+            internal_requests_container
+                .handlers
+                .insert(id, response_sender);
+        }
+
+        let message = Message::InternalRequest { id, message }.to_bytes();
+        if message.len() > MAX_MESSAGE_CONTENTS_LENGTH {
+            internal_requests_container
+                .lock()
+                .await
+                .handlers
+                .remove(&id);
+
+            return Err(RequestError::MessageTooLong);
+        }
+
+        async_std::task::spawn(async move {
+            peer.send(message).await;
+        });
+
+        future::or(
+            async move {
+                response_receiver
+                    .await
+                    .map_err(|_| RequestError::ConnectionClosed {})
+            },
+            async move {
+                async_io::Timer::after(REQUEST_TIMEOUT).await;
+
+                internal_requests_container
+                    .lock()
+                    .await
+                    .handlers
+                    .remove(&id);
+
+                Err(RequestError::TimedOut)
+            },
+        )
+        .await
+    }
+
+    // TODO: It is ugly that we can get regular Network from StartupNetwork instance this way, think
+    //  about having a trait that is common for both
+    fn downgrade(&self) -> NetworkWeak {
+        let inner = Arc::downgrade(&self.inner);
+        NetworkWeak { inner }
+    }
+}
+
+#[derive(Clone)]
+pub struct Network {
+    inner: Arc<Inner>,
+}
+
+impl Network {
+    fn new(inner: Arc<Inner>) -> Self {
+        // TODO: Background processes
+        Self { inner }
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        self.inner.node_addr
     }
 
     /// Send a message to all peers
@@ -944,17 +1055,6 @@ impl Network {
         }
     }
 
-    async fn request_contacts_v2(&self, peer: Peer) -> Result<Vec<SocketAddr>, RequestError> {
-        let response = self
-            .internal_request_v2(peer, InternalRequestMessage::Contacts)
-            .await?;
-
-        match response {
-            InternalResponseMessage::Contacts(peers) => Ok(peers),
-            // _ => Err(RequestError::BadResponse),
-        }
-    }
-
     pub async fn on_peer<F: Fn(SocketAddr) + Send + 'static>(&self, callback: F) {
         self.inner
             .handlers
@@ -997,25 +1097,6 @@ impl Network {
 
         match exchange_peer_addr(self.inner.node_addr, &mut stream).await {
             Some(peer_addr) => on_connected(self.clone(), peer_addr, stream).await,
-            None => Err(ConnectionError::FailedToExchangeAddress),
-        }
-    }
-
-    async fn connect_simple(
-        &self,
-        peer_addr: SocketAddr,
-    ) -> Result<(Sender<Bytes>, Receiver<Message>), ConnectionError> {
-        let mut stream = TcpStream::connect(peer_addr)
-            .await
-            .map_err(|error| ConnectionError::IO { error })?;
-
-        match exchange_peer_addr(self.inner.node_addr, &mut stream).await {
-            Some(_) => {
-                let bytes_sender = create_bytes_sender(stream.clone());
-                let message_receiver = create_message_receiver(stream);
-
-                Ok((bytes_sender, message_receiver))
-            }
             None => Err(ConnectionError::FailedToExchangeAddress),
         }
     }
@@ -1111,64 +1192,6 @@ impl Network {
 
         async_std::task::spawn(async move {
             peer.bytes_sender.send(message).await;
-        });
-
-        future::or(
-            async move {
-                response_receiver
-                    .await
-                    .map_err(|_| RequestError::ConnectionClosed {})
-            },
-            async move {
-                async_io::Timer::after(REQUEST_TIMEOUT).await;
-
-                internal_requests_container
-                    .lock()
-                    .await
-                    .handlers
-                    .remove(&id);
-
-                Err(RequestError::TimedOut)
-            },
-        )
-        .await
-    }
-
-    /// Non-generic method to avoid significant duplication in final binary
-    async fn internal_request_v2(
-        &self,
-        peer: Peer,
-        message: InternalRequestMessage,
-    ) -> Result<InternalResponseMessage, RequestError> {
-        let id;
-        let (response_sender, response_receiver) = async_oneshot::oneshot();
-        let internal_requests_container = &self.inner.internal_requests_container;
-
-        {
-            let mut internal_requests_container = internal_requests_container.lock().await;
-
-            id = internal_requests_container.next_id;
-
-            internal_requests_container.next_id =
-                internal_requests_container.next_id.wrapping_add(1);
-            internal_requests_container
-                .handlers
-                .insert(id, response_sender);
-        }
-
-        let message = Message::InternalRequest { id, message }.to_bytes();
-        if message.len() > MAX_MESSAGE_CONTENTS_LENGTH {
-            internal_requests_container
-                .lock()
-                .await
-                .handlers
-                .remove(&id);
-
-            return Err(RequestError::MessageTooLong);
-        }
-
-        async_std::task::spawn(async move {
-            peer.send(message).await;
         });
 
         future::or(

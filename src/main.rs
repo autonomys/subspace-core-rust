@@ -11,7 +11,7 @@ use std::{env, fs};
 use subspace_core_rust::farmer::FarmerMessage;
 use subspace_core_rust::ledger::Ledger;
 use subspace_core_rust::manager::ProtocolMessage;
-use subspace_core_rust::network::{Network, NodeType};
+use subspace_core_rust::network::{NodeType, StartupNetwork};
 use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::{
@@ -156,7 +156,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     let (timer_to_farmer_tx, timer_to_farmer_rx) = channel::<FarmerMessage>(32);
     let solver_to_main_tx = any_to_main_tx.clone();
 
-    let network_fut = Network::new(
+    let startup_network_fut = StartupNetwork::new(
         node_id,
         if node_type == NodeType::Gateway {
             DEV_GATEWAY_ADDR.parse().unwrap()
@@ -170,11 +170,11 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         MAINTAIN_PEERS_INTERVAL,
         network::create_backoff,
     );
-    let network = network_fut.await.unwrap();
+    let startup_network = startup_network_fut.await.unwrap();
     if node_type != NodeType::Gateway {
         info!("Connecting to gateway node");
 
-        let contacts_level = network
+        let contacts_level = startup_network
             .startup_connect(DEV_GATEWAY_ADDR.parse().unwrap())
             .await
             .expect("Failed to connect to a single gateway node");
@@ -187,7 +187,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
 
         loop {
             // TODO: Failed attempts should be handled gracefully
-            let peers_level = network
+            let peers_level = startup_network
                 .connect_to_random_contact()
                 .await
                 .expect("Failed to connect to minimum number of peers on startup");
@@ -197,6 +197,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
             }
         }
     }
+    let network = startup_network.finish_startup();
 
     // manager loop
     let main = manager::run(
