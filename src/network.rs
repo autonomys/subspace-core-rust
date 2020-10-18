@@ -53,7 +53,6 @@
 
 pub(crate) mod messages;
 mod nodes_container;
-mod peers_and_nodes;
 
 use crate::block::Block;
 use crate::console;
@@ -62,7 +61,6 @@ use crate::network::nodes_container::{ContactsLevel, NodesContainer, Peer, Peers
 use crate::transaction::SimpleCreditTx;
 use crate::NodeID;
 use async_std::net::{TcpListener, TcpStream};
-use async_std::stream;
 use async_std::sync::{channel, Receiver, Sender};
 use async_std::task::JoinHandle;
 use backoff::ExponentialBackoff;
@@ -72,7 +70,6 @@ use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use futures_lite::future;
 use log::*;
 use messages::{BlocksRequest, GossipMessage, Message, RequestMessage, ResponseMessage};
-use peers_and_nodes::PeersAndNodes;
 use rand::prelude::*;
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -81,7 +78,7 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{fmt, io, mem};
 
 /* Todo
@@ -288,16 +285,16 @@ async fn on_connected(
     let bytes_sender = create_bytes_sender(stream.clone());
 
     let connected_peer = {
-        let mut peers_store = network.inner.peers_store.lock().await;
+        // TODO: Register connected peers in nodes container
 
         let connected_peer = ConnectedPeer {
             addr: peer_addr,
             bytes_sender: bytes_sender.clone(),
         };
 
-        if !peers_store.register_connected_peer(connected_peer.clone()) {
-            return Err(ConnectionError::AlreadyConnected);
-        }
+        // if !peers_store.register_connected_peer(connected_peer.clone()) {
+        //     return Err(ConnectionError::AlreadyConnected);
+        // }
 
         for callback in network.inner.handlers.peer.lock().await.iter() {
             callback(peer_addr);
@@ -478,7 +475,6 @@ pub struct ConnectedPeer {
 struct Inner {
     node_id: NodeID,
     nodes_container: AsyncMutex<NodesContainer>,
-    peers_store: Arc<AsyncMutex<PeersAndNodes>>,
     background_tasks: StdMutex<Vec<JoinHandle<()>>>,
     handlers: Handlers,
     gossip_sender: async_channel::Sender<(SocketAddr, GossipMessage)>,
@@ -543,13 +539,6 @@ impl StartupNetwork {
                 max_peers,
                 block_list_size,
             )),
-            peers_store: Arc::new(AsyncMutex::new(PeersAndNodes::new(
-                min_peers,
-                max_peers,
-                min_contacts,
-                max_contacts,
-                create_backoff,
-            ))),
             background_tasks: StdMutex::default(),
             handlers,
             gossip_sender,
@@ -832,6 +821,8 @@ impl Network {
         let message = Message::Gossip(message);
         let bytes = message.to_bytes();
         for peer in self.inner.nodes_container.lock().await.get_peers().cloned() {
+            // This line is just for IDE, otherwise it can't figure out the type
+            let peer: Peer = peer;
             trace!("Sending a {} message to {}", message, peer.address());
             let bytes = bytes.clone();
             async_std::task::spawn(async move {
@@ -857,6 +848,8 @@ impl Network {
             .filter(|peer| peer.address() != sender)
             .cloned()
         {
+            // This line is just for IDE, otherwise it can't figure out the type
+            let peer: Peer = peer;
             trace!("Sending a {} message to {}", message, peer.address());
             let bytes = bytes.clone();
             async_std::task::spawn(async move {
@@ -988,17 +981,18 @@ impl Network {
         }
 
         // TODO: Previous version of the code used peers instead of connections, was it correct?
-        let connected_peer = self
+        let peer = (self
             .inner
-            .peers_store
+            .nodes_container
             .lock()
             .await
-            .get_connected_peers()
-            .choose(&mut rand::thread_rng())
+            .get_peers()
+            // This is just for IDE that can't figure out type otherwise
+            .choose(&mut rand::thread_rng()) as Option<&Peer>)
             .cloned();
-        if let Some(connected_peer) = connected_peer {
+        if let Some(peer) = peer {
             async_std::task::spawn(async move {
-                connected_peer.bytes_sender.send(message).await;
+                peer.send(message).await;
             });
         } else {
             return Err(RequestError::NoPeers);
@@ -1077,24 +1071,6 @@ impl Network {
             },
         )
         .await
-    }
-
-    pub async fn get_random_connected_peer(&self) -> Option<ConnectedPeer> {
-        self.inner
-            .peers_store
-            .lock()
-            .await
-            .get_connected_peers()
-            .choose(&mut rand::thread_rng())
-            .cloned()
-    }
-
-    pub async fn pull_random_disconnected_node(&self) -> Option<SocketAddr> {
-        self.inner
-            .peers_store
-            .lock()
-            .await
-            .pull_random_disconnected_node()
     }
 }
 
