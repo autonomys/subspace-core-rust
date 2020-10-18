@@ -74,7 +74,6 @@ use log::*;
 use messages::{BlocksRequest, GossipMessage, Message, RequestMessage, ResponseMessage};
 use peers_and_nodes::PeersAndNodes;
 use rand::prelude::*;
-use static_assertions::_core::marker::PhantomData;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt::{Debug, Display};
@@ -554,6 +553,7 @@ impl StartupNetwork {
         max_peers: usize,
         min_contacts: usize,
         max_contacts: usize,
+        block_list_size: usize,
         maintain_peers_interval: Duration,
         create_backoff: CB,
     ) -> io::Result<Self>
@@ -575,6 +575,7 @@ impl StartupNetwork {
                 max_contacts,
                 min_peers,
                 max_peers,
+                block_list_size,
             )),
             peers_store: Arc::new(AsyncMutex::new(PeersAndNodes::new(
                 min_peers,

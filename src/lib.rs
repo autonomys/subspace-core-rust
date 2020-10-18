@@ -55,6 +55,7 @@ pub const MIN_PEERS: usize = 4;
 pub const MAX_PEERS: usize = 20;
 pub const MIN_CONTACTS: usize = 10;
 pub const MAX_CONTACTS: usize = 100;
+pub const BLOCK_LIST_SIZE: usize = 100;
 // TODO: Is this a good value?
 pub const MAINTAIN_PEERS_INTERVAL: Duration = Duration::from_secs(60);
 // TODO: revert to six, just for testing now

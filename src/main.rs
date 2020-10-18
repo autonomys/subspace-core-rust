@@ -15,8 +15,8 @@ use subspace_core_rust::network::{NodeType, StartupNetwork};
 use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::{
-    console, crypto, farmer, manager, network, plotter, rpc, CONSOLE, DEV_GATEWAY_ADDR,
-    MAINTAIN_PEERS_INTERVAL, MAX_CONTACTS, MAX_PEERS, MIN_CONTACTS, MIN_PEERS,
+    console, crypto, farmer, manager, network, plotter, rpc, BLOCK_LIST_SIZE, CONSOLE,
+    DEV_GATEWAY_ADDR, MAINTAIN_PEERS_INTERVAL, MAX_CONTACTS, MAX_PEERS, MIN_CONTACTS, MIN_PEERS,
 };
 use tui_logger::{init_logger, set_default_level};
 
@@ -167,6 +167,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         MAX_PEERS,
         MIN_CONTACTS,
         MAX_CONTACTS,
+        BLOCK_LIST_SIZE,
         MAINTAIN_PEERS_INTERVAL,
         network::create_backoff,
     );

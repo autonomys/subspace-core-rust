@@ -1,5 +1,6 @@
 use async_std::sync::Sender;
 use bytes::Bytes;
+use lru::LruCache;
 use rand::seq::IteratorRandom;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -78,12 +79,12 @@ impl Peer {
 }
 
 // TODO: Max values are ignored, but shouldn't be
-#[derive(Clone)]
 pub(super) struct NodesContainer {
     min_contacts: usize,
     max_contacts: usize,
     min_peers: usize,
     max_peers: usize,
+    block_list: LruCache<SocketAddr, ()>,
     contacts: HashMap<SocketAddr, Contact>,
     pending_peers: HashMap<SocketAddr, PendingPeer>,
     peers: HashMap<SocketAddr, Peer>,
@@ -95,16 +96,26 @@ impl NodesContainer {
         max_contacts: usize,
         min_peers: usize,
         max_peers: usize,
+        block_list_size: usize,
     ) -> Self {
         Self {
             min_contacts,
             max_contacts,
             min_peers,
             max_peers,
+            block_list: LruCache::new(block_list_size),
             contacts: HashMap::new(),
             pending_peers: HashMap::new(),
             peers: HashMap::new(),
         }
+    }
+
+    pub fn add_to_block_list(&mut self, node_addr: SocketAddr) {
+        self.block_list.put(node_addr, ());
+    }
+
+    pub fn check_in_block_list(&mut self, node_addr: &SocketAddr) -> bool {
+        self.block_list.get(node_addr).is_some()
     }
 
     // TODO: Should this return contact structs?
