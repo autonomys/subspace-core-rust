@@ -280,33 +280,6 @@ async fn exchange_peer_addr(own_addr: SocketAddr, stream: &mut TcpStream) -> Opt
     }
 }
 
-fn request_more_peers(network_weak: NetworkWeak, connected_peer: ConnectedPeer) {
-    async_std::task::spawn(async move {
-        if let Some(network) = network_weak.upgrade() {
-            match network.request_contacts(connected_peer.clone()).await {
-                Ok(peers) => {
-                    for peer in peers
-                        .into_iter()
-                        .filter(|&peer| peer != network.inner.node_addr)
-                    {
-                        let mut peers_store = network.inner.peers_store.lock().await;
-                        if peers_store.nodes.contains(&peer) {
-                            continue;
-                        }
-                        peers_store.nodes.put(peer, None);
-                        for callback in network.inner.handlers.peer.lock().await.iter() {
-                            callback(peer);
-                        }
-                    }
-                }
-                Err(error) => {
-                    debug!("Failed to get peers from new peer: {:?}", error);
-                }
-            }
-        }
-    });
-}
-
 async fn on_connected(
     network: Network,
     peer_addr: SocketAddr,
@@ -328,11 +301,6 @@ async fn on_connected(
 
         for callback in network.inner.handlers.peer.lock().await.iter() {
             callback(peer_addr);
-        }
-
-        // Request more peers if needed
-        if peers_store.known_nodes() < network.inner.max_nodes {
-            request_more_peers(network.downgrade(), connected_peer.clone());
         }
 
         connected_peer
@@ -636,96 +604,9 @@ impl StartupNetwork {
             })
         };
 
-        let maintain_peers_handle = {
-            let network_weak = network.downgrade();
-
-            async_std::task::spawn(async move {
-                let mut interval = stream::interval(maintain_peers_interval);
-                while let Some(_) = interval.next().await {
-                    if let Some(network) = network_weak.upgrade() {
-                        for node in network
-                            .inner
-                            .peers_store
-                            .lock()
-                            .await
-                            .nodes
-                            .iter()
-                            .map(|(&addr, _)| addr)
-                        {
-                            // TODO: TCP connections will get stuck for a long time
-                            // if peers_store.connected_or_dropped(&node) {
-                            //     // Already connected to or dropped from, no need to check
-                            //     continue;
-                            // }
-
-                            let peers_store = Arc::clone(&network.inner.peers_store);
-                            async_std::task::spawn(async move {
-                                // TODO: Timeout?
-                                let result = TcpStream::connect(node).await.is_ok();
-
-                                let mut peers_store = peers_store.lock().await;
-                                if result {
-                                    if let Some(instant) = peers_store.nodes.get_mut(&node) {
-                                        if instant.is_none() {
-                                            instant.replace(Instant::now());
-                                        }
-                                    }
-                                } else {
-                                    trace!("Dropping unreachable peer {}", node);
-                                    // if peers_store.has_connected_peer(&node) {
-                                    //     return;
-                                    // }
-                                    // TODO: Stop the connection (which may have stuck)
-                                    peers_store.peers.remove(&node);
-                                    if let Some(node) = peers_store.nodes.peek_mut(&node) {
-                                        node.take();
-                                    }
-                                }
-                            });
-                        }
-
-                        while !network
-                            .inner
-                            .peers_store
-                            .lock()
-                            .await
-                            .has_enough_connected_peers()
-                        {
-                            trace!("Low on connections, trying to establish more");
-                            if let Some(peer) = network.pull_random_disconnected_node().await {
-                                // TODO: Probably count number of errors for peer and remove it if
-                                //  fails all the time
-                                drop(network.connect_to(peer).await);
-                            } else {
-                                break;
-                            }
-                        }
-
-                        if !network
-                            .inner
-                            .peers_store
-                            .lock()
-                            .await
-                            .has_enough_known_nodes()
-                        {
-                            trace!("Low on peers, trying to request more");
-                            // TODO: We need to kill broken connection
-                            if let Some(connected_peer) = network.get_random_connected_peer().await
-                            {
-                                request_more_peers(network_weak.clone(), connected_peer);
-                            }
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            })
-        };
-
         {
             let mut background_tasks = network.inner.background_tasks.lock().unwrap();
             background_tasks.push(connections_handle);
-            background_tasks.push(maintain_peers_handle);
         }
 
         Ok(network)
