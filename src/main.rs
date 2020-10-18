@@ -174,15 +174,26 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     if node_type != NodeType::Gateway {
         info!("Connecting to gateway node");
 
-        network
-            .connect_to(DEV_GATEWAY_ADDR.parse().unwrap())
+        let contacts_level = network
+            .startup_connect(DEV_GATEWAY_ADDR.parse().unwrap())
             .await
-            .unwrap();
+            .expect("Failed to connect to a single gateway node");
 
-        // Connect to more peers if possible
-        for _ in 0..MIN_PEERS {
-            if let Some(peer) = network.pull_random_disconnected_node().await {
-                drop(network.connect_to(peer).await);
+        // TODO: Min gateways check
+
+        if !contacts_level.min_contacts() {
+            panic!("Failed to reach min contacts level on startup");
+        }
+
+        loop {
+            // TODO: Failed attempts should be handled gracefully
+            let peers_level = network
+                .connect_to_random_contact()
+                .await
+                .expect("Failed to connect to minimum number of peers on startup");
+
+            if peers_level.min_peers() {
+                break;
             }
         }
     }

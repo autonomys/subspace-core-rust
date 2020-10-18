@@ -10,9 +10,18 @@ pub(super) struct Contact {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub(crate) struct ContactsLevel {
-    pub(super) min_contacts: bool,
-    pub(super) max_contacts: bool,
+pub struct ContactsLevel {
+    min_contacts: bool,
+    max_contacts: bool,
+}
+
+impl ContactsLevel {
+    pub fn min_contacts(&self) -> bool {
+        self.min_contacts
+    }
+    pub fn max_contacts(&self) -> bool {
+        self.max_contacts
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -45,9 +54,18 @@ pub(super) struct Peer {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub(crate) struct PeersLevel {
-    pub(super) min_peers: bool,
-    pub(super) max_peers: bool,
+pub struct PeersLevel {
+    min_peers: bool,
+    max_peers: bool,
+}
+
+impl PeersLevel {
+    pub fn min_peers(&self) -> bool {
+        self.min_peers
+    }
+    pub fn max_peers(&self) -> bool {
+        self.max_peers
+    }
 }
 
 impl Peer {
@@ -56,6 +74,7 @@ impl Peer {
     }
 }
 
+// TODO: Max values are ignored, but shouldn't be
 #[derive(Clone)]
 pub(super) struct NodesContainer {
     min_contacts: usize,
@@ -85,10 +104,14 @@ impl NodesContainer {
         }
     }
 
+    /// Add contacts to the list (will skip contacts that are already connected or pending)
     pub(super) fn add_contacts(&mut self, contacts: &[SocketAddr]) -> ContactsLevel {
         let contacts_until_max = self.max_contacts - self.contacts.len();
         for node_addr in contacts.iter().take(contacts_until_max).copied() {
-            self.contacts.insert(node_addr, Contact { node_addr });
+            if !(self.pending_peers.contains_key(&node_addr) || self.peers.contains_key(&node_addr))
+            {
+                self.contacts.insert(node_addr, Contact { node_addr });
+            }
         }
 
         self.contacts_level()

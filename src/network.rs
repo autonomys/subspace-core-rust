@@ -58,7 +58,7 @@ mod peers_and_nodes;
 use crate::block::Block;
 use crate::console;
 use crate::network::messages::{InternalRequestMessage, InternalResponseMessage};
-use crate::network::nodes_container::{ContactsLevel, NodesContainer, Peer};
+use crate::network::nodes_container::{ContactsLevel, NodesContainer, Peer, PeersLevel};
 use crate::transaction::SimpleCreditTx;
 use crate::NodeID;
 use async_std::net::{TcpListener, TcpStream};
@@ -470,6 +470,8 @@ pub enum ConnectionError {
     AlreadyConnected,
     FailedToExchangeAddress,
     ContactsRequest,
+    NoContact,
+    NoPendingPeer,
     IO { error: io::Error },
 }
 
@@ -737,7 +739,7 @@ impl Network {
     // TODO: Maybe some kind of parameter to make sure this can only be called during bootstrap
     //  process
     /// Connect during bootstrap process
-    pub(crate) async fn bootstrap_connect(
+    pub async fn startup_connect(
         &self,
         node_addr: SocketAddr,
     ) -> Result<ContactsLevel, ConnectionError> {
@@ -745,9 +747,12 @@ impl Network {
         let mut nodes_container = self.inner.nodes_container.lock().await;
 
         nodes_container.add_contacts(&[node_addr]);
-        let (pending_peer, _contacts_level) = nodes_container
-            .connect_to_specific_contact(&node_addr)
-            .unwrap();
+        let pending_peer = match nodes_container.connect_to_specific_contact(&node_addr) {
+            Some((pending_peer, _contacts_level)) => pending_peer,
+            None => {
+                return Err(ConnectionError::NoContact);
+            }
+        };
         drop(nodes_container);
 
         match self.connect_simple(node_addr).await {
@@ -777,7 +782,51 @@ impl Network {
                         }
                     }
                 } else {
-                    Err(ConnectionError::AlreadyConnected)
+                    Err(ConnectionError::NoPendingPeer)
+                }
+            }
+            Err(error) => {
+                self.inner
+                    .nodes_container
+                    .lock()
+                    .await
+                    .finish_failed_connection_attempt(&pending_peer);
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn connect_to_random_contact(&self) -> Result<PeersLevel, ConnectionError> {
+        // TODO: This function probably needs timeouts for various operations
+        let mut nodes_container = self.inner.nodes_container.lock().await;
+
+        let pending_peer = match nodes_container.connect_to_random_contact() {
+            Some((pending_peer, _contacts_level)) => pending_peer,
+            None => {
+                return Err(ConnectionError::NoContact);
+            }
+        };
+        drop(nodes_container);
+
+        match self.connect_simple(pending_peer.address()).await {
+            Ok((bytes_sender, message_receiver)) => {
+                if let Some((_peer, peers_level)) = self
+                    .inner
+                    .nodes_container
+                    .lock()
+                    .await
+                    .finish_successful_connection_attempt(&pending_peer, bytes_sender.clone())
+                {
+                    handle_messages(
+                        self.downgrade(),
+                        message_receiver,
+                        pending_peer.address(),
+                        bytes_sender,
+                    );
+
+                    Ok(peers_level)
+                } else {
+                    Err(ConnectionError::NoPendingPeer)
                 }
             }
             Err(error) => {
