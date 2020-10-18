@@ -129,7 +129,7 @@ impl NodesContainer {
     }
 
     /// Add contacts to the list (will skip contacts that are already connected or pending)
-    pub(super) fn add_contacts(&mut self, contacts: &[SocketAddr]) -> ContactsLevel {
+    pub(super) fn add_contacts(&mut self, contacts: &[SocketAddr]) {
         let contacts_until_max = self.max_contacts - self.contacts.len();
         for node_addr in contacts.iter().take(contacts_until_max).copied() {
             if !(self.pending_peers.contains_key(&node_addr) || self.peers.contains_key(&node_addr))
@@ -143,14 +143,12 @@ impl NodesContainer {
                 );
             }
         }
-
-        self.contacts_level()
     }
 
     /// State transition from Contact to PendingPeer for random known contact
     ///
     /// Returns None if contacts list is empty
-    pub(super) fn connect_to_random_contact(&mut self) -> Option<(PendingPeer, ContactsLevel)> {
+    pub(super) fn connect_to_random_contact(&mut self) -> Option<PendingPeer> {
         let node_addr = self
             .contacts
             .keys()
@@ -163,9 +161,7 @@ impl NodesContainer {
                 self.pending_peers
                     .insert(pending_peer.node_addr, pending_peer);
 
-                let contacts_level = self.contacts_level();
-
-                Some((pending_peer, contacts_level))
+                Some(pending_peer)
             }
             None => None,
         }
@@ -177,16 +173,14 @@ impl NodesContainer {
     pub(super) fn connect_to_specific_contact(
         &mut self,
         node_addr: &SocketAddr,
-    ) -> Option<(PendingPeer, ContactsLevel)> {
+    ) -> Option<PendingPeer> {
         match self.contacts.remove(node_addr) {
             Some(contact) => {
                 let pending_peer: PendingPeer = contact.into();
                 self.pending_peers
                     .insert(pending_peer.node_addr, pending_peer);
 
-                let contacts_level = self.contacts_level();
-
-                Some((pending_peer, contacts_level))
+                Some(pending_peer)
             }
             None => None,
         }
@@ -195,19 +189,14 @@ impl NodesContainer {
     /// State transition from Peer to PendingPeer in case of reconnection needed
     ///
     /// Returns None if such connected peer was not found
-    pub(super) fn start_peer_reconnection(
-        &mut self,
-        peer: &Peer,
-    ) -> Option<(PendingPeer, PeersLevel)> {
+    pub(super) fn start_peer_reconnection(&mut self, peer: &Peer) -> Option<PendingPeer> {
         match self.peers.remove(&peer.node_addr) {
             Some(peer) => {
                 let pending_peer: PendingPeer = peer.into();
                 self.pending_peers
                     .insert(pending_peer.node_addr, pending_peer);
 
-                let peers_level = self.peers_level();
-
-                Some((pending_peer, peers_level))
+                Some(pending_peer)
             }
             None => None,
         }
@@ -220,7 +209,7 @@ impl NodesContainer {
         &mut self,
         pending_peer: &PendingPeer,
         bytes_sender: Sender<Bytes>,
-    ) -> Option<(Peer, PeersLevel)> {
+    ) -> Option<Peer> {
         match self.pending_peers.remove(&pending_peer.node_addr) {
             Some(PendingPeer { node_addr }) => {
                 let peer = Peer {
@@ -229,9 +218,7 @@ impl NodesContainer {
                 };
                 self.peers.insert(node_addr, peer.clone());
 
-                let peers_level = self.peers_level();
-
-                Some((peer, peers_level))
+                Some(peer)
             }
             None => None,
         }
@@ -242,14 +229,14 @@ impl NodesContainer {
         self.pending_peers.remove(&pending_peer.node_addr);
     }
 
-    fn contacts_level(&self) -> ContactsLevel {
+    pub(super) fn contacts_level(&self) -> ContactsLevel {
         ContactsLevel {
             min_contacts: self.contacts.len() >= self.min_contacts,
             max_contacts: self.contacts.len() >= self.max_contacts,
         }
     }
 
-    fn peers_level(&self) -> PeersLevel {
+    pub(super) fn peers_level(&self) -> PeersLevel {
         PeersLevel {
             min_peers: self.peers.len() >= self.min_peers,
             max_peers: self.peers.len() >= self.max_peers,

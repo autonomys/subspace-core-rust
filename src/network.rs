@@ -624,7 +624,7 @@ impl StartupNetwork {
 
         nodes_container.add_contacts(&[node_addr]);
         let pending_peer = match nodes_container.connect_to_specific_contact(&node_addr) {
-            Some((pending_peer, _contacts_level)) => pending_peer,
+            Some(pending_peer) => pending_peer,
             None => {
                 return Err(ConnectionError::NoContact);
             }
@@ -633,7 +633,7 @@ impl StartupNetwork {
 
         match self.connect_simple(node_addr).await {
             Ok((bytes_sender, message_receiver)) => {
-                if let Some((peer, _peers_level)) = self
+                if let Some(peer) = self
                     .inner
                     .nodes_container
                     .lock()
@@ -643,14 +643,10 @@ impl StartupNetwork {
                     handle_messages(self.downgrade(), message_receiver, node_addr, bytes_sender);
                     match self.request_contacts_v2(peer).await {
                         Ok(contacts) => {
-                            let contacts_level = self
-                                .inner
-                                .nodes_container
-                                .lock()
-                                .await
-                                .add_contacts(&contacts);
+                            let mut nodes_container = self.inner.nodes_container.lock().await;
+                            nodes_container.add_contacts(&contacts);
 
-                            Ok(contacts_level)
+                            Ok(nodes_container.contacts_level())
                         }
                         Err(error) => {
                             debug!("Failed to request contacts from node: {:?}", error);
@@ -677,7 +673,7 @@ impl StartupNetwork {
         let mut nodes_container = self.inner.nodes_container.lock().await;
 
         let pending_peer = match nodes_container.connect_to_random_contact() {
-            Some((pending_peer, _contacts_level)) => pending_peer,
+            Some(pending_peer) => pending_peer,
             None => {
                 return Err(ConnectionError::NoContact);
             }
@@ -686,11 +682,8 @@ impl StartupNetwork {
 
         match self.connect_simple(pending_peer.address()).await {
             Ok((bytes_sender, message_receiver)) => {
-                if let Some((_peer, peers_level)) = self
-                    .inner
-                    .nodes_container
-                    .lock()
-                    .await
+                let mut nodes_container = self.inner.nodes_container.lock().await;
+                if let Some(_peer) = nodes_container
                     .finish_successful_connection_attempt(&pending_peer, bytes_sender.clone())
                 {
                     handle_messages(
@@ -700,7 +693,7 @@ impl StartupNetwork {
                         bytes_sender,
                     );
 
-                    Ok(peers_level)
+                    Ok(nodes_container.peers_level())
                 } else {
                     Err(ConnectionError::NoPendingPeer)
                 }
