@@ -41,7 +41,7 @@ impl PendingPeer {
 #[derive(Debug, Clone)]
 pub(super) struct Peer {
     node_addr: SocketAddr,
-    sender: Sender<Bytes>,
+    bytes_sender: Sender<Bytes>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -52,7 +52,7 @@ pub(crate) struct PeersLevel {
 
 impl Peer {
     pub(super) async fn send(&self, bytes: Bytes) {
-        self.sender.send(bytes).await
+        self.bytes_sender.send(bytes).await
     }
 }
 
@@ -166,11 +166,14 @@ impl NodesContainer {
     pub(super) fn finish_successful_connection_attempt(
         &mut self,
         pending_peer: &PendingPeer,
-        sender: Sender<Bytes>,
+        bytes_sender: Sender<Bytes>,
     ) -> Option<(Peer, PeersLevel)> {
         match self.pending_peers.remove(&pending_peer.node_addr) {
             Some(PendingPeer { node_addr }) => {
-                let peer = Peer { node_addr, sender };
+                let peer = Peer {
+                    node_addr,
+                    bytes_sender,
+                };
                 self.peers.insert(node_addr, peer.clone());
 
                 let peers_level = self.peers_level();

@@ -157,8 +157,8 @@ fn extract_message(input: &[u8]) -> Option<(Result<Message, ()>, usize)> {
     }
 }
 
-fn read_messages(mut stream: TcpStream) -> Receiver<Message> {
-    let (messages_sender, messages_receiver) = channel(10);
+fn create_message_receiver(mut stream: TcpStream) -> Receiver<Message> {
+    let (messages_sender, message_receiver) = channel(10);
 
     async_std::task::spawn(async move {
         let header_length = 2;
@@ -212,7 +212,26 @@ fn read_messages(mut stream: TcpStream) -> Receiver<Message> {
         }
     });
 
-    messages_receiver
+    message_receiver
+}
+
+fn create_bytes_sender(mut stream: TcpStream) -> Sender<Bytes> {
+    let (bytes_sender, mut bytes_receiver) = channel::<Bytes>(32);
+
+    async_std::task::spawn(async move {
+        while let Some(bytes) = bytes_receiver.next().await {
+            let length = bytes.len() as u16;
+            let result: io::Result<()> = try {
+                stream.write_all(&length.to_le_bytes()).await?;
+                stream.write_all(&bytes).await?
+            };
+            if result.is_err() {
+                break;
+            }
+        }
+    });
+
+    bytes_sender
 }
 
 async fn exchange_peer_addr(own_addr: SocketAddr, stream: &mut TcpStream) -> Option<SocketAddr> {
@@ -293,14 +312,14 @@ async fn on_connected(
     peer_addr: SocketAddr,
     mut stream: TcpStream,
 ) -> Result<ConnectedPeer, ConnectionError> {
-    let (client_sender, mut client_receiver) = channel::<Bytes>(32);
+    let bytes_sender = create_bytes_sender(stream.clone());
 
     let connected_peer = {
         let mut peers_store = network.inner.peers_store.lock().await;
 
         let connected_peer = ConnectedPeer {
             addr: peer_addr,
-            sender: client_sender.clone(),
+            bytes_sender: bytes_sender.clone(),
         };
 
         if !peers_store.register_connected_peer(connected_peer.clone()) {
@@ -323,36 +342,22 @@ async fn on_connected(
         callback(&connected_peer);
     }
 
-    let messages_receiver = read_messages(stream.clone());
-
-    // listen for new messages from the broker and send back to peer over stream
-    async_std::task::spawn(async move {
-        while let Some(bytes) = client_receiver.next().await {
-            let length = bytes.len() as u16;
-            let result: io::Result<()> = try {
-                stream.write_all(&length.to_le_bytes()).await?;
-                stream.write_all(&bytes).await?
-            };
-            if result.is_err() {
-                break;
-            }
-        }
-    });
+    let message_receiver = create_message_receiver(stream);
 
     let network_weak = network.downgrade();
-    handle_messages(network_weak, messages_receiver, peer_addr, client_sender);
+    handle_messages(network_weak, message_receiver, peer_addr, bytes_sender);
 
     Ok(connected_peer)
 }
 
 fn handle_messages(
     network_weak: NetworkWeak,
-    mut messages_receiver: Receiver<Message>,
+    mut message_receiver: Receiver<Message>,
     peer_addr: SocketAddr,
-    client_sender: Sender<Bytes>,
+    bytes_sender: Sender<Bytes>,
 ) {
     async_std::task::spawn(async move {
-        while let Some(message) = messages_receiver.next().await {
+        while let Some(message) = message_receiver.next().await {
             // TODO: This is probably suboptimal, we can probably get rid of it if we have special
             //  method to disconnect from all peers
             let network = match network_weak.upgrade() {
@@ -376,7 +381,7 @@ fn handle_messages(
                             .await,
                     );
                     {
-                        let client_sender = client_sender.clone();
+                        let client_sender = bytes_sender.clone();
                         async_std::task::spawn(async move {
                             if let Ok(message) = response_receiver.await {
                                 drop(
@@ -422,7 +427,7 @@ fn handle_messages(
                         ),
                     };
                     drop(
-                        client_sender
+                        bytes_sender
                             .send(
                                 Message::InternalResponse {
                                     id,
@@ -500,7 +505,7 @@ struct Handlers {
 #[derive(Clone)]
 pub struct ConnectedPeer {
     addr: SocketAddr,
-    sender: Sender<Bytes>,
+    bytes_sender: Sender<Bytes>,
 }
 
 struct Inner {
@@ -738,21 +743,21 @@ impl Network {
         let mut nodes_container = self.inner.nodes_container.lock().await;
 
         nodes_container.add_contacts(&[node_addr]);
-        let (pending_peer, _) = nodes_container
+        let (pending_peer, _contacts_level) = nodes_container
             .connect_to_specific_contact(&node_addr)
             .unwrap();
         drop(nodes_container);
 
         match self.connect_simple(node_addr).await {
-            Ok((bytes_sender, messages_receiver)) => {
-                if let Some((peer, peers_level)) = self
+            Ok((bytes_sender, message_receiver)) => {
+                if let Some((_peer, peers_level)) = self
                     .inner
                     .nodes_container
                     .lock()
                     .await
-                    .finish_successful_connection_attempt(&pending_peer, bytes_sender)
+                    .finish_successful_connection_attempt(&pending_peer, bytes_sender.clone())
                 {
-                    // TODO: Handle `messages_receiver`
+                    handle_messages(self.downgrade(), message_receiver, node_addr, bytes_sender);
 
                     Ok(peers_level)
                 } else {
@@ -789,7 +794,7 @@ impl Network {
             trace!("Sending a {} message to {}", message, connected_peer.addr);
             let bytes = bytes.clone();
             async_std::task::spawn(async move {
-                connected_peer.sender.send(bytes).await;
+                connected_peer.bytes_sender.send(bytes).await;
             });
         }
     }
@@ -814,7 +819,7 @@ impl Network {
                 trace!("Sending a {} message to {}", message, connected_peer.addr);
                 let bytes = bytes.clone();
                 async_std::task::spawn(async move {
-                    connected_peer.sender.send(bytes).await;
+                    connected_peer.bytes_sender.send(bytes).await;
                 });
             }
         }
@@ -930,24 +935,10 @@ impl Network {
 
         match exchange_peer_addr(self.inner.node_addr, &mut stream).await {
             Some(_) => {
-                let (bytes_sender, mut bytes_receiver) = channel::<Bytes>(32);
+                let bytes_sender = create_bytes_sender(stream.clone());
+                let message_receiver = create_message_receiver(stream);
 
-                let messages_receiver = read_messages(stream.clone());
-
-                async_std::task::spawn(async move {
-                    while let Some(bytes) = bytes_receiver.next().await {
-                        let length = bytes.len() as u16;
-                        let result: io::Result<()> = try {
-                            stream.write_all(&length.to_le_bytes()).await?;
-                            stream.write_all(&bytes).await?
-                        };
-                        if result.is_err() {
-                            break;
-                        }
-                    }
-                });
-
-                Ok((bytes_sender, messages_receiver))
+                Ok((bytes_sender, message_receiver))
             }
             None => Err(ConnectionError::FailedToExchangeAddress),
         }
@@ -986,7 +977,7 @@ impl Network {
             .cloned();
         if let Some(connected_peer) = connected_peer {
             async_std::task::spawn(async move {
-                connected_peer.sender.send(message).await;
+                connected_peer.bytes_sender.send(message).await;
             });
         } else {
             return Err(RequestError::NoPeers);
@@ -1043,7 +1034,7 @@ impl Network {
         }
 
         async_std::task::spawn(async move {
-            peer.sender.send(message).await;
+            peer.bytes_sender.send(message).await;
         });
 
         future::or(
