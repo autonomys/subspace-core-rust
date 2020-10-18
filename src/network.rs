@@ -424,7 +424,6 @@ impl<T> Default for RequestsContainer<T> {
 
 #[derive(Default)]
 struct Handlers {
-    contact: AsyncMutex<Vec<Box<dyn Fn(SocketAddr) + Send>>>,
     peer: AsyncMutex<Vec<Box<dyn Fn(&Peer) + Send>>>,
     gossip: AsyncMutex<Vec<Box<dyn Fn(&GossipMessage) + Send>>>,
 }
@@ -472,6 +471,10 @@ trait TransportCommon {
     fn downgrade(&self) -> NetworkWeak;
 
     fn handlers(&self) -> &Handlers;
+
+    fn internal_requests_container(
+        &self,
+    ) -> &AsyncMutex<RequestsContainer<InternalResponseMessage>>;
 
     // TODO: This function probably needs timeouts for various operations
     async fn connect_simple(
@@ -540,6 +543,78 @@ trait TransportCommon {
             .await
             .finish_failed_connection_attempt(pending_peer);
     }
+
+    async fn sync_contacts(&self, peer: Peer) -> Result<(), RequestError> {
+        let response = self
+            .internal_request(peer, InternalRequestMessage::Contacts)
+            .await?;
+
+        match response {
+            InternalResponseMessage::Contacts(contacts) => {
+                self.nodes_container().lock().await.add_contacts(&contacts);
+
+                Ok(())
+            } // _ => Err(RequestError::BadResponse),
+        }
+    }
+
+    /// Non-generic method to avoid significant duplication in final binary
+    async fn internal_request(
+        &self,
+        peer: Peer,
+        message: InternalRequestMessage,
+    ) -> Result<InternalResponseMessage, RequestError> {
+        let id;
+        let (response_sender, response_receiver) = async_oneshot::oneshot();
+        let internal_requests_container = self.internal_requests_container();
+
+        {
+            let mut internal_requests_container = internal_requests_container.lock().await;
+
+            id = internal_requests_container.next_id;
+
+            internal_requests_container.next_id =
+                internal_requests_container.next_id.wrapping_add(1);
+            internal_requests_container
+                .handlers
+                .insert(id, response_sender);
+        }
+
+        let message = Message::InternalRequest { id, message }.to_bytes();
+        if message.len() > MAX_MESSAGE_CONTENTS_LENGTH {
+            internal_requests_container
+                .lock()
+                .await
+                .handlers
+                .remove(&id);
+
+            return Err(RequestError::MessageTooLong);
+        }
+
+        async_std::task::spawn(async move {
+            peer.send(message).await;
+        });
+
+        future::or(
+            async move {
+                response_receiver
+                    .await
+                    .map_err(|_| RequestError::ConnectionClosed {})
+            },
+            async move {
+                async_io::Timer::after(REQUEST_TIMEOUT).await;
+
+                internal_requests_container
+                    .lock()
+                    .await
+                    .handlers
+                    .remove(&id);
+
+                Err(RequestError::TimedOut)
+            },
+        )
+        .await
+    }
 }
 
 pub struct StartupNetwork {
@@ -558,6 +633,10 @@ impl TransportCommon for StartupNetwork {
 
     fn handlers(&self) -> &Handlers {
         &self.inner.handlers
+    }
+
+    fn internal_requests_container(&self) -> &Mutex<RequestsContainer<InternalResponseMessage>> {
+        &self.inner.internal_requests_container
     }
 }
 
@@ -631,27 +710,33 @@ impl StartupNetwork {
                             continue;
                         }
                         async_std::task::spawn(async move {
-                            if let Some(peer_addr) =
-                                exchange_peer_addr(node_addr, &mut stream).await
-                            {
-                                let mut nodes_container =
-                                    network.inner.nodes_container.lock().await;
-
-                                if nodes_container.is_in_block_list(&peer_addr) {
+                            let peer_addr = match exchange_peer_addr(node_addr, &mut stream).await {
+                                Some(peer_addr) => peer_addr,
+                                None => {
                                     return;
                                 }
-                                nodes_container.add_contacts(&[peer_addr]);
-                                for callback in network.handlers().contact.lock().await.iter() {
-                                    callback(peer_addr);
-                                }
+                            };
 
-                                let pending_peer =
-                                    nodes_container.connect_to_specific_contact(&peer_addr);
-                                drop(nodes_container);
+                            let mut nodes_container = network.inner.nodes_container.lock().await;
 
-                                if let Some(pending_peer) = pending_peer {
-                                    network.on_connection_success(&pending_peer, stream).await;
-                                }
+                            if nodes_container.is_in_block_list(&peer_addr) {
+                                return;
+                            }
+                            nodes_container.add_contacts(&[peer_addr]);
+
+                            let pending_peer =
+                                match nodes_container.connect_to_specific_contact(&peer_addr) {
+                                    Some(pending_peer) => pending_peer,
+                                    None => {
+                                        return;
+                                    }
+                                };
+                            drop(nodes_container);
+
+                            if let Some(peer) =
+                                network.on_connection_success(&pending_peer, stream).await
+                            {
+                                network.sync_contacts(peer).await;
                             }
                         });
                     } else {
@@ -680,9 +765,7 @@ impl StartupNetwork {
         let mut nodes_container = self.inner.nodes_container.lock().await;
 
         nodes_container.add_contacts(&[peer_addr]);
-        for callback in self.handlers().contact.lock().await.iter() {
-            callback(peer_addr);
-        }
+
         let pending_peer = match nodes_container.connect_to_specific_contact(&peer_addr) {
             Some(pending_peer) => pending_peer,
             None => {
@@ -695,18 +778,8 @@ impl StartupNetwork {
             .connect_simple(self.inner.node_addr, pending_peer)
             .await
         {
-            Ok(peer) => match self.request_contacts_v2(peer).await {
-                Ok(contacts) => {
-                    let mut nodes_container = self.inner.nodes_container.lock().await;
-                    nodes_container.add_contacts(&contacts);
-                    for callback in self.handlers().contact.lock().await.iter() {
-                        for &contact in &contacts {
-                            callback(contact);
-                        }
-                    }
-
-                    Ok(nodes_container.contacts_level())
-                }
+            Ok(peer) => match self.sync_contacts(peer).await {
+                Ok(_) => Ok(self.inner.nodes_container.lock().await.contacts_level()),
                 Err(error) => {
                     debug!("Failed to request contacts from node: {:?}", error);
                     Err(ConnectionError::ContactsRequest)
@@ -742,75 +815,6 @@ impl StartupNetwork {
     pub fn finish_startup(self) -> Network {
         Network::new(self.inner)
     }
-
-    async fn request_contacts_v2(&self, peer: Peer) -> Result<Vec<SocketAddr>, RequestError> {
-        let response = self
-            .internal_request_v2(peer, InternalRequestMessage::Contacts)
-            .await?;
-
-        match response {
-            InternalResponseMessage::Contacts(peers) => Ok(peers),
-            // _ => Err(RequestError::BadResponse),
-        }
-    }
-
-    /// Non-generic method to avoid significant duplication in final binary
-    async fn internal_request_v2(
-        &self,
-        peer: Peer,
-        message: InternalRequestMessage,
-    ) -> Result<InternalResponseMessage, RequestError> {
-        let id;
-        let (response_sender, response_receiver) = async_oneshot::oneshot();
-        let internal_requests_container = &self.inner.internal_requests_container;
-
-        {
-            let mut internal_requests_container = internal_requests_container.lock().await;
-
-            id = internal_requests_container.next_id;
-
-            internal_requests_container.next_id =
-                internal_requests_container.next_id.wrapping_add(1);
-            internal_requests_container
-                .handlers
-                .insert(id, response_sender);
-        }
-
-        let message = Message::InternalRequest { id, message }.to_bytes();
-        if message.len() > MAX_MESSAGE_CONTENTS_LENGTH {
-            internal_requests_container
-                .lock()
-                .await
-                .handlers
-                .remove(&id);
-
-            return Err(RequestError::MessageTooLong);
-        }
-
-        async_std::task::spawn(async move {
-            peer.send(message).await;
-        });
-
-        future::or(
-            async move {
-                response_receiver
-                    .await
-                    .map_err(|_| RequestError::ConnectionClosed {})
-            },
-            async move {
-                async_io::Timer::after(REQUEST_TIMEOUT).await;
-
-                internal_requests_container
-                    .lock()
-                    .await
-                    .handlers
-                    .remove(&id);
-
-                Err(RequestError::TimedOut)
-            },
-        )
-        .await
-    }
 }
 
 #[derive(Clone)]
@@ -830,6 +834,10 @@ impl TransportCommon for Network {
 
     fn handlers(&self) -> &Handlers {
         &self.inner.handlers
+    }
+
+    fn internal_requests_container(&self) -> &Mutex<RequestsContainer<InternalResponseMessage>> {
+        &self.inner.internal_requests_container
     }
 }
 
@@ -927,15 +935,6 @@ impl Network {
             pieces: String::from(""),
             blocks: String::from(""),
         }
-    }
-
-    pub async fn on_contact<F: Fn(SocketAddr) + Send + 'static>(&self, callback: F) {
-        self.inner
-            .handlers
-            .contact
-            .lock()
-            .await
-            .push(Box::new(callback));
     }
 
     pub async fn on_peer<F: Fn(&Peer) + Send + 'static>(&self, callback: F) {
