@@ -20,31 +20,36 @@ use subspace_core_rust::{
 };
 use tui_logger::{init_logger, set_default_level};
 
-/* Next Steps
+/* TODO
 
-   - recover from missed gossip (else diverges) -> request blocks by parent_id
-   - validate blocks via sync
-   - Split blocks in proposer and tx blocks
+ Next Steps
+
    - Encode state
+   - Create the state chain
    - Solve from genesis state
    - Sync the state chain
+
+   - finish p2p network impl
+   - add remaining RPC messages
+
    - Add nonce to tag computation
+   - Storage accounts
    - Switch to Schnorr signatures
    - Improve tx script support
-   - Storage accounts
+
+ Fixes
+
+   - recover from missed gossip (else diverges) -> request blocks by parent_id
+   - complete fine tuning parameters
+   - initial tx validation is too strict (requires k-deep confirmation)
+
+ Security
+
+   - Ensure that block and tx signatures are not malleable
+   - Ensure that an attacker cannot crash a node by intentionally creating a panic condition
+   - No way to malleate on the difficulty target
 
 
-*/
-
-/* ToDo
- * ----
- *
- * Implementation Security
- * -----------------------
- * Ensure that block and tx signatures are not malleable
- * Ensure that an attacker cannot crash a node by intentionally creating a panic condition
- * No way to malleate on the difficulty target
- *
 */
 
 #[async_std::main]

@@ -35,6 +35,7 @@ pub(crate) struct BlocksRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct BlocksResponse {
     pub(crate) blocks: Vec<Block>,
+    pub(crate) transactions: Vec<SimpleCreditTx>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

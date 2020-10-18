@@ -1,3 +1,4 @@
+use crate::block::Block;
 use crate::console::AppState;
 use crate::farmer::{FarmerMessage, Solution};
 use crate::ledger::Ledger;
@@ -84,10 +85,7 @@ pub async fn run(
                         info!("Received a new block via gossip");
                         let mut locked_ledger = ledger.lock().await;
 
-                        if locked_ledger
-                            .validate_proposer_block_from_gossip(&block)
-                            .await
-                        {
+                        if locked_ledger.validate_block_from_gossip(&block).await {
                             network
                                 .regossip(
                                     &peer_addr,
@@ -97,40 +95,53 @@ pub async fn run(
                                 )
                                 .await;
 
-                            // stage the block
-                            locked_ledger.stage_block(&block).await;
+                            if block.content.parent_id.is_some() {
+                                // stage the proposer block
+                                locked_ledger.stage_proposer_block(&block).await;
 
-                            // stage any cached children
-                            locked_ledger
-                                .stage_cached_children(block.content.get_id())
-                                .await;
+                                // stage any cached children
+                                locked_ledger
+                                    .stage_cached_children(block.content.get_id())
+                                    .await;
+                            } else {
+                                // stage the tx block
+                                locked_ledger.stage_tx_block(&block).await;
+                            }
                         }
                     }
                     GossipMessage::TxProposal { tx } => {
                         let tx_id = tx.get_id();
-                        let mut ledger = ledger.lock().await;
+                        let mut locked_ledger = ledger.lock().await;
 
                         // check to see if we already have the tx
-                        if ledger.txs.contains_key(&tx_id) {
+                        if locked_ledger.txs.contains_key(&tx_id) {
                             warn!("Received a duplicate tx via gossip, ignoring");
                             continue;
                         }
 
-                        // validate the tx
-                        let from_account_state = ledger.balances.get(&tx.from_address);
-                        if !tx.is_valid(from_account_state) {
-                            warn!("Received an invalid tx via gossip, ignoring");
-                            continue;
+                        // only validate and gossip if synced
+                        if locked_ledger.timer_is_running {
+                            // validate the tx
+                            let from_account_state = locked_ledger.balances.get(&tx.from_address);
+                            if !tx.is_valid(from_account_state) {
+                                warn!("Received an invalid tx via gossip, ignoring");
+                                continue;
+                            }
+
+                            // re-gossip transaction
+                            network
+                                .regossip(&peer_addr, GossipMessage::TxProposal { tx: tx.clone() })
+                                .await;
                         }
 
                         // add to tx database and mempool
-                        ledger.txs.insert(tx_id, Transaction::Credit(tx.clone()));
-                        ledger.tx_mempool.insert(tx_id);
+                        locked_ledger.txs.insert(tx_id, Transaction::Credit(tx));
 
-                        // re-gossip transaction
-                        network
-                            .regossip(&peer_addr, GossipMessage::TxProposal { tx })
-                            .await;
+                        if locked_ledger.unknown_tx_ids.contains(&tx_id) {
+                            locked_ledger.unknown_tx_ids.remove(&tx_id);
+                        } else {
+                            locked_ledger.unclaimed_tx_ids.insert(tx_id);
+                        }
                     }
                 }
             }
@@ -150,11 +161,15 @@ pub async fn run(
                     match message {
                         RequestMessage::Blocks(BlocksRequest { timeslot }) => {
                             // TODO: check to make sure that the requested timeslot is not ahead of local timeslot
-                            let blocks = ledger.lock().await.get_blocks_by_timeslot(timeslot);
+                            let locked_ledger = ledger.lock().await;
+                            let blocks = locked_ledger.get_blocks_by_timeslot(timeslot);
+                            let transactions = locked_ledger.get_txs_for_sync(&blocks);
 
                             drop(
-                                response_sender
-                                    .send(ResponseMessage::Blocks(BlocksResponse { blocks })),
+                                response_sender.send(ResponseMessage::Blocks(BlocksResponse {
+                                    blocks,
+                                    transactions,
+                                })),
                             );
                         }
                     }
@@ -210,8 +225,12 @@ pub async fn run(
 
                                 info!("Gossiping a new valid block to all peers");
 
-                                content_ids.push(block.content.get_id());
-                                ledger.lock().await.stage_block(&block).await;
+                                if block.content.parent_id.is_some() {
+                                    ledger.lock().await.stage_proposer_block(&block).await;
+                                    content_ids.push(block.content.get_id());
+                                } else {
+                                    ledger.lock().await.stage_tx_block(&block).await;
+                                }
                             }
                         }
                     }
@@ -242,11 +261,12 @@ pub async fn run(
 
                 let mut timeslot: u64 = 0;
                 loop {
+                    info!("Requesting blocks for timeslot {} during sync", timeslot);
                     match network.request_blocks(timeslot).await {
-                        Ok(blocks) => {
+                        Ok(bundle) => {
                             let mut locked_ledger = ledger.lock().await;
 
-                            for block in blocks.iter() {
+                            for block in bundle.0.iter() {
                                 if timeslot == 0 {
                                     // start the timer from genesis time
                                     // TODO: start timer at node init once we have canonical genesis time
@@ -256,14 +276,42 @@ pub async fn run(
 
                                 // validate the block
                                 if !locked_ledger
-                                    .validate_proposer_block_from_sync(&block, timeslot)
+                                    .validate_block_from_sync(&block, timeslot)
                                     .await
                                 {
                                     // TODO: start over with a different peer
                                 }
 
                                 // stage the block
-                                locked_ledger.stage_block(&block).await;
+                                if block.content.parent_id.is_some() {
+                                    locked_ledger.stage_proposer_block(&block).await;
+                                } else {
+                                    locked_ledger.stage_tx_block(&block).await;
+                                }
+                            }
+
+                            for tx in bundle.1.iter() {
+                                let tx_id = tx.get_id();
+                                let mut locked_ledger = ledger.lock().await;
+
+                                // check to see if we already have the tx
+                                if locked_ledger.txs.contains_key(&tx_id) {
+                                    warn!("Received a duplicate tx via gossip, ignoring");
+                                    continue;
+                                }
+
+                                // TODO: should we validate the transaction?
+
+                                // add to tx database and mempool
+                                locked_ledger
+                                    .txs
+                                    .insert(tx_id, Transaction::Credit(tx.clone()));
+
+                                if locked_ledger.unknown_tx_ids.contains(&tx_id) {
+                                    locked_ledger.unknown_tx_ids.remove(&tx_id);
+                                } else {
+                                    locked_ledger.unclaimed_tx_ids.insert(tx_id);
+                                }
                             }
 
                             let next_timeslot_arrival_time = Duration::from_millis(
@@ -298,13 +346,6 @@ pub async fn run(
                             } else {
                                 info!("Reached the current timeslot during sync, applying any cached gossip and starting the timer");
 
-                                // apply any cached gossip
-                                for block in blocks.iter() {
-                                    locked_ledger
-                                        .stage_cached_children(block.content.get_id())
-                                        .await;
-                                }
-
                                 locked_ledger.timer_is_running = true;
                                 locked_ledger.current_timeslot = timeslot - 1;
 
@@ -318,6 +359,27 @@ pub async fn run(
                                     timeslot,
                                     Arc::clone(&ledger),
                                 );
+
+                                // apply any proposer blocks from cached gossip
+                                for block in bundle.0.iter() {
+                                    locked_ledger
+                                        .stage_cached_children(block.content.get_id())
+                                        .await;
+                                }
+
+                                // apply any cached tx block from gossip
+                                let cached_tx_blocks: Vec<(ContentId, Block)> = locked_ledger
+                                    .cached_tx_blocks_by_content_id
+                                    .drain()
+                                    .collect();
+
+                                for (content_id, tx_block) in cached_tx_blocks.iter() {
+                                    if !locked_ledger.metablocks.contains_content_id(content_id) {
+                                        if locked_ledger.validate_block_from_cache(tx_block).await {
+                                            locked_ledger.stage_tx_block(tx_block).await;
+                                        }
+                                    }
+                                }
 
                                 break;
                             }

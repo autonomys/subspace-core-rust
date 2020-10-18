@@ -52,6 +52,8 @@ pub struct Solution {
     pub encoding: Piece,
     /// Solution range for the eon block was generated at
     pub solution_range: u64,
+    /// target for this challenge
+    pub target: [u8; 8],
 }
 
 pub async fn run(
@@ -87,6 +89,7 @@ pub async fn run(
                             tag,
                             encoding,
                             solution_range,
+                            target,
                         });
                     }
 

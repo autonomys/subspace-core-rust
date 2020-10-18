@@ -2,6 +2,7 @@
 #![feature(const_int_pow)]
 #![feature(drain_filter)]
 #![feature(map_first_last)]
+#![feature(map_into_keys_values)]
 
 use async_std::sync::{Arc, Mutex};
 use static_assertions::const_assert;
@@ -57,7 +58,7 @@ pub const MAX_NODES: usize = 100;
 // TODO: Is this a good value?
 pub const MAINTAIN_PEERS_INTERVAL: Duration = Duration::from_secs(60);
 // TODO: revert to six, just for testing now
-pub const CONFIRMATION_DEPTH: usize = 6;
+pub const CONFIRMATION_DEPTH: usize = 3;
 pub const DEV_GATEWAY_ADDR: &str = "127.0.0.1:8081";
 pub const TEST_GATEWAY_ADDR: &str = "127.0.0.1:8080";
 pub const DEV_WS_ADDR: &str = "127.0.0.1:8880";
@@ -69,20 +70,21 @@ pub const MAX_EARLY_TIMESLOTS: u64 = 10;
 pub const MAX_LATE_TIMESLOTS: u64 = 10;
 pub const TIMESLOT_DURATION: u64 = 100;
 pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 2;
-// pub const EPOCH_CLOSE_WAIT_TIME: u64 = CHALLENGE_LOOKBACK - 2;
 /// Time in epochs
 pub const EPOCH_CLOSE_WAIT_TIME: u64 = 2;
-pub const TIMESLOTS_PER_EPOCH: u64 = 128;
+pub const TIMESLOTS_PER_EPOCH: u64 = 32;
 
 /// Solution Range
+pub const TX_BLOCKS_PER_PROPOSER_BLOCK: u64 = 4;
 pub const GENESIS_OFFSET: u64 = TIMESLOTS_PER_EPOCH * CHALLENGE_LOOKBACK_EPOCHS;
+pub const TIMESLOTS_PER_BLOCK: u64 = 1;
 pub const TIMESLOTS_PER_PROPOSER_BLOCK: u64 = 5;
 pub const PROPOSER_BLOCKS_PER_EON: u64 = 2016 * 4;
 pub const ADJUSTMENT_FACTOR: f64 = 1.105;
 pub const EXPECTED_TIMESLOTS_PER_EON: u64 = (TIMESLOTS_PER_PROPOSER_BLOCK as f64
     * PROPOSER_BLOCKS_PER_EON as f64
     * ADJUSTMENT_FACTOR) as u64;
-pub const INITIAL_SOLUTION_RANGE: u64 = u64::MAX / PLOT_SIZE as u64 / TIMESLOTS_PER_PROPOSER_BLOCK;
+pub const INITIAL_SOLUTION_RANGE: u64 = u64::MAX / PLOT_SIZE as u64 / TIMESLOTS_PER_BLOCK;
 pub const SOLUTION_RANGE_UPDATE_DELAY_IN_TIMESLOTS: u64 = 10;
 
 // Assertions about acceptable values for above parameters:

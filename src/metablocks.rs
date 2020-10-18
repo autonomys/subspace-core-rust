@@ -14,8 +14,8 @@ pub struct MetaBlock {
 }
 
 pub struct MetaBlocks {
-    pub blocks: HashMap<ProofId, MetaBlock>,
-    pub content_to_proof_map: HashMap<ContentId, ProofId>,
+    blocks: HashMap<ProofId, MetaBlock>,
+    content_to_proof_map: HashMap<ContentId, ProofId>,
 }
 
 impl MetaBlocks {
@@ -26,14 +26,44 @@ impl MetaBlocks {
         }
     }
 
-    pub fn contains_key(&self, proof_id: &ProofId) -> bool {
-        self.blocks.contains_key(proof_id)
+    pub fn contains_content_id(&self, content_id: &ContentId) -> bool {
+        self.content_to_proof_map.contains_key(content_id)
     }
 
-    pub fn get_proof_id_from_content_id(&self, content_id: ContentId) -> ProofId {
+    pub fn get_proof_id_from_content_id(&self, content_id: &ContentId) -> ProofId {
         self.content_to_proof_map
-            .get(&content_id)
+            .get(content_id)
             .expect("Should have content for a valid block")
+            .clone()
+    }
+
+    pub fn get_metablock_from_content_id(&self, content_id: &ContentId) -> MetaBlock {
+        let proof_id = self.get_proof_id_from_content_id(content_id);
+        let metablock = self
+            .blocks
+            .get(&proof_id)
+            .expect("In content to proof map")
+            .clone();
+        metablock
+    }
+
+    pub fn get_metablock_from_content_id_as_option(
+        &self,
+        content_id: &ContentId,
+    ) -> Option<MetaBlock> {
+        match self.content_to_proof_map.get(content_id) {
+            Some(proof_id) => match self.blocks.get(proof_id) {
+                Some(metablock) => return Some(metablock.clone()),
+                None => return None,
+            },
+            None => return None,
+        }
+    }
+
+    pub fn get_metablock_from_proof_id(&self, proof_id: &ProofId) -> MetaBlock {
+        self.blocks
+            .get(proof_id)
+            .expect("In content to proof map")
             .clone()
     }
 
@@ -45,13 +75,15 @@ impl MetaBlocks {
         let mut height = 0;
 
         // skip the genesis block
-        if block.proof.timeslot != 0 {
+        // only for proposer blocks
+        if block.proof.timeslot != 0 && block.content.parent_id.is_some() {
             // TODO: handle errors in case we cannot find the parent, for now check in stage block
 
             // have to get the parent proof id from the content id
             // should be able to switch from seen to unseen at this point
 
-            let parent_proof_id = self.get_proof_id_from_content_id(block.content.parent_id);
+            let parent_proof_id =
+                self.get_proof_id_from_content_id(&block.content.parent_id.expect("Checked above"));
             let parent_metablock = self.blocks.get_mut(&parent_proof_id).unwrap();
             parent_metablock.children.push(proof_id);
             height += parent_metablock.height + 1;
@@ -84,5 +116,23 @@ impl MetaBlocks {
         );
 
         metablock
+    }
+
+    /// Removes a metablock from blocks and content to proof map, returning any child content ids.
+    pub fn remove(&mut self, proof_id: &ProofId) -> MetaBlock {
+        let removed_metablock = self.blocks.remove(proof_id).expect("Will exist");
+        let removed_pointer = self
+            .content_to_proof_map
+            .remove(&removed_metablock.content_id);
+        if removed_pointer.is_none() {
+            panic!("Pointer for removed block should exist!");
+        }
+
+        warn!(
+            "Removed metablock with content_id: {}",
+            hex::encode(&removed_metablock.content_id[0..8])
+        );
+
+        removed_metablock
     }
 }
