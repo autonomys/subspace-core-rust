@@ -57,15 +57,18 @@ mod nodes_container;
 use crate::block::Block;
 use crate::console;
 use crate::network::messages::{InternalRequestMessage, InternalResponseMessage};
-use crate::network::nodes_container::{ContactsLevel, NodesContainer, Peer, PeersLevel};
+use crate::network::nodes_container::{
+    ContactsLevel, NodesContainer, Peer, PeersLevel, PendingPeer,
+};
 use crate::transaction::SimpleCreditTx;
 use crate::NodeID;
 use async_std::net::{TcpListener, TcpStream};
 use async_std::sync::{channel, Receiver, Sender};
 use async_std::task::JoinHandle;
+use async_trait::async_trait;
 use backoff::ExponentialBackoff;
 use bytes::{Bytes, BytesMut};
-use futures::lock::Mutex as AsyncMutex;
+use futures::lock::{Mutex as AsyncMutex, Mutex};
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use futures_lite::future;
 use log::*;
@@ -503,8 +506,91 @@ impl Drop for Inner {
     }
 }
 
+#[async_trait]
+trait TransportCommon {
+    fn nodes_container(&self) -> &AsyncMutex<NodesContainer>;
+
+    // TODO: It is ugly that we can get regular Network from StartupNetwork instance this way
+    fn downgrade(&self) -> NetworkWeak;
+
+    // TODO: This function probably needs timeouts for various operations
+    async fn connect_simple(
+        &self,
+        own_address: SocketAddr,
+        pending_peer: PendingPeer,
+    ) -> Result<Peer, ConnectionError> {
+        let mut stream = match TcpStream::connect(pending_peer.address()).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.nodes_container()
+                    .lock()
+                    .await
+                    .finish_failed_connection_attempt(&pending_peer);
+
+                return Err(ConnectionError::IO { error });
+            }
+        };
+
+        match exchange_peer_addr(own_address, &mut stream).await {
+            Some(_) => {
+                let bytes_sender = create_bytes_sender(stream.clone());
+                let message_receiver = create_message_receiver(stream);
+
+                match self
+                    .on_connection_success(&pending_peer, bytes_sender.clone())
+                    .await
+                {
+                    Some(peer) => {
+                        handle_messages(
+                            self.downgrade(),
+                            message_receiver,
+                            *peer.address(),
+                            bytes_sender,
+                        );
+                        Ok(peer)
+                    }
+                    None => Err(ConnectionError::NoPendingPeer),
+                }
+            }
+            None => {
+                self.on_connection_failure(&pending_peer).await;
+                Err(ConnectionError::FailedToExchangeAddress)
+            }
+        }
+    }
+
+    async fn on_connection_success(
+        &self,
+        pending_peer: &PendingPeer,
+        bytes_sender: Sender<Bytes>,
+    ) -> Option<Peer> {
+        self.nodes_container()
+            .lock()
+            .await
+            .finish_successful_connection_attempt(pending_peer, bytes_sender.clone())
+    }
+
+    async fn on_connection_failure(&self, pending_peer: &PendingPeer) {
+        self.nodes_container()
+            .lock()
+            .await
+            .finish_failed_connection_attempt(pending_peer);
+    }
+}
+
 pub struct StartupNetwork {
     inner: Arc<Inner>,
+}
+
+impl TransportCommon for StartupNetwork {
+    fn nodes_container(&self) -> &Mutex<NodesContainer> {
+        &self.inner.nodes_container
+    }
+
+    fn downgrade(&self) -> NetworkWeak {
+        let inner = Arc::downgrade(&self.inner);
+        NetworkWeak { inner }
+    }
 }
 
 impl StartupNetwork {
@@ -605,13 +691,13 @@ impl StartupNetwork {
     /// Connect during bootstrap process
     pub async fn startup_connect(
         &self,
-        node_addr: SocketAddr,
+        peer_addr: SocketAddr,
     ) -> Result<ContactsLevel, ConnectionError> {
         // TODO: This function probably needs timeouts for various operations
         let mut nodes_container = self.inner.nodes_container.lock().await;
 
-        nodes_container.add_contacts(&[node_addr]);
-        let pending_peer = match nodes_container.connect_to_specific_contact(&node_addr) {
+        nodes_container.add_contacts(&[peer_addr]);
+        let pending_peer = match nodes_container.connect_to_specific_contact(&peer_addr) {
             Some(pending_peer) => pending_peer,
             None => {
                 return Err(ConnectionError::NoContact);
@@ -619,81 +705,46 @@ impl StartupNetwork {
         };
         drop(nodes_container);
 
-        match self.connect_simple(node_addr).await {
-            Ok((bytes_sender, message_receiver)) => {
-                if let Some(peer) = self
-                    .inner
-                    .nodes_container
-                    .lock()
-                    .await
-                    .finish_successful_connection_attempt(&pending_peer, bytes_sender.clone())
-                {
-                    handle_messages(self.downgrade(), message_receiver, node_addr, bytes_sender);
-                    match self.request_contacts_v2(peer).await {
-                        Ok(contacts) => {
-                            let mut nodes_container = self.inner.nodes_container.lock().await;
-                            nodes_container.add_contacts(&contacts);
+        match self
+            .connect_simple(self.inner.node_addr, pending_peer)
+            .await
+        {
+            Ok(peer) => match self.request_contacts_v2(peer).await {
+                Ok(contacts) => {
+                    let mut nodes_container = self.inner.nodes_container.lock().await;
+                    nodes_container.add_contacts(&contacts);
 
-                            Ok(nodes_container.contacts_level())
-                        }
-                        Err(error) => {
-                            debug!("Failed to request contacts from node: {:?}", error);
-                            Err(ConnectionError::ContactsRequest)
-                        }
-                    }
-                } else {
-                    Err(ConnectionError::NoPendingPeer)
+                    Ok(nodes_container.contacts_level())
                 }
-            }
-            Err(error) => {
-                self.inner
-                    .nodes_container
-                    .lock()
-                    .await
-                    .finish_failed_connection_attempt(&pending_peer);
-                Err(error)
-            }
+                Err(error) => {
+                    debug!("Failed to request contacts from node: {:?}", error);
+                    Err(ConnectionError::ContactsRequest)
+                }
+            },
+            Err(error) => Err(error),
         }
     }
 
     pub async fn connect_to_random_contact(&self) -> Result<PeersLevel, ConnectionError> {
-        // TODO: This function probably needs timeouts for various operations
-        let mut nodes_container = self.inner.nodes_container.lock().await;
-
-        let pending_peer = match nodes_container.connect_to_random_contact() {
+        let pending_peer = match self
+            .inner
+            .nodes_container
+            .lock()
+            .await
+            .connect_to_random_contact()
+        {
             Some(pending_peer) => pending_peer,
             None => {
                 return Err(ConnectionError::NoContact);
             }
         };
-        drop(nodes_container);
 
-        match self.connect_simple(pending_peer.address()).await {
-            Ok((bytes_sender, message_receiver)) => {
-                let mut nodes_container = self.inner.nodes_container.lock().await;
-                if let Some(_peer) = nodes_container
-                    .finish_successful_connection_attempt(&pending_peer, bytes_sender.clone())
-                {
-                    handle_messages(
-                        self.downgrade(),
-                        message_receiver,
-                        pending_peer.address(),
-                        bytes_sender,
-                    );
-
-                    Ok(nodes_container.peers_level())
-                } else {
-                    Err(ConnectionError::NoPendingPeer)
-                }
-            }
-            Err(error) => {
-                self.inner
-                    .nodes_container
-                    .lock()
-                    .await
-                    .finish_failed_connection_attempt(&pending_peer);
-                Err(error)
-            }
+        match self
+            .connect_simple(self.inner.node_addr, pending_peer)
+            .await
+        {
+            Ok(_peer) => Ok(self.inner.nodes_container.lock().await.peers_level()),
+            Err(error) => Err(error),
         }
     }
 
@@ -709,25 +760,6 @@ impl StartupNetwork {
         match response {
             InternalResponseMessage::Contacts(peers) => Ok(peers),
             // _ => Err(RequestError::BadResponse),
-        }
-    }
-
-    async fn connect_simple(
-        &self,
-        peer_addr: SocketAddr,
-    ) -> Result<(Sender<Bytes>, Receiver<Message>), ConnectionError> {
-        let mut stream = TcpStream::connect(peer_addr)
-            .await
-            .map_err(|error| ConnectionError::IO { error })?;
-
-        match exchange_peer_addr(self.inner.node_addr, &mut stream).await {
-            Some(_) => {
-                let bytes_sender = create_bytes_sender(stream.clone());
-                let message_receiver = create_message_receiver(stream);
-
-                Ok((bytes_sender, message_receiver))
-            }
-            None => Err(ConnectionError::FailedToExchangeAddress),
         }
     }
 
@@ -788,18 +820,22 @@ impl StartupNetwork {
         )
         .await
     }
-
-    // TODO: It is ugly that we can get regular Network from StartupNetwork instance this way, think
-    //  about having a trait that is common for both
-    fn downgrade(&self) -> NetworkWeak {
-        let inner = Arc::downgrade(&self.inner);
-        NetworkWeak { inner }
-    }
 }
 
 #[derive(Clone)]
 pub struct Network {
     inner: Arc<Inner>,
+}
+
+impl TransportCommon for Network {
+    fn nodes_container(&self) -> &Mutex<NodesContainer> {
+        &self.inner.nodes_container
+    }
+
+    fn downgrade(&self) -> NetworkWeak {
+        let inner = Arc::downgrade(&self.inner);
+        NetworkWeak { inner }
+    }
 }
 
 impl Network {
@@ -942,20 +978,6 @@ impl Network {
     fn downgrade(&self) -> NetworkWeak {
         let inner = Arc::downgrade(&self.inner);
         NetworkWeak { inner }
-    }
-
-    pub async fn connect_to(
-        &self,
-        peer_addr: SocketAddr,
-    ) -> Result<ConnectedPeer, ConnectionError> {
-        let mut stream = TcpStream::connect(peer_addr)
-            .await
-            .map_err(|error| ConnectionError::IO { error })?;
-
-        match exchange_peer_addr(self.inner.node_addr, &mut stream).await {
-            Some(peer_addr) => on_connected(self.clone(), peer_addr, stream).await,
-            None => Err(ConnectionError::FailedToExchangeAddress),
-        }
     }
 
     /// Non-generic method to avoid significant duplication in final binary
