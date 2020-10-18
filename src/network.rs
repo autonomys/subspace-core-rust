@@ -422,9 +422,7 @@ fn handle_messages(
         }
 
         if let Some(network) = network_weak.upgrade() {
-            let mut peers_store = network.inner.peers_store.lock().await;
-
-            peers_store.mark_peer_as_dropped(network.clone(), peer_addr);
+            // TODO: Remove from connected peers
 
             // TODO: Fallback to bootstrap nodes in case we can't reconnect at all
         }
@@ -582,10 +580,11 @@ impl StartupNetwork {
                     if let Some(network) = network_weak.upgrade() {
                         if network
                             .inner
-                            .peers_store
+                            .nodes_container
                             .lock()
                             .await
-                            .has_max_connected_peers()
+                            .peers_level()
+                            .max_peers()
                         {
                             // Ignore connection, we've reached a limit for connected peers
                             continue;
@@ -832,18 +831,11 @@ impl Network {
 
         let message = Message::Gossip(message);
         let bytes = message.to_bytes();
-        for connected_peer in self
-            .inner
-            .peers_store
-            .lock()
-            .await
-            .get_connected_peers()
-            .cloned()
-        {
-            trace!("Sending a {} message to {}", message, connected_peer.addr);
+        for peer in self.inner.nodes_container.lock().await.get_peers().cloned() {
+            trace!("Sending a {} message to {}", message, peer.address());
             let bytes = bytes.clone();
             async_std::task::spawn(async move {
-                connected_peer.bytes_sender.send(bytes).await;
+                peer.send(bytes).await;
             });
         }
     }
@@ -856,21 +848,20 @@ impl Network {
 
         let message = Message::Gossip(message);
         let bytes = message.to_bytes();
-        for connected_peer in self
+        for peer in self
             .inner
-            .peers_store
+            .nodes_container
             .lock()
             .await
-            .get_connected_peers()
+            .get_peers()
+            .filter(|peer| peer.address() != sender)
             .cloned()
         {
-            if &connected_peer.addr != sender {
-                trace!("Sending a {} message to {}", message, connected_peer.addr);
-                let bytes = bytes.clone();
-                async_std::task::spawn(async move {
-                    connected_peer.bytes_sender.send(bytes).await;
-                });
-            }
+            trace!("Sending a {} message to {}", message, peer.address());
+            let bytes = bytes.clone();
+            async_std::task::spawn(async move {
+                peer.send(bytes).await;
+            });
         }
     }
 
@@ -902,13 +893,13 @@ impl Network {
     }
 
     pub(crate) async fn get_state(&self) -> console::AppState {
-        let peers = self.inner.peers_store.lock().await;
+        let connections = self.inner.nodes_container.lock().await.get_peers().len();
         console::AppState {
             node_type: String::from(""),
             node_id: hex::encode(&self.inner.node_id[0..8]),
             node_addr: self.inner.node_addr.to_string(),
-            connections: peers.get_connected_peers().len().to_string(),
-            peers: peers.nodes.len().to_string(),
+            connections: connections.to_string(),
+            peers: "".to_string(),
             pieces: String::from(""),
             blocks: String::from(""),
         }

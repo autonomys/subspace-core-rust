@@ -57,6 +57,12 @@ pub(super) struct Peer {
     bytes_sender: Sender<Bytes>,
 }
 
+impl Peer {
+    pub(super) fn address(&self) -> &SocketAddr {
+        &self.node_addr
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 pub struct PeersLevel {
     min_peers: bool,
@@ -227,6 +233,10 @@ impl NodesContainer {
     /// PendingPeer removal in case of failed connection attempt
     pub(super) fn finish_failed_connection_attempt(&mut self, pending_peer: &PendingPeer) {
         self.pending_peers.remove(&pending_peer.node_addr);
+    }
+
+    pub(super) fn get_peers(&self) -> impl ExactSizeIterator<Item = &Peer> {
+        self.peers.values()
     }
 
     pub(super) fn contacts_level(&self) -> ContactsLevel {
