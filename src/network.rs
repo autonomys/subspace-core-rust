@@ -280,44 +280,6 @@ async fn exchange_peer_addr(own_addr: SocketAddr, stream: &mut TcpStream) -> Opt
     }
 }
 
-async fn on_connected(
-    network: Network,
-    peer_addr: SocketAddr,
-    stream: TcpStream,
-) -> Result<ConnectedPeer, ConnectionError> {
-    let bytes_sender = create_bytes_sender(stream.clone());
-
-    let connected_peer = {
-        // TODO: Register connected peers in nodes container
-
-        let connected_peer = ConnectedPeer {
-            addr: peer_addr,
-            bytes_sender: bytes_sender.clone(),
-        };
-
-        // if !peers_store.register_connected_peer(connected_peer.clone()) {
-        //     return Err(ConnectionError::AlreadyConnected);
-        // }
-
-        for callback in network.inner.handlers.peer.lock().await.iter() {
-            callback(peer_addr);
-        }
-
-        connected_peer
-    };
-
-    for callback in network.inner.handlers.connected_peer.lock().await.iter() {
-        callback(&connected_peer);
-    }
-
-    let message_receiver = create_message_receiver(stream);
-
-    let network_weak = network.downgrade();
-    handle_messages(network_weak, message_receiver, peer_addr, bytes_sender);
-
-    Ok(connected_peer)
-}
-
 fn handle_messages(
     network_weak: NetworkWeak,
     mut message_receiver: Receiver<Message>,
@@ -422,9 +384,7 @@ fn handle_messages(
         }
 
         if let Some(network) = network_weak.upgrade() {
-            // TODO: Remove from connected peers
-
-            // TODO: Fallback to bootstrap nodes in case we can't reconnect at all
+            // TODO: Remove from connected peers and start reconnection process
         }
     });
 }
@@ -464,8 +424,8 @@ impl<T> Default for RequestsContainer<T> {
 
 #[derive(Default)]
 struct Handlers {
-    peer: AsyncMutex<Vec<Box<dyn Fn(SocketAddr) + Send>>>,
-    connected_peer: AsyncMutex<Vec<Box<dyn Fn(&ConnectedPeer) + Send>>>,
+    contact: AsyncMutex<Vec<Box<dyn Fn(SocketAddr) + Send>>>,
+    peer: AsyncMutex<Vec<Box<dyn Fn(&Peer) + Send>>>,
     gossip: AsyncMutex<Vec<Box<dyn Fn(&GossipMessage) + Send>>>,
 }
 
@@ -489,8 +449,6 @@ struct Inner {
     requests_container: Arc<AsyncMutex<RequestsContainer<ResponseMessage>>>,
     internal_requests_container: Arc<AsyncMutex<RequestsContainer<InternalResponseMessage>>>,
     node_addr: SocketAddr,
-    min_connected_peers: usize,
-    max_nodes: usize,
 }
 
 impl Drop for Inner {
@@ -513,6 +471,8 @@ trait TransportCommon {
     // TODO: It is ugly that we can get regular Network from StartupNetwork instance this way
     fn downgrade(&self) -> NetworkWeak;
 
+    fn handlers(&self) -> &Handlers;
+
     // TODO: This function probably needs timeouts for various operations
     async fn connect_simple(
         &self,
@@ -532,26 +492,10 @@ trait TransportCommon {
         };
 
         match exchange_peer_addr(own_address, &mut stream).await {
-            Some(_) => {
-                let bytes_sender = create_bytes_sender(stream.clone());
-                let message_receiver = create_message_receiver(stream);
-
-                match self
-                    .on_connection_success(&pending_peer, bytes_sender.clone())
-                    .await
-                {
-                    Some(peer) => {
-                        handle_messages(
-                            self.downgrade(),
-                            message_receiver,
-                            *peer.address(),
-                            bytes_sender,
-                        );
-                        Ok(peer)
-                    }
-                    None => Err(ConnectionError::NoPendingPeer),
-                }
-            }
+            Some(_) => match self.on_connection_success(&pending_peer, stream).await {
+                Some(peer) => Ok(peer),
+                None => Err(ConnectionError::NoPendingPeer),
+            },
             None => {
                 self.on_connection_failure(&pending_peer).await;
                 Err(ConnectionError::FailedToExchangeAddress)
@@ -562,12 +506,32 @@ trait TransportCommon {
     async fn on_connection_success(
         &self,
         pending_peer: &PendingPeer,
-        bytes_sender: Sender<Bytes>,
+        stream: TcpStream,
     ) -> Option<Peer> {
-        self.nodes_container()
+        let bytes_sender = create_bytes_sender(stream.clone());
+
+        let peer = self
+            .nodes_container()
             .lock()
             .await
-            .finish_successful_connection_attempt(pending_peer, bytes_sender.clone())
+            .finish_successful_connection_attempt(pending_peer, bytes_sender.clone());
+
+        if let Some(peer) = &peer {
+            let message_receiver = create_message_receiver(stream);
+
+            handle_messages(
+                self.downgrade(),
+                message_receiver,
+                *peer.address(),
+                bytes_sender,
+            );
+
+            for callback in self.handlers().peer.lock().await.iter() {
+                callback(peer);
+            }
+        }
+
+        peer
     }
 
     async fn on_connection_failure(&self, pending_peer: &PendingPeer) {
@@ -590,6 +554,10 @@ impl TransportCommon for StartupNetwork {
     fn downgrade(&self) -> NetworkWeak {
         let inner = Arc::downgrade(&self.inner);
         NetworkWeak { inner }
+    }
+
+    fn handlers(&self) -> &Handlers {
+        &self.inner.handlers
     }
 }
 
@@ -634,8 +602,6 @@ impl StartupNetwork {
             requests_container: Arc::default(),
             internal_requests_container: Arc::default(),
             node_addr,
-            min_connected_peers: min_peers,
-            max_nodes: max_contacts,
         });
 
         let network = Self { inner };
@@ -668,7 +634,18 @@ impl StartupNetwork {
                             if let Some(peer_addr) =
                                 exchange_peer_addr(node_addr, &mut stream).await
                             {
-                                drop(on_connected(network, peer_addr, stream).await);
+                                let mut nodes_container =
+                                    network.inner.nodes_container.lock().await;
+
+                                nodes_container.add_contacts(&[peer_addr]);
+                                for callback in network.handlers().contact.lock().await.iter() {
+                                    callback(peer_addr);
+                                }
+                                if let Some(pending_peer) =
+                                    nodes_container.connect_to_specific_contact(&peer_addr)
+                                {
+                                    network.on_connection_success(&pending_peer, stream).await;
+                                }
                             }
                         });
                     } else {
@@ -697,6 +674,9 @@ impl StartupNetwork {
         let mut nodes_container = self.inner.nodes_container.lock().await;
 
         nodes_container.add_contacts(&[peer_addr]);
+        for callback in self.handlers().contact.lock().await.iter() {
+            callback(peer_addr);
+        }
         let pending_peer = match nodes_container.connect_to_specific_contact(&peer_addr) {
             Some(pending_peer) => pending_peer,
             None => {
@@ -713,6 +693,11 @@ impl StartupNetwork {
                 Ok(contacts) => {
                     let mut nodes_container = self.inner.nodes_container.lock().await;
                     nodes_container.add_contacts(&contacts);
+                    for callback in self.handlers().contact.lock().await.iter() {
+                        for &contact in &contacts {
+                            callback(peer_addr);
+                        }
+                    }
 
                     Ok(nodes_container.contacts_level())
                 }
@@ -836,6 +821,10 @@ impl TransportCommon for Network {
         let inner = Arc::downgrade(&self.inner);
         NetworkWeak { inner }
     }
+
+    fn handlers(&self) -> &Handlers {
+        &self.inner.handlers
+    }
 }
 
 impl Network {
@@ -934,33 +923,19 @@ impl Network {
         }
     }
 
-    pub(crate) async fn request_contacts(
-        &self,
-        peer: ConnectedPeer,
-    ) -> Result<Vec<SocketAddr>, RequestError> {
-        let response = self
-            .internal_request(peer, InternalRequestMessage::Contacts)
-            .await?;
-
-        match response {
-            InternalResponseMessage::Contacts(peers) => Ok(peers),
-            // _ => Err(RequestError::BadResponse),
-        }
-    }
-
-    pub async fn on_peer<F: Fn(SocketAddr) + Send + 'static>(&self, callback: F) {
+    pub async fn on_contact<F: Fn(SocketAddr) + Send + 'static>(&self, callback: F) {
         self.inner
             .handlers
-            .peer
+            .contact
             .lock()
             .await
             .push(Box::new(callback));
     }
 
-    pub async fn on_connected_peer<F: Fn(&ConnectedPeer) + Send + 'static>(&self, callback: F) {
+    pub async fn on_peer<F: Fn(&Peer) + Send + 'static>(&self, callback: F) {
         self.inner
             .handlers
-            .connected_peer
+            .peer
             .lock()
             .await
             .push(Box::new(callback));
@@ -1030,64 +1005,6 @@ impl Network {
                 async_io::Timer::after(REQUEST_TIMEOUT).await;
 
                 requests_container.lock().await.handlers.remove(&id);
-
-                Err(RequestError::TimedOut)
-            },
-        )
-        .await
-    }
-
-    /// Non-generic method to avoid significant duplication in final binary
-    async fn internal_request(
-        &self,
-        peer: ConnectedPeer,
-        message: InternalRequestMessage,
-    ) -> Result<InternalResponseMessage, RequestError> {
-        let id;
-        let (response_sender, response_receiver) = async_oneshot::oneshot();
-        let internal_requests_container = &self.inner.internal_requests_container;
-
-        {
-            let mut internal_requests_container = internal_requests_container.lock().await;
-
-            id = internal_requests_container.next_id;
-
-            internal_requests_container.next_id =
-                internal_requests_container.next_id.wrapping_add(1);
-            internal_requests_container
-                .handlers
-                .insert(id, response_sender);
-        }
-
-        let message = Message::InternalRequest { id, message }.to_bytes();
-        if message.len() > MAX_MESSAGE_CONTENTS_LENGTH {
-            internal_requests_container
-                .lock()
-                .await
-                .handlers
-                .remove(&id);
-
-            return Err(RequestError::MessageTooLong);
-        }
-
-        async_std::task::spawn(async move {
-            peer.bytes_sender.send(message).await;
-        });
-
-        future::or(
-            async move {
-                response_receiver
-                    .await
-                    .map_err(|_| RequestError::ConnectionClosed {})
-            },
-            async move {
-                async_io::Timer::after(REQUEST_TIMEOUT).await;
-
-                internal_requests_container
-                    .lock()
-                    .await
-                    .handlers
-                    .remove(&id);
 
                 Err(RequestError::TimedOut)
             },

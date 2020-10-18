@@ -52,14 +52,18 @@ impl PendingPeer {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct Peer {
+pub struct Peer {
     node_addr: SocketAddr,
     bytes_sender: Sender<Bytes>,
 }
 
 impl Peer {
-    pub(super) fn address(&self) -> &SocketAddr {
+    pub fn address(&self) -> &SocketAddr {
         &self.node_addr
+    }
+
+    pub(super) async fn send(&self, bytes: Bytes) {
+        self.bytes_sender.send(bytes).await
     }
 }
 
@@ -75,12 +79,6 @@ impl PeersLevel {
     }
     pub fn max_peers(&self) -> bool {
         self.max_peers
-    }
-}
-
-impl Peer {
-    pub(super) async fn send(&self, bytes: Bytes) {
-        self.bytes_sender.send(bytes).await
     }
 }
 
