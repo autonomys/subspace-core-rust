@@ -641,9 +641,12 @@ impl StartupNetwork {
                                 for callback in network.handlers().contact.lock().await.iter() {
                                     callback(peer_addr);
                                 }
-                                if let Some(pending_peer) =
-                                    nodes_container.connect_to_specific_contact(&peer_addr)
-                                {
+
+                                let pending_peer =
+                                    nodes_container.connect_to_specific_contact(&peer_addr);
+                                drop(nodes_container);
+
+                                if let Some(pending_peer) = pending_peer {
                                     network.on_connection_success(&pending_peer, stream).await;
                                 }
                             }

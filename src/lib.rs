@@ -51,9 +51,9 @@ pub const BLOCKS_PER_ENCODING: usize = PIECE_SIZE / PRIME_SIZE_BYTES;
 pub const ENCODING_LAYERS_TEST: usize = 1;
 pub const ENCODING_LAYERS_PROD: usize = BLOCKS_PER_ENCODING;
 pub const PLOT_UPDATE_INTERVAL: usize = 10000;
-pub const MIN_PEERS: usize = 4;
+pub const MIN_PEERS: usize = 1;
 pub const MAX_PEERS: usize = 20;
-pub const MIN_CONTACTS: usize = 10;
+pub const MIN_CONTACTS: usize = 0;
 pub const MAX_CONTACTS: usize = 100;
 pub const BLOCK_LIST_SIZE: usize = 100;
 // TODO: Is this a good value?

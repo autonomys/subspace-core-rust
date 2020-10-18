@@ -187,14 +187,20 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         }
 
         loop {
-            // TODO: Failed attempts should be handled gracefully
-            let peers_level = startup_network
-                .connect_to_random_contact()
-                .await
-                .expect("Failed to connect to minimum number of peers on startup");
-
-            if peers_level.min_peers() {
-                break;
+            // TODO: Failed attempts should be handled correctly
+            match startup_network.connect_to_random_contact().await {
+                Ok(peers_level) => {
+                    if peers_level.min_peers() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    error!(
+                        "Failed to connect to minimum number of peers on startup: {:?}",
+                        error
+                    );
+                    break;
+                }
             }
         }
     }
