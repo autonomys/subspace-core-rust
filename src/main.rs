@@ -16,7 +16,7 @@ use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::{
     console, crypto, farmer, manager, network, plotter, rpc, CONSOLE, DEV_GATEWAY_ADDR,
-    MAINTAIN_PEERS_INTERVAL, MAX_CONNECTED_PEERS, MAX_NODES, MIN_CONNECTED_PEERS, MIN_NODES,
+    MAINTAIN_PEERS_INTERVAL, MAX_CONTACTS, MAX_PEERS, MIN_CONTACTS, MIN_PEERS,
 };
 use tui_logger::{init_logger, set_default_level};
 
@@ -163,10 +163,10 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         } else {
             node_addr
         },
-        MIN_CONNECTED_PEERS,
-        MAX_CONNECTED_PEERS,
-        MIN_NODES,
-        MAX_NODES,
+        MIN_PEERS,
+        MAX_PEERS,
+        MIN_CONTACTS,
+        MAX_CONTACTS,
         MAINTAIN_PEERS_INTERVAL,
         network::create_backoff,
     );
@@ -180,7 +180,7 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
             .unwrap();
 
         // Connect to more peers if possible
-        for _ in 0..MIN_CONNECTED_PEERS {
+        for _ in 0..MIN_PEERS {
             if let Some(peer) = network.pull_random_disconnected_node().await {
                 drop(network.connect_to(peer).await);
             }

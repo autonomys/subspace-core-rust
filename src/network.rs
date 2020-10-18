@@ -52,12 +52,15 @@
 //! public methods provided.
 
 pub(crate) mod messages;
+mod nodes_container;
 mod peers_and_nodes;
 
 use crate::block::Block;
 use crate::console;
 use crate::network::messages::{InternalRequestMessage, InternalResponseMessage};
+use crate::network::nodes_container::NodesContainer;
 use crate::transaction::SimpleCreditTx;
+use crate::NodeID;
 use async_std::net::{TcpListener, TcpStream};
 use async_std::stream;
 use async_std::sync::{channel, Receiver, Sender};
@@ -97,8 +100,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const INITIAL_BACKOFF_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_BACKOFF_INTERVAL: Duration = Duration::from_secs(60);
 const BACKOFF_MULTIPLIER: f64 = 10_f64;
-
-pub type NodeID = [u8; 32];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum NodeType {
@@ -495,6 +496,7 @@ pub struct ConnectedPeer {
 
 struct Inner {
     node_id: NodeID,
+    nodes_container: NodesContainer,
     peers_store: Arc<AsyncMutex<PeersAndNodes>>,
     background_tasks: StdMutex<Vec<JoinHandle<()>>>,
     handlers: Handlers,
@@ -533,10 +535,10 @@ impl Network {
     pub async fn new<CB>(
         node_id: NodeID,
         addr: SocketAddr,
-        min_connected_peers: usize,
-        max_connected_peers: usize,
-        min_nodes: usize,
-        max_nodes: usize,
+        min_peers: usize,
+        max_peers: usize,
+        min_contacts: usize,
+        max_contacts: usize,
         maintain_peers_interval: Duration,
         create_backoff: CB,
     ) -> io::Result<Self>
@@ -553,11 +555,12 @@ impl Network {
         let handlers = Handlers::default();
         let inner = Arc::new(Inner {
             node_id,
+            nodes_container: NodesContainer::new(min_contacts, max_contacts, min_peers, max_peers),
             peers_store: Arc::new(AsyncMutex::new(PeersAndNodes::new(
-                min_connected_peers,
-                max_connected_peers,
-                min_nodes,
-                max_nodes,
+                min_peers,
+                max_peers,
+                min_contacts,
+                max_contacts,
                 create_backoff,
             ))),
             background_tasks: StdMutex::default(),
@@ -569,8 +572,8 @@ impl Network {
             requests_container: Arc::default(),
             internal_requests_container: Arc::default(),
             node_addr,
-            min_connected_peers,
-            max_nodes,
+            min_connected_peers: min_peers,
+            max_nodes: max_contacts,
         });
 
         let network = Self { inner };

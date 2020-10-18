@@ -1,6 +1,6 @@
 use crate::crypto;
-use crate::network::NodeID;
 use crate::transaction::{AccountAddress, AccountBalance, SimpleCreditTx, TxNonce};
+use crate::NodeID;
 use ed25519_dalek::Keypair;
 use futures::io::SeekFrom;
 use serde::Deserialize;
