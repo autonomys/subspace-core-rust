@@ -240,6 +240,7 @@ impl NodesContainer {
     }
 
     pub(super) fn contacts_level(&self) -> ContactsLevel {
+        // TODO: Should this include connected and pending peers?
         ContactsLevel {
             min_contacts: self.contacts.len() >= self.min_contacts,
             max_contacts: self.contacts.len() >= self.max_contacts,

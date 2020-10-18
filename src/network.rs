@@ -545,6 +545,16 @@ trait TransportCommon {
     }
 
     async fn sync_contacts(&self, peer: Peer) -> Result<(), RequestError> {
+        if self
+            .nodes_container()
+            .lock()
+            .await
+            .contacts_level()
+            .max_contacts()
+        {
+            // No need to request more contacts
+            return Ok(());
+        }
         let response = self
             .internal_request(peer, InternalRequestMessage::Contacts)
             .await?;
@@ -736,7 +746,7 @@ impl StartupNetwork {
                             if let Some(peer) =
                                 network.on_connection_success(&pending_peer, stream).await
                             {
-                                network.sync_contacts(peer).await;
+                                drop(network.sync_contacts(peer).await);
                             }
                         });
                     } else {
@@ -807,7 +817,10 @@ impl StartupNetwork {
             .connect_simple(self.inner.node_addr, pending_peer)
             .await
         {
-            Ok(_peer) => Ok(self.inner.nodes_container.lock().await.peers_level()),
+            Ok(peer) => {
+                drop(self.sync_contacts(peer).await);
+                Ok(self.inner.nodes_container.lock().await.peers_level())
+            }
             Err(error) => Err(error),
         }
     }
