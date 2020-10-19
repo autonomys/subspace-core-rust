@@ -1,4 +1,5 @@
-use crate::{crypto, Piece, Tag, PIECE_SIZE};
+use crate::state::NetworkPieceBundleByIndex;
+use crate::{crypto, Piece, PieceIndex, Tag, PIECE_SIZE};
 use async_std::fs::OpenOptions;
 use async_std::path::PathBuf;
 use async_std::task;
@@ -360,6 +361,25 @@ impl Plot {
         result_receiver
             .await
             .expect("Read encoding result sender was dropped")
+    }
+
+    pub async fn get_piece_bundle_by_index(
+        &self,
+        index: PieceIndex,
+    ) -> Option<NetworkPieceBundleByIndex> {
+        match self.read(index).await {
+            Ok((encoding, merkle_proof)) => Some(NetworkPieceBundleByIndex {
+                encoding: encoding.to_vec(),
+                piece_proof: merkle_proof,
+            }),
+            Err(_) => None,
+        }
+    }
+
+    pub async fn get_piece_bundle_by_id(&self, index: PieceIndex) {
+        // get index from id -- needs a new table
+        // then call get piece_bundle_from_index
+        // needs to include the index
     }
 
     pub async fn find_by_range(&self, target: [u8; 8], range: u64) -> io::Result<Vec<(Tag, u64)>> {

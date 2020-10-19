@@ -2,7 +2,7 @@ use async_std::sync::channel;
 use async_std::task;
 use console::AppState;
 use crossbeam_channel::unbounded;
-use futures::join;
+use futures;
 use log::LevelFilter;
 use log::*;
 use std::path::PathBuf;
@@ -16,7 +16,7 @@ use subspace_core_rust::plot::Plot;
 use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::{
-    console, crypto, farmer, manager, network, plotter, rpc, state, BLOCK_LIST_SIZE, CONSOLE,
+    console, farmer, manager, network, plotter, rpc, state, BLOCK_LIST_SIZE, CONSOLE,
     DEV_GATEWAY_ADDR, MAINTAIN_PEERS_INTERVAL, MAX_CONTACTS, MAX_PEERS, MIN_CONTACTS, MIN_PEERS,
 };
 use tui_logger::{init_logger, set_default_level};
@@ -27,8 +27,7 @@ use tui_logger::{init_logger, set_default_level};
 
    - complete state encoding workflow
    - improve console UX
-   - finish p2p network impl
-   - add remaining RPC messages
+   - finish p2p network impl (Nazar)
 
    - Compute and enforce cost of storage
    - Storage accounts
@@ -144,19 +143,18 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
     let mut state = state::State::new(state_to_plotter_tx);
 
     // optionally create the plot
-    let plot_option: Option<Plot> = match node_type {
+    let plot: Plot = match node_type {
         NodeType::Gateway => {
             // create the genesis state
             let state_bundle = state.create_genesis_state("SUBSPACE", 256).await.unwrap();
 
             // create the plot from genesis state
-            Some(plotter::plot(path.into(), node_id, state_bundle.piece_bundles).await)
+            plotter::plot(path.into(), node_id, state_bundle.piece_bundles).await
         }
-        NodeType::Farmer => {
+        _ => {
             // TODO: create an empty plot and send to manager
-            None
+            plotter::plot(path.into(), node_id, vec![]).await
         }
-        _ => None,
     };
 
     // create the ledger
@@ -234,15 +232,14 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
         app_state_sender,
         timer_to_farmer_tx,
         epoch_tracker,
-        plot_option.clone(),
+        plot.clone(),
     );
 
     if is_farming {
-        let plot = plot_option.unwrap();
         let farmer = farmer::run(timer_to_farmer_rx, solver_to_main_tx, &plot);
-        join!(manager, farmer);
+        futures::join!(manager, farmer);
     } else {
-        join!(manager);
+        futures::join!(manager);
     }
 
     // RPC server will stop when this is dropped

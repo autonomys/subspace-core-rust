@@ -55,13 +55,20 @@ pub(crate) mod messages;
 mod nodes_container;
 
 use crate::block::Block;
-use crate::console;
-use crate::network::messages::{InternalRequestMessage, InternalResponseMessage};
+use crate::network::messages::{
+    BlockRequestByContentId, BlockRequestByProofId, InternalRequestMessage,
+    InternalResponseMessage, PieceRequestById, PieceRequestByIndex, StateBlockRequestByHeight,
+    StateBlockRequestById, TxRequestById,
+};
 use crate::network::nodes_container::{
     ContactsLevel, NodesContainer, Peer, PeersLevel, PendingPeer,
 };
-use crate::transaction::SimpleCreditTx;
-use crate::NodeID;
+use crate::state::{
+    BlockHeight, NetworkPieceBundleById, NetworkPieceBundleByIndex, StateBlock, StateBlockId,
+};
+use crate::transaction::{SimpleCreditTx, Transaction, TxId};
+use crate::{console, ContentId, PieceIndex, ProofId};
+use crate::{NodeID, PieceId};
 use async_std::net::{TcpListener, TcpStream};
 use async_std::sync::{channel, Receiver, Sender};
 use async_std::task::JoinHandle;
@@ -103,7 +110,6 @@ use std::{fmt, io, mem};
     Manager
     1. Add RequestMessage and Response
     2. Call Request somewhere in code
-
 
 */
 
@@ -415,7 +421,7 @@ pub enum ConnectionError {
 #[derive(Debug)]
 pub(crate) enum RequestError {
     ConnectionClosed,
-    // BadResponse,
+    BadResponse,
     MessageTooLong,
     NoPeers,
     TimedOut,
@@ -930,7 +936,109 @@ impl Network {
 
         match response {
             ResponseMessage::Blocks(response) => Ok((response.blocks, response.transactions)),
-            // _ => Err(RequestError::BadResponse),
+            _ => Err(RequestError::BadResponse),
+        }
+    }
+
+    pub(crate) async fn request_block_by_content_id(
+        &self,
+        id: ContentId,
+    ) -> Result<Option<Block>, RequestError> {
+        let response = self
+            .request(RequestMessage::BlockByContentId(BlockRequestByContentId {
+                id,
+            }))
+            .await?;
+
+        match response {
+            ResponseMessage::BlockByContentId(response) => Ok(response.block),
+            _ => Err(RequestError::BadResponse),
+        }
+    }
+
+    pub(crate) async fn request_block_by_proof_id(
+        &self,
+        id: ProofId,
+    ) -> Result<Option<Block>, RequestError> {
+        let response = self
+            .request(RequestMessage::BlockByProofId(BlockRequestByProofId { id }))
+            .await?;
+
+        match response {
+            ResponseMessage::BlockByProofId(response) => Ok(response.block),
+            _ => Err(RequestError::BadResponse),
+        }
+    }
+
+    pub(crate) async fn request_tx_by_id(
+        &self,
+        id: TxId,
+    ) -> Result<Option<Transaction>, RequestError> {
+        let response = self
+            .request(RequestMessage::TransactionById(TxRequestById { id }))
+            .await?;
+
+        match response {
+            ResponseMessage::TransactionById(response) => Ok(response.transaction),
+            _ => Err(RequestError::BadResponse),
+        }
+    }
+
+    pub(crate) async fn request_piece_by_id(
+        &self,
+        id: PieceId,
+    ) -> Result<Option<NetworkPieceBundleById>, RequestError> {
+        let response = self
+            .request(RequestMessage::PieceById(PieceRequestById { id }))
+            .await?;
+
+        match response {
+            ResponseMessage::PieceById(response) => Ok(response.piece_bundle),
+            _ => Err(RequestError::BadResponse),
+        }
+    }
+
+    pub(crate) async fn request_piece_by_index(
+        &self,
+        index: PieceIndex,
+    ) -> Result<Option<NetworkPieceBundleByIndex>, RequestError> {
+        let response = self
+            .request(RequestMessage::PieceByIndex(PieceRequestByIndex { index }))
+            .await?;
+
+        match response {
+            ResponseMessage::PieceByIndex(response) => Ok(response.piece_bundle),
+            _ => Err(RequestError::BadResponse),
+        }
+    }
+
+    pub(crate) async fn request_state_block_by_id(
+        &self,
+        id: StateBlockId,
+    ) -> Result<Option<StateBlock>, RequestError> {
+        let response = self
+            .request(RequestMessage::StateById(StateBlockRequestById { id }))
+            .await?;
+
+        match response {
+            ResponseMessage::StateById(response) => Ok(response.state_block),
+            _ => Err(RequestError::BadResponse),
+        }
+    }
+
+    pub(crate) async fn request_state_block_by_height(
+        &self,
+        height: BlockHeight,
+    ) -> Result<Option<StateBlock>, RequestError> {
+        let response = self
+            .request(RequestMessage::StateByHeight(StateBlockRequestByHeight {
+                height,
+            }))
+            .await?;
+
+        match response {
+            ResponseMessage::StateByHeight(response) => Ok(response.state_block),
+            _ => Err(RequestError::BadResponse),
         }
     }
 

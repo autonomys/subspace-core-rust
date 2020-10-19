@@ -1,5 +1,9 @@
 use crate::block::Block;
-use crate::transaction::SimpleCreditTx;
+use crate::state::{
+    BlockHeight, NetworkPieceBundleById, NetworkPieceBundleByIndex, StateBlock, StateBlockId,
+};
+use crate::transaction::{SimpleCreditTx, Transaction, TxId};
+use crate::{ContentId, PieceId, PieceIndex, ProofId};
 use bytes::buf::BufMutExt;
 use bytes::{Bytes, BytesMut};
 use log::*;
@@ -39,8 +43,85 @@ pub(crate) struct BlocksResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BlockRequestByContentId {
+    pub(crate) id: ContentId,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BlockResponseByContentId {
+    pub(crate) block: Option<Block>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BlockRequestByProofId {
+    pub(crate) id: ProofId,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BlockResponseByProofId {
+    pub(crate) block: Option<Block>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct TxRequestById {
+    pub(crate) id: TxId,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct TxResponseById {
+    pub(crate) transaction: Option<Transaction>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct PieceRequestById {
+    pub(crate) id: PieceId,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct PieceResponseById {
+    pub(crate) piece_bundle: Option<NetworkPieceBundleById>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct PieceRequestByIndex {
+    pub(crate) index: PieceIndex,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct PieceResponseByIndex {
+    pub(crate) piece_bundle: Option<NetworkPieceBundleByIndex>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct StateBlockRequestById {
+    pub(crate) id: StateBlockId,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct StateBlockResponseById {
+    pub(crate) state_block: Option<StateBlock>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct StateBlockRequestByHeight {
+    pub(crate) height: BlockHeight,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct StateBlockResponseByHeight {
+    pub(crate) state_block: Option<StateBlock>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum RequestMessage {
     Blocks(BlocksRequest),
+    BlockByContentId(BlockRequestByContentId),
+    BlockByProofId(BlockRequestByProofId),
+    TransactionById(TxRequestById),
+    PieceById(PieceRequestById),
+    PieceByIndex(PieceRequestByIndex),
+    StateById(StateBlockRequestById),
+    StateByHeight(StateBlockRequestByHeight),
 }
 
 impl Display for RequestMessage {
@@ -50,6 +131,13 @@ impl Display for RequestMessage {
             "{}",
             match self {
                 Self::Blocks { .. } => "Blocks",
+                Self::BlockByContentId { .. } => "BlockByContentId",
+                Self::BlockByProofId { .. } => "BlockByProofId",
+                Self::TransactionById { .. } => "Transaction",
+                Self::PieceById { .. } => "PieceById",
+                Self::PieceByIndex { .. } => "PieceByIndex",
+                Self::StateById { .. } => "StateById",
+                Self::StateByHeight { .. } => "StateByHeight",
             }
         )
     }
@@ -58,6 +146,13 @@ impl Display for RequestMessage {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum ResponseMessage {
     Blocks(BlocksResponse),
+    BlockByContentId(BlockResponseByContentId),
+    BlockByProofId(BlockResponseByProofId),
+    TransactionById(TxResponseById),
+    PieceById(PieceResponseById),
+    PieceByIndex(PieceResponseByIndex),
+    StateById(StateBlockResponseById),
+    StateByHeight(StateBlockResponseByHeight),
 }
 
 impl Display for ResponseMessage {
@@ -67,6 +162,13 @@ impl Display for ResponseMessage {
             "{}",
             match self {
                 Self::Blocks { .. } => "Blocks",
+                Self::BlockByContentId { .. } => "BlockByContentId",
+                Self::BlockByProofId { .. } => "BlockByProofId",
+                Self::TransactionById { .. } => "Transaction",
+                Self::PieceById { .. } => "PieceById",
+                Self::PieceByIndex { .. } => "PieceByIndex",
+                Self::StateById { .. } => "StateById",
+                Self::StateByHeight { .. } => "StateByHeight",
             }
         )
     }

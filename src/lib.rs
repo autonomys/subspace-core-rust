@@ -29,6 +29,8 @@ pub mod utils;
 
 // TODO: Should make into actual structs
 pub type Piece = [u8; PIECE_SIZE];
+pub type PieceId = [u8; 32];
+pub type PieceIndex = u64;
 pub type IV = [u8; IV_SIZE];
 pub type ExpandedIV = [u8; PRIME_SIZE_BYTES];
 pub type PublicKey = [u8; 32];

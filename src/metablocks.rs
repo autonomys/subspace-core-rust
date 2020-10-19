@@ -69,6 +69,13 @@ impl MetaBlocks {
             .clone()
     }
 
+    pub fn get_metablock_from_proof_id_as_option(&self, proof_id: &ProofId) -> Option<MetaBlock> {
+        match self.blocks.get(proof_id) {
+            Some(metablock) => Some(metablock.clone()),
+            None => None,
+        }
+    }
+
     /// Stage a new block received via gossip or created locally
     pub fn save(&mut self, block: Block) -> MetaBlock {
         let block_id = block.get_id();

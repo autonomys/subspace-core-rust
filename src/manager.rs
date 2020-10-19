@@ -2,8 +2,13 @@ use crate::block::Block;
 use crate::console::AppState;
 use crate::farmer::{FarmerMessage, Solution};
 use crate::ledger::Ledger;
+use crate::network::messages::ResponseMessage::PieceByIndex;
 use crate::network::messages::{
-    BlocksRequest, BlocksResponse, GossipMessage, RequestMessage, ResponseMessage,
+    BlockRequestByContentId, BlockRequestByProofId, BlockResponseByContentId,
+    BlockResponseByProofId, BlocksRequest, BlocksResponse, GossipMessage, PieceRequestById,
+    PieceRequestByIndex, PieceResponseByIndex, RequestMessage, ResponseMessage,
+    StateBlockRequestByHeight, StateBlockRequestById, StateBlockResponseByHeight,
+    StateBlockResponseById, TxRequestById, TxResponseById,
 };
 use crate::network::{Network, NodeType};
 use crate::plot::Plot;
@@ -46,6 +51,7 @@ impl Display for ProtocolMessage {
 }
 
 pub type SharedLedger = Arc<Mutex<Ledger>>;
+pub type SharedPlot = Arc<Mutex<Plot>>;
 
 // TODO: start the timer once
 /// start the timer after syncing the ledger
@@ -76,9 +82,11 @@ pub async fn run(
     state_sender: crossbeam_channel::Sender<AppState>,
     timer_to_farmer_tx: Sender<FarmerMessage>,
     epoch_tracker: EpochTracker,
-    plot_option: Option<Plot>,
+    plot: Plot,
 ) {
     let ledger: SharedLedger = Arc::new(Mutex::new(ledger));
+    let plot: SharedPlot = Arc::new(Mutex::new(plot));
+
     {
         let network = network.clone();
         let ledger = Arc::clone(&ledger);
@@ -158,11 +166,13 @@ pub async fn run(
     {
         let network = network.clone();
         let ledger = Arc::clone(&ledger);
+        let plot = Arc::clone(&plot);
 
         async_std::task::spawn(async move {
             let requests_receiver = network.get_requests_receiver().unwrap();
             while let Ok((message, response_sender)) = requests_receiver.recv().await {
                 let ledger = Arc::clone(&ledger);
+                let plot = Arc::clone(&plot);
 
                 async_std::task::spawn(async move {
                     match message {
@@ -178,6 +188,80 @@ pub async fn run(
                                     transactions,
                                 })),
                             );
+                        }
+                        RequestMessage::BlockByContentId(BlockRequestByContentId { id }) => {
+                            let locked_ledger = ledger.lock().await;
+                            let block: Option<Block> = match locked_ledger
+                                .metablocks
+                                .get_metablock_from_content_id_as_option(&id)
+                            {
+                                Some(metablock) => Some(metablock.block),
+                                None => None,
+                            };
+
+                            drop(response_sender.send(ResponseMessage::BlockByContentId(
+                                BlockResponseByContentId { block },
+                            )));
+                        }
+                        RequestMessage::BlockByProofId(BlockRequestByProofId { id }) => {
+                            let locked_ledger = ledger.lock().await;
+                            let block: Option<Block> = match locked_ledger
+                                .metablocks
+                                .get_metablock_from_proof_id_as_option(&id)
+                            {
+                                Some(metablock) => Some(metablock.block),
+                                None => None,
+                            };
+
+                            drop(response_sender.send(ResponseMessage::BlockByProofId(
+                                BlockResponseByProofId { block },
+                            )));
+                        }
+                        RequestMessage::TransactionById(TxRequestById { id }) => {
+                            let locked_ledger = ledger.lock().await;
+                            let transaction: Option<Transaction> = match locked_ledger.txs.get(&id)
+                            {
+                                Some(tx) => Some(tx.clone()),
+                                None => None,
+                            };
+
+                            drop(response_sender.send(ResponseMessage::TransactionById(
+                                TxResponseById { transaction },
+                            )));
+                        }
+                        RequestMessage::StateById(StateBlockRequestById { id }) => {
+                            let locked_ledger = ledger.lock().await;
+                            let state_block = match locked_ledger.state.get_state_block_by_id(&id) {
+                                Some(block) => Some(block.clone()),
+                                None => None,
+                            };
+
+                            drop(response_sender.send(ResponseMessage::StateById(
+                                StateBlockResponseById { state_block },
+                            )));
+                        }
+                        RequestMessage::StateByHeight(StateBlockRequestByHeight { height }) => {
+                            let locked_ledger = ledger.lock().await;
+                            let state_block =
+                                match locked_ledger.state.get_state_block_by_height(height) {
+                                    Some(block) => Some(block.clone()),
+                                    None => None,
+                                };
+
+                            drop(response_sender.send(ResponseMessage::StateByHeight(
+                                StateBlockResponseByHeight { state_block },
+                            )));
+                        }
+                        RequestMessage::PieceByIndex(PieceRequestByIndex { index }) => {
+                            let piece_bundle =
+                                plot.lock().await.get_piece_bundle_by_index(index).await;
+
+                            drop(response_sender.send(ResponseMessage::PieceByIndex(
+                                PieceResponseByIndex { piece_bundle },
+                            )));
+                        }
+                        RequestMessage::PieceById(PieceRequestById { id }) => {
+                            // TODO: store pieces by piece_id for retrieval
                         }
                     }
                 });
@@ -246,10 +330,8 @@ pub async fn run(
                         }
                     }
                     ProtocolMessage::StateBundle { state_bundle } => {
-                        if plot_option.is_some() {
-                            // TODO: only plot pieces that evict other pieces
-                            // plot each piece
-                        }
+                        // TODO: only plot pieces that evict other pieces
+                        // plot each piece
                     }
                 },
                 Err(error) => {

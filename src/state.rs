@@ -15,8 +15,6 @@ use std::convert::TryInto;
    - fix eon close time
    - fix prune blocks recursive
    - extend plot for each new state block
-   - merge in network updates
-   - add RPC methods
 
    - Sync the state chain
    - Add index pieces to state
@@ -38,6 +36,19 @@ pub struct PieceBundle {
     pub piece_id: [u8; 32],
     pub piece_index: u64,
     pub piece_proof: Vec<u8>,
+}
+
+#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkPieceBundleByIndex {
+    pub encoding: Vec<u8>,
+    pub piece_proof: Vec<u8>,
+}
+
+#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkPieceBundleById {
+    pub encoding: Vec<u8>,
+    pub piece_proof: Vec<u8>,
+    pub piece_index: u64,
 }
 
 #[derive(PartialEq, Debug, Clone)]
