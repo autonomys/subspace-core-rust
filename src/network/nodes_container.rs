@@ -125,6 +125,7 @@ impl NodesContainer {
     // TODO: Should this return contact structs?
     /// Returns all known contacts, including those that are already connected or pending
     pub(super) fn get_contacts(&self) -> impl Iterator<Item = &SocketAddr> {
+        // TODO: Should we prefer peers here (load balancing)
         self.peers.keys().chain(self.pending_peers.keys()).chain(
             self.contacts
                 .iter()

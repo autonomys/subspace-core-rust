@@ -485,10 +485,7 @@ trait TransportCommon {
         let mut stream = match TcpStream::connect(pending_peer.address()).await {
             Ok(stream) => stream,
             Err(error) => {
-                self.nodes_container()
-                    .lock()
-                    .await
-                    .finish_failed_connection_attempt(&pending_peer);
+                self.on_connection_failure(&pending_peer).await;
 
                 return Err(ConnectionError::IO { error });
             }
