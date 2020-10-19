@@ -11,8 +11,7 @@ use crate::state::StateBundle;
 use crate::timer::EpochTracker;
 use crate::transaction::Transaction;
 use crate::{
-    timer, ContentId, CONSOLE, MIN_CONNECTED_PEERS, PLOT_SIZE, TIMESLOTS_PER_EPOCH,
-    TIMESLOT_DURATION,
+    timer, ContentId, CONSOLE, MIN_PEERS, PLOT_SIZE, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
@@ -413,7 +412,7 @@ pub async fn run(
             loop {
                 let mut state = network.get_state().await;
                 state.node_type = node_type.to_string();
-                state.peers = state.peers + "/" + &MIN_CONNECTED_PEERS.to_string()[..];
+                state.peers = state.peers + "/" + &MIN_PEERS.to_string()[..];
                 state.blocks = "TODO".to_string();
                 state.pieces = match node_type {
                     NodeType::Gateway => PLOT_SIZE.to_string(),
