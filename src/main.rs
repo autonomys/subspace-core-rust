@@ -11,12 +11,12 @@ use std::{env, fs};
 use subspace_core_rust::farmer::FarmerMessage;
 use subspace_core_rust::ledger::Ledger;
 use subspace_core_rust::manager::ProtocolMessage;
-use subspace_core_rust::network::{Network, NodeType};
+use subspace_core_rust::network::{NodeType, StartupNetwork};
 use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::{
-    console, crypto, farmer, manager, plotter, rpc, CONSOLE, DEV_GATEWAY_ADDR,
-    MAINTAIN_PEERS_INTERVAL, MAX_CONNECTED_PEERS, MAX_PEERS, MIN_CONNECTED_PEERS, MIN_PEERS,
+    console, crypto, farmer, manager, network, plotter, rpc, BLOCK_LIST_SIZE, CONSOLE,
+    DEV_GATEWAY_ADDR, MAINTAIN_PEERS_INTERVAL, MAX_CONTACTS, MAX_PEERS, MIN_CONTACTS, MIN_PEERS,
 };
 use tui_logger::{init_logger, set_default_level};
 
@@ -156,35 +156,55 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     let (timer_to_farmer_tx, timer_to_farmer_rx) = channel::<FarmerMessage>(32);
     let solver_to_main_tx = any_to_main_tx.clone();
 
-    let network_fut = Network::new(
+    let startup_network_fut = StartupNetwork::new(
         node_id,
         if node_type == NodeType::Gateway {
             DEV_GATEWAY_ADDR.parse().unwrap()
         } else {
             node_addr
         },
-        MIN_CONNECTED_PEERS,
-        MAX_CONNECTED_PEERS,
         MIN_PEERS,
         MAX_PEERS,
+        MIN_CONTACTS,
+        MAX_CONTACTS,
+        BLOCK_LIST_SIZE,
         MAINTAIN_PEERS_INTERVAL,
+        network::create_backoff,
     );
-    let network = network_fut.await.unwrap();
+    let startup_network = startup_network_fut.await.unwrap();
     if node_type != NodeType::Gateway {
         info!("Connecting to gateway node");
 
-        network
-            .connect_to(DEV_GATEWAY_ADDR.parse().unwrap())
+        let contacts_level = startup_network
+            .startup_connect(DEV_GATEWAY_ADDR.parse().unwrap())
             .await
-            .unwrap();
+            .expect("Failed to connect to a single gateway node");
 
-        // Connect to more peers if possible
-        for _ in 0..MIN_CONNECTED_PEERS {
-            if let Some(peer) = network.get_random_disconnected_peer().await {
-                drop(network.connect_to(peer).await);
+        // TODO: Min gateways check
+
+        if !contacts_level.min_contacts() {
+            panic!("Failed to reach min contacts level on startup");
+        }
+
+        loop {
+            // TODO: Failed attempts should be handled correctly
+            match startup_network.connect_to_random_contact().await {
+                Ok(peers_level) => {
+                    if peers_level.min_peers() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    error!(
+                        "Failed to connect to minimum number of peers on startup: {:?}",
+                        error
+                    );
+                    break;
+                }
             }
         }
     }
+    let network = startup_network.finish_startup();
 
     // manager loop
     let main = manager::run(

@@ -74,7 +74,7 @@ impl Display for ResponseMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum InternalRequestMessage {
-    Peers,
+    Contacts,
 }
 
 impl Display for InternalRequestMessage {
@@ -83,7 +83,7 @@ impl Display for InternalRequestMessage {
             f,
             "{}",
             match self {
-                Self::Peers { .. } => "Peers",
+                Self::Contacts { .. } => "Contacts",
             }
         )
     }
@@ -91,7 +91,7 @@ impl Display for InternalRequestMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum InternalResponseMessage {
-    Peers(Vec<SocketAddr>),
+    Contacts(Vec<SocketAddr>),
 }
 
 impl Display for InternalResponseMessage {
@@ -100,7 +100,7 @@ impl Display for InternalResponseMessage {
             f,
             "{}",
             match self {
-                Self::Peers { .. } => "Peers",
+                Self::Contacts { .. } => "Contacts",
             }
         )
     }

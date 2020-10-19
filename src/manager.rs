@@ -9,7 +9,7 @@ use crate::network::{Network, NodeType};
 use crate::timer::EpochTracker;
 use crate::transaction::Transaction;
 use crate::{
-    timer, ContentId, CHALLENGE_LOOKBACK_EPOCHS, CONSOLE, MIN_CONNECTED_PEERS, PLOT_SIZE,
+    timer, ContentId, CHALLENGE_LOOKBACK_EPOCHS, CONSOLE, MIN_PEERS, PLOT_SIZE,
     TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::{Receiver, Sender};
@@ -401,7 +401,7 @@ pub async fn run(
             loop {
                 let mut state = network.get_state().await;
                 state.node_type = node_type.to_string();
-                state.peers = state.peers + "/" + &MIN_CONNECTED_PEERS.to_string()[..];
+                state.peers = state.peers + "/" + &MIN_PEERS.to_string()[..];
                 state.blocks = "TODO".to_string();
                 state.pieces = match node_type {
                     NodeType::Gateway => PLOT_SIZE.to_string(),
