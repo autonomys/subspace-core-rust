@@ -17,6 +17,17 @@ use std::io::SeekFrom;
 use std::ops::Deref;
 use std::sync::Arc;
 
+/*
+   Plot File -> all encodings
+   Map DB -> (K: index, V: (position, merkle_proof))
+   Tags DB -> (K: tag_prefix, V: index)
+
+   FindByRange(target, range) -> Vec<Tag, index>
+   Read(index) -> Encoding
+   Write(encoding, nonce, index) -> Result()
+   Remove(index) -> Result()
+*/
+
 #[derive(Debug)]
 pub enum PlotCreationError {
     PlotOpen(io::Error),

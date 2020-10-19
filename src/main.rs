@@ -41,7 +41,6 @@ use tui_logger::{init_logger, set_default_level};
    - complete fine tuning parameters
    - initial tx validation is too strict (requires k-deep confirmation)
    - recover from deep forks at network partitions
-   - derive randomness from the block with the most confirmations (not earliest)
 
  Security
 

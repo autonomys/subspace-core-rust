@@ -810,11 +810,18 @@ impl Ledger {
         // TODO: make sure the branch will not be below the current confirmed block height
         self.update_heads(parent_content_id, metablock.content_id, metablock.height);
 
+        let parent_proof_id = if parent_content_id == self.genesis_challenge {
+            self.genesis_challenge
+        } else {
+            self.metablocks
+                .get_proof_id_from_content_id(&parent_content_id)
+        };
+
         // add to epoch tracker
         self.epoch_tracker
-            .add_block_to_epoch(
+            .add_proof_to_epoch(
                 metablock.block.proof.epoch,
-                metablock.height,
+                parent_proof_id,
                 metablock.proof_id,
             )
             .await;
@@ -925,7 +932,8 @@ impl Ledger {
         // TODO: do we need to account for the timeslot offset here?
         // TODO: this should be a separate function
         // update the solution range on Eon boundary
-        if proposer_metablock.height % PROPOSER_BLOCKS_PER_EON == 0 {
+        if proposer_metablock.height > 0 && proposer_metablock.height % PROPOSER_BLOCKS_PER_EON == 0
+        {
             /* Hypothesize as to why expected and actual differ...
              * as plot size increases, variance does not appear to change
              * as timeslots_per_block increases, adjustment decreases
@@ -1215,7 +1223,7 @@ impl Ledger {
                 .collect();
 
             self.prune_blocks_recursive(siblings);
-            loop {}
+            // loop {}
         }
 
         // TODO: perhaps use a single loop to add state
@@ -1226,18 +1234,18 @@ impl Ledger {
     }
 
     /// Recursively removes all siblings and their descendants when a new block is confirmed
-    async fn prune_blocks_recursive(&mut self, proof_ids: Vec<ProofId>) {
+    fn prune_blocks_recursive(&mut self, proof_ids: Vec<ProofId>) {
         for child_proof_id in proof_ids.iter() {
             let metablock = self.metablocks.remove(child_proof_id);
 
             // remove from epoch tracker
-            self.epoch_tracker
-                .remove_block_from_epoch(
-                    metablock.block.proof.epoch,
-                    metablock.height,
-                    metablock.proof_id,
-                )
-                .await;
+            // self.epoch_tracker
+            //     .remove_block_from_epoch(
+            //         metablock.block.proof.epoch,
+            //         metablock.height,
+            //         metablock.proof_id,
+            //     )
+            //     .await;
 
             // remove from blocks by timeslot
             self.proof_ids_by_timeslot

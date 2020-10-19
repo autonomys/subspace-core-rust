@@ -11,17 +11,17 @@ use std::convert::TryInto;
 
     IMMEDIATE
 
-   - fix solve from genesis state bugs
-   - fix eon close time
-   - fix prune blocks recursive
-   - extend plot for each new state block
+    - extend plot for each new state block -> refactor plotter into plot function?
+
 
    - Sync the state chain
+   - get genesis challenge and timestamp
+   - Sync archival state from state chain
+
    - Add index pieces to state
    - Add erasure coding to state
    - Add remaining fields to state block
-   - Sync archival state from state chain
-   - get genesis challenge and timestamp
+
 
    LATER
 

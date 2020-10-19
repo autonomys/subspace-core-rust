@@ -46,33 +46,6 @@ pub async fn plot(path: PathBuf, node_id: NodeID, piece_bundles: Vec<PieceBundle
                     bar = Some(ProgressBar::new(PLOT_SIZE as u64))
                 };
 
-                /*
-                   Plot File -> all encodings
-                   Map DB -> (K: index, V: position)
-                   Tags DB -> (K: tag_prefix, V: index)
-
-                   FindByRange(target, range) -> Vec<Tag, index>
-                   Read(index) -> Encoding
-                   Write(encoding, nonce, index) -> Result()
-                   Remove(index) -> Result()
-
-                   Current Setup
-                   1. Single genesis piece
-                   2. Single set of merkle proofs from 0 to 255
-                   3. Index is used as IV to create different encodings for same node id and same piece
-                   4. The index and encoding are stored on disk
-                   5. The index and encoding are sent over the network
-                   6. To verify, compute merkle proof from index, decode with index to ensure it comes back to genesis piece
-
-                   New Setup
-                   1. Single genesis state block (256 pieces), many more later
-                   2. Index of the piece as it appears in the state is still used as IV (same IV for any node id / piece)
-                   3. Each piece is stored under both its index and piece id
-                   4. Merkle Proofs are also stored with encodings (writes should now accept merkle proofs)
-                   5.
-
-                */
-
                 // plot pieces in parallel on all cores, using IV as a source of randomness
                 // this is just for efficient testing atm
                 piece_bundles.into_par_iter().for_each(|piece_bundle| {

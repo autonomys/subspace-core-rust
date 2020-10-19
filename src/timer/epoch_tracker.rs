@@ -131,21 +131,10 @@ impl EpochTracker {
         self.inner.lock().await.advance_epoch()
     }
 
-    /// Returns `true` in case no blocks for this timeslot existed before
-    pub async fn add_block_to_epoch(&self, epoch_index: u64, block_height: u64, proof_id: ProofId) {
-        self.inner
-            .lock()
-            .await
-            .epochs
-            .get_mut(&epoch_index)
-            .unwrap()
-            .add_block_at_height(block_height, proof_id);
-    }
-
-    pub async fn remove_block_from_epoch(
+    pub async fn add_proof_to_epoch(
         &self,
         epoch_index: u64,
-        block_height: u64,
+        parent_proof_id: ProofId,
         proof_id: ProofId,
     ) {
         self.inner
@@ -154,6 +143,6 @@ impl EpochTracker {
             .epochs
             .get_mut(&epoch_index)
             .unwrap()
-            .remove_block_at_height(block_height, proof_id);
+            .add_proof(parent_proof_id, proof_id);
     }
 }
