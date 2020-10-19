@@ -1,11 +1,10 @@
 use crate::transaction::CoinbaseTx;
 use crate::{
-    crypto, sloth, utils, BlockId, ContentId, ProofId, Tag, ENCODING_LAYERS_TEST,
-    TX_BLOCKS_PER_PROPOSER_BLOCK,
+    crypto, sloth, state, BlockId, ContentId, ProofId, Tag, ENCODING_LAYERS_TEST,
+    PIECES_PER_STATE_BLOCK, TX_BLOCKS_PER_PROPOSER_BLOCK,
 };
 use ed25519_dalek::{PublicKey, Signature};
-use log::error;
-use log::warn;
+use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 
@@ -34,8 +33,7 @@ impl Block {
 
     pub fn is_valid(
         &self,
-        merkle_root: &[u8],
-        genesis_piece_hash: &[u8; 32],
+        state: &state::State,
         epoch_randomness: &[u8; 32],
         slot_challenge: &[u8; 32],
         sloth: &sloth::Sloth,
@@ -161,11 +159,21 @@ impl Block {
             return false;
         }
 
+        let state_block_index = self.proof.piece_index / PIECES_PER_STATE_BLOCK as u64;
+        debug!(
+            "Getting merkle proof for state block: {}.",
+            state_block_index
+        );
+        let merkle_root = state
+            .get_state_block_by_height(state_block_index)
+            .unwrap()
+            .piece_merkle_root;
+
         // is the merkle proof correct?
         if !crypto::validate_merkle_proof(
-            self.proof.piece_index as usize,
+            self.data.as_ref().unwrap().piece_hash,
             &self.data.as_ref().unwrap().merkle_proof,
-            merkle_root,
+            &merkle_root,
         ) {
             error!("Invalid block, merkle proof is invalid!");
             return false;
@@ -178,15 +186,8 @@ impl Block {
         let mut decoding = self.data.as_ref().unwrap().encoding.clone();
 
         sloth.decode(decoding.as_mut(), expanded_iv, layers);
-
-        // subtract out the index when comparing to the genesis piece
-        let index_bytes = utils::usize_to_bytes(self.proof.piece_index as usize);
-        for i in 0..16 {
-            decoding[i] ^= index_bytes[i];
-        }
-
         let decoding_hash = crypto::digest_sha_256(&decoding);
-        if genesis_piece_hash != &decoding_hash {
+        if &self.data.as_ref().unwrap().piece_hash != &decoding_hash {
             error!("Invalid block, encoding is invalid");
             // utils::compare_bytes(&proof.encoding, &proof.encoding, &decoding);
             return false;
@@ -274,6 +275,8 @@ pub struct Data {
     pub encoding: Vec<u8>,
     /// merkle proof showing piece is in the ledger
     pub merkle_proof: Vec<u8>,
+    /// hash of the original piece used for the encoding
+    pub piece_hash: [u8; 32],
 }
 
 impl Data {

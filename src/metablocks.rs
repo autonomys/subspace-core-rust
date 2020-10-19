@@ -16,13 +16,15 @@ pub struct MetaBlock {
 pub struct MetaBlocks {
     blocks: HashMap<ProofId, MetaBlock>,
     content_to_proof_map: HashMap<ContentId, ProofId>,
+    genesis_challenge: [u8; 32],
 }
 
 impl MetaBlocks {
-    pub fn new() -> Self {
+    pub fn new(genesis_challenge: [u8; 32]) -> Self {
         MetaBlocks {
             blocks: HashMap::new(),
             content_to_proof_map: HashMap::new(),
+            genesis_challenge,
         }
     }
 
@@ -74,9 +76,11 @@ impl MetaBlocks {
         let content_id = block.content.get_id();
         let mut height = 0;
 
-        // skip the genesis block
         // only for proposer blocks
-        if block.proof.timeslot != 0 && block.content.parent_id.is_some() {
+        // skip the genesis block
+        if block.content.parent_id.is_some()
+            && block.content.parent_id.unwrap() != self.genesis_challenge
+        {
             // TODO: handle errors in case we cannot find the parent, for now check in stage block
 
             // have to get the parent proof id from the content id

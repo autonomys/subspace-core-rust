@@ -87,8 +87,9 @@ docker run --rm -it --init subspace-core-rust
 5. ~~TCP Gossip Network~~
 6. ~~Terminal Console~~
 7. ~~Manages Forks~~
-8. Basic tx scheme
-9. Erasrue code state
+8. ~~Basic tx scheme~~
+9. Erasure code state
+10. Sync state chain
 
 ### Testing Only
 

@@ -2,17 +2,12 @@ mod epoch;
 mod epoch_tracker;
 use crate::farmer::FarmerMessage;
 use crate::manager::SharedLedger;
-use crate::{CHALLENGE_LOOKBACK_EPOCHS, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION};
+use crate::{TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION};
 use async_std::sync::Sender;
 pub use epoch::Epoch;
 pub use epoch_tracker::EpochTracker;
 use log::*;
 use std::time::{Duration, Instant, UNIX_EPOCH};
-
-// TODO: make timer into a struct
-// has a channel which is a beacon
-// sends a message on every timeslot arrival
-// where does the receiver go?
 
 pub async fn run(
     timer_to_farmer_tx: Sender<FarmerMessage>,
@@ -61,17 +56,11 @@ pub async fn run(
             }
         }
 
-        let epoch = epoch_tracker.get_lookback_epoch(current_epoch_index).await;
-
-        if !epoch.is_closed {
-            panic!(
-                "Epoch {} being used for randomness is still open!",
-                current_epoch_index - CHALLENGE_LOOKBACK_EPOCHS
-            );
-        }
+        let (randomness, slot_challenge) = epoch_tracker
+            .get_slot_challenge(current_epoch_index, next_timeslot)
+            .await;
 
         if is_farming {
-            let slot_challenge = epoch.get_challenge_for_timeslot(next_timeslot);
             // TODO: This doesn't wait until we solve, so in case disk is overloaded, this
             //  will cause DoS
 
@@ -82,7 +71,7 @@ pub async fn run(
                 .send(FarmerMessage::SlotChallenge {
                     epoch_index: current_epoch_index,
                     timeslot: next_timeslot,
-                    randomness: epoch.randomness,
+                    randomness,
                     slot_challenge,
                     solution_range,
                 })

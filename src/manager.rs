@@ -6,15 +6,16 @@ use crate::network::messages::{
     BlocksRequest, BlocksResponse, GossipMessage, RequestMessage, ResponseMessage,
 };
 use crate::network::{Network, NodeType};
+use crate::plot::Plot;
+use crate::state::StateBundle;
 use crate::timer::EpochTracker;
 use crate::transaction::Transaction;
 use crate::{
-    timer, ContentId, CHALLENGE_LOOKBACK_EPOCHS, CONSOLE, MIN_CONNECTED_PEERS, PLOT_SIZE,
-    TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+    timer, ContentId, CONSOLE, MIN_CONNECTED_PEERS, PLOT_SIZE, TIMESLOTS_PER_EPOCH,
+    TIMESLOT_DURATION,
 };
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
-use futures::join;
 use futures::lock::Mutex;
 use log::*;
 use std::fmt;
@@ -24,7 +25,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub enum ProtocolMessage {
     /// Solver sends a set of solutions back to main for application
-    BlockSolutions { solutions: Vec<Solution> },
+    BlockSolutions {
+        solutions: Vec<Solution>,
+    },
+    StateBundle {
+        state_bundle: StateBundle,
+    },
 }
 
 impl Display for ProtocolMessage {
@@ -34,6 +40,7 @@ impl Display for ProtocolMessage {
             "{}",
             match self {
                 Self::BlockSolutions { .. } => "BlockSolutions",
+                Self::StateBundle { .. } => "StateBundle",
             }
         )
     }
@@ -64,13 +71,13 @@ pub fn start_timer(
 /// Starts the manager process, a broker loop that acts as the central async message hub for the node
 pub async fn run(
     node_type: NodeType,
-    genesis_piece_hash: [u8; 32],
     ledger: Ledger,
     any_to_main_rx: Receiver<ProtocolMessage>,
     network: Network,
     state_sender: crossbeam_channel::Sender<AppState>,
     timer_to_farmer_tx: Sender<FarmerMessage>,
     epoch_tracker: EpochTracker,
+    plot_option: Option<Plot>,
 ) {
     let ledger: SharedLedger = Arc::new(Mutex::new(ledger));
     {
@@ -123,6 +130,7 @@ pub async fn run(
                         if locked_ledger.timer_is_running {
                             // validate the tx
                             let from_account_state = locked_ledger.balances.get(&tx.from_address);
+                            // TODO: validate without account state
                             if !tx.is_valid(from_account_state) {
                                 warn!("Received an invalid tx via gossip, ignoring");
                                 continue;
@@ -183,16 +191,11 @@ pub async fn run(
 
         // if gateway init the genesis block set and then start the timer
         if node_type == NodeType::Gateway {
-            // init ledger from genesis
-            let genesis_timestamp = ledger.lock().await.init_from_genesis().await;
-
-            let next_timeslot = CHALLENGE_LOOKBACK_EPOCHS * TIMESLOTS_PER_EPOCH;
-
-            {
-                let mut locked_ledger = ledger.lock().await;
-                locked_ledger.timer_is_running = true;
-                locked_ledger.current_timeslot = next_timeslot - 1;
-            }
+            // set genesis time
+            let genesis_timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_millis() as u64;
 
             // start the timer
             start_timer(
@@ -200,9 +203,18 @@ pub async fn run(
                 true,
                 epoch_tracker.clone(),
                 genesis_timestamp,
-                next_timeslot,
+                1,
                 Arc::clone(&ledger),
             );
+
+            {
+                let mut locked_ledger = ledger.lock().await;
+                locked_ledger.timer_is_running = true;
+                locked_ledger.genesis_timestamp = genesis_timestamp;
+                locked_ledger.current_timeslot = 0;
+            }
+
+            // how to send the genesis timestamp to new nodes? ledger.stage_proposer_block
         }
 
         loop {
@@ -234,6 +246,12 @@ pub async fn run(
                             }
                         }
                     }
+                    ProtocolMessage::StateBundle { state_bundle } => {
+                        if plot_option.is_some() {
+                            // TODO: only plot pieces that evict other pieces
+                            // plot each piece
+                        }
+                    }
                 },
                 Err(error) => {
                     error!("Error in protocol messages handling: {}", error);
@@ -249,13 +267,10 @@ pub async fn run(
             NodeType::Gateway => {
                 // send genesis challenge to solver
                 // this will start an eval loop = solve -> create block -> gossip -> solve ...
-                info!(
-                    "Starting gateway with genesis epoch challenge: {}",
-                    hex::encode(&genesis_piece_hash[0..8])
-                );
+                info!("Starting new gateway node from genesis");
             }
             NodeType::Peer | NodeType::Farmer => {
-                info!("New peer starting ledger sync with gateway");
+                info!("New peer starting ledger sync with genesis gateway");
 
                 let is_farming = matches!(node_type, NodeType::Gateway | NodeType::Farmer);
 
@@ -266,13 +281,34 @@ pub async fn run(
                         Ok(bundle) => {
                             let mut locked_ledger = ledger.lock().await;
 
+                            for tx in bundle.1.iter() {
+                                let tx_id = tx.get_id();
+
+                                // check to see if we already have the tx
+                                if locked_ledger.txs.contains_key(&tx_id) {
+                                    warn!("Received a duplicate tx via gossip, ignoring");
+                                    continue;
+                                }
+
+                                // TODO: tx should be validated internally only
+
+                                // add to tx database and mempool
+                                locked_ledger
+                                    .txs
+                                    .insert(tx_id, Transaction::Credit(tx.clone()));
+
+                                if locked_ledger.unknown_tx_ids.contains(&tx_id) {
+                                    locked_ledger.unknown_tx_ids.remove(&tx_id);
+                                } else {
+                                    locked_ledger.unclaimed_tx_ids.insert(tx_id);
+                                }
+                            }
+
                             for block in bundle.0.iter() {
                                 if timeslot == 0 {
                                     // start the timer from genesis time
                                     // TODO: start timer at node init once we have canonical genesis time
                                 }
-
-                                // TODO: must include the proof in block now (no pruning)
 
                                 // validate the block
                                 if !locked_ledger
@@ -287,30 +323,6 @@ pub async fn run(
                                     locked_ledger.stage_proposer_block(&block).await;
                                 } else {
                                     locked_ledger.stage_tx_block(&block).await;
-                                }
-                            }
-
-                            for tx in bundle.1.iter() {
-                                let tx_id = tx.get_id();
-                                let mut locked_ledger = ledger.lock().await;
-
-                                // check to see if we already have the tx
-                                if locked_ledger.txs.contains_key(&tx_id) {
-                                    warn!("Received a duplicate tx via gossip, ignoring");
-                                    continue;
-                                }
-
-                                // TODO: should we validate the transaction?
-
-                                // add to tx database and mempool
-                                locked_ledger
-                                    .txs
-                                    .insert(tx_id, Transaction::Credit(tx.clone()));
-
-                                if locked_ledger.unknown_tx_ids.contains(&tx_id) {
-                                    locked_ledger.unknown_tx_ids.remove(&tx_id);
-                                } else {
-                                    locked_ledger.unclaimed_tx_ids.insert(tx_id);
                                 }
                             }
 
@@ -415,5 +427,5 @@ pub async fn run(
         }
     };
 
-    join!(protocol_listener, protocol_startup);
+    futures::join!(protocol_listener, protocol_startup);
 }

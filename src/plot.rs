@@ -30,13 +30,13 @@ enum ReadRequests {
         result_sender: oneshot::Sender<bool>,
     },
     ReadEncoding {
-        index: usize,
-        result_sender: oneshot::Sender<io::Result<Piece>>,
+        index: u64,
+        result_sender: oneshot::Sender<io::Result<(Piece, Vec<u8>)>>,
     },
     FindByRange {
         target: Tag,
         range: u64,
-        result_sender: oneshot::Sender<io::Result<Vec<(Tag, usize)>>>,
+        result_sender: oneshot::Sender<io::Result<Vec<(Tag, u64)>>>,
     },
 }
 
@@ -45,11 +45,12 @@ enum WriteRequests {
     WriteEncoding {
         encoding: Piece,
         nonce: u64,
-        index: usize,
+        index: u64,
+        merkle_proof: Vec<u8>,
         result_sender: oneshot::Sender<io::Result<()>>,
     },
     RemoveEncoding {
-        index: usize,
+        index: u64,
         result_sender: oneshot::Sender<io::Result<()>>,
     },
 }
@@ -132,22 +133,26 @@ impl Plot {
                             result_sender,
                         }) => {
                             // TODO: Remove unwrap
-                            let position = task::spawn_blocking({
+                            let piece_data: Option<(u64, Vec<u8>)> = task::spawn_blocking({
                                 let map_db = Arc::clone(&map_db);
                                 move || map_db.get(index.to_le_bytes())
                             })
                             .await
                             .unwrap()
-                            .map(|position| {
-                                u64::from_le_bytes(position.as_slice().try_into().unwrap())
+                            .map(|raw_piece_data| {
+                                let position =
+                                    u64::from_le_bytes(raw_piece_data[0..8].try_into().unwrap());
+                                let merkle_proof = raw_piece_data[8..].to_vec();
+                                (position, merkle_proof)
                             });
-                            let _ = result_sender.send(match position {
-                                Some(position) => {
+
+                            let _ = result_sender.send(match piece_data {
+                                Some((position, merkle_proof)) => {
                                     try {
                                         plot_file.seek(SeekFrom::Start(position)).await?;
                                         let mut buffer = [0u8; PIECE_SIZE];
                                         plot_file.read_exact(&mut buffer).await?;
-                                        buffer
+                                        (buffer, merkle_proof)
                                     }
                                 }
                                 None => Err(io::Error::from(io::ErrorKind::NotFound)),
@@ -167,7 +172,7 @@ impl Plot {
                                 move || {
                                     let mut iter = tags_db.raw_iterator();
 
-                                    let mut solutions: Vec<(Tag, usize)> = Vec::new();
+                                    let mut solutions: Vec<(Tag, u64)> = Vec::new();
 
                                     let (lower, is_lower_overflowed) =
                                         u64::from_be_bytes(target).overflowing_sub(range / 2);
@@ -189,7 +194,7 @@ impl Plot {
                                             if u64::from_be_bytes(tag) <= upper {
                                                 solutions.push((
                                                     tag,
-                                                    usize::from_le_bytes(index.try_into().unwrap()),
+                                                    u64::from_le_bytes(index.try_into().unwrap()),
                                                 ));
                                                 iter.next();
                                             } else {
@@ -203,7 +208,7 @@ impl Plot {
 
                                             solutions.push((
                                                 tag,
-                                                usize::from_le_bytes(index.try_into().unwrap()),
+                                                u64::from_le_bytes(index.try_into().unwrap()),
                                             ));
                                             iter.next();
                                         }
@@ -215,7 +220,7 @@ impl Plot {
                                             if u64::from_be_bytes(tag) <= upper {
                                                 solutions.push((
                                                     tag,
-                                                    usize::from_le_bytes(index.try_into().unwrap()),
+                                                    u64::from_le_bytes(index.try_into().unwrap()),
                                                 ));
                                                 iter.next();
                                             } else {
@@ -244,6 +249,7 @@ impl Plot {
                         index,
                         nonce,
                         encoding,
+                        merkle_proof,
                         result_sender,
                     })) => {
                         // TODO: remove unwrap
@@ -267,10 +273,13 @@ impl Plot {
                                     move || {
                                         tags_db.put(&tag[0..8], index.to_le_bytes()).and_then(
                                             |_| {
-                                                map_db.put(
-                                                    index.to_le_bytes(),
-                                                    position.to_le_bytes(),
-                                                )
+                                                // TODO: may want to put version field of the plotting software here
+                                                let value = &[
+                                                    &position.to_le_bytes()[..],
+                                                    &merkle_proof[..],
+                                                ]
+                                                .concat();
+                                                map_db.put(index.to_le_bytes(), value)
                                             },
                                         )
                                     }
@@ -333,7 +342,7 @@ impl Plot {
     }
 
     /// Reads a piece from plot by index
-    pub async fn read(&self, index: usize) -> io::Result<Piece> {
+    pub async fn read(&self, index: u64) -> io::Result<(Piece, Vec<u8>)> {
         let (result_sender, result_receiver) = oneshot::channel();
 
         self.read_requests_sender
@@ -353,11 +362,7 @@ impl Plot {
             .expect("Read encoding result sender was dropped")
     }
 
-    pub async fn find_by_range(
-        &self,
-        target: [u8; 8],
-        range: u64,
-    ) -> io::Result<Vec<(Tag, usize)>> {
+    pub async fn find_by_range(&self, target: [u8; 8], range: u64) -> io::Result<Vec<(Tag, u64)>> {
         let (result_sender, result_receiver) = oneshot::channel();
 
         self.read_requests_sender
@@ -379,7 +384,13 @@ impl Plot {
     }
 
     /// Writes a piece to the plot by index, will overwrite if piece exists (updates)
-    pub async fn write(&self, encoding: Piece, nonce: u64, index: usize) -> io::Result<()> {
+    pub async fn write(
+        &self,
+        encoding: Piece,
+        nonce: u64,
+        index: u64,
+        merkle_proof: Vec<u8>,
+    ) -> io::Result<()> {
         let (result_sender, result_receiver) = oneshot::channel();
 
         self.write_requests_sender
@@ -389,6 +400,7 @@ impl Plot {
                 nonce,
                 index,
                 result_sender,
+                merkle_proof,
             })
             .await
             .expect("Failed sending write encoding request");
@@ -402,7 +414,7 @@ impl Plot {
     }
 
     /// Removes a piece from the plot by index, by deleting its index from the map
-    pub async fn remove(&self, index: usize) -> io::Result<()> {
+    pub async fn remove(&self, index: u64) -> io::Result<()> {
         let (result_sender, result_receiver) = oneshot::channel();
 
         self.write_requests_sender
@@ -480,14 +492,18 @@ mod tests {
         let piece = crypto::generate_random_piece();
         let nonce = rand::thread_rng().gen::<u64>();
         let index = 0;
+        let merkle_proof = vec![0u8; 256];
 
         let plot = Plot::open_or_create(&path).await.unwrap();
         assert_eq!(true, plot.is_empty().await);
-        plot.write(piece, nonce, index).await.unwrap();
+        plot.write(piece, nonce, index, merkle_proof.clone())
+            .await
+            .unwrap();
         assert_eq!(false, plot.is_empty().await);
-        let extracted_piece = plot.read(index).await.unwrap();
+        let (extracted_piece, extracted_merkle_proof) = plot.read(index).await.unwrap();
 
         assert_eq!(piece[..], extracted_piece[..]);
+        assert_eq!(merkle_proof, extracted_merkle_proof);
 
         drop(plot);
 
@@ -511,8 +527,9 @@ mod tests {
         let plot = Plot::open_or_create(&path).await.unwrap();
         for index in 0..1024 {
             let piece = crypto::generate_random_piece();
+            let merkle_proof = vec![0u8; 256];
             let nonce = rand::thread_rng().gen::<u64>();
-            plot.write(piece, nonce, index).await.unwrap();
+            plot.write(piece, nonce, index, merkle_proof).await.unwrap();
         }
 
         {

@@ -34,6 +34,19 @@ use std::{fmt, io, mem};
  * Handle errors as results
  *
 
+ RPC Methods
+
+    Network
+    1. method similar to reqeust_blocks (uncomment match error)
+    2. Add request message
+    3. Add a response message
+    4. Uncomment RequestError (BadResponse)
+
+    Manager
+    1. Add RequestMessage and Response
+    2. Call Request somewhere in code
+
+
 */
 
 const MAX_MESSAGE_CONTENTS_LENGTH: usize = 2usize.pow(16) - 1;

@@ -1,6 +1,6 @@
 use crate::manager::ProtocolMessage;
 use crate::plot::Plot;
-use crate::{Piece, Tag, PIECE_COUNT};
+use crate::{Piece, Tag};
 use async_std::sync::{Receiver, Sender};
 use log::*;
 use std::convert::TryInto;
@@ -34,7 +34,7 @@ impl Display for FarmerMessage {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct Solution {
     /// the epoch index for this block
     pub epoch_index: u64,
@@ -42,14 +42,14 @@ pub struct Solution {
     pub timeslot: u64,
     /// the randomness (from past epoch) for this block
     pub randomness: [u8; 32],
-    /// derived piece_index
+    /// index of the piece as it appears in the state
     pub piece_index: u64,
-    /// index for audits and merkle proof
-    pub proof_index: u64,
     /// tag for hmac(encoding||nonce) -> commitment
     pub tag: Tag,
     /// the full encoding
     pub encoding: Piece,
+    /// merkle proof that encoded piece is in the state chain
+    pub merkle_proof: Vec<u8>,
     /// Solution range for the eon block was generated at
     pub solution_range: u64,
     /// target for this challenge
@@ -78,16 +78,15 @@ pub async fn run(
                     let tags = plot.find_by_range(target, solution_range).await.unwrap();
                     let mut solutions: Vec<Solution> = Vec::with_capacity(tags.len());
                     for (tag, piece_index) in tags.into_iter() {
-                        let proof_index = piece_index % PIECE_COUNT;
-                        let encoding = plot.read(piece_index).await.unwrap();
+                        let (encoding, merkle_proof) = plot.read(piece_index).await.unwrap();
                         solutions.push(Solution {
                             epoch_index,
                             timeslot,
                             randomness,
                             piece_index: piece_index as u64,
-                            proof_index: proof_index as u64,
                             tag,
                             encoding,
+                            merkle_proof,
                             solution_range,
                             target,
                         });

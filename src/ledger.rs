@@ -5,19 +5,17 @@ use crate::transaction::{
     AccountAddress, AccountState, CoinbaseTx, SimpleCreditTx, Transaction, TxId,
 };
 use crate::{
-    crypto, sloth, ContentId, ProofId, Tag, BLOCK_REWARD, CHALLENGE_LOOKBACK_EPOCHS,
-    CONFIRMATION_DEPTH, EXPECTED_TIMESLOTS_PER_EON, GENESIS_OFFSET, INITIAL_SOLUTION_RANGE,
-    MAX_EARLY_TIMESLOTS, MAX_LATE_TIMESLOTS, PRIME_SIZE_BITS, PROPOSER_BLOCKS_PER_EON,
-    SOLUTION_RANGE_UPDATE_DELAY_IN_TIMESLOTS, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
-    TX_BLOCKS_PER_PROPOSER_BLOCK,
+    crypto, sloth, state, ContentId, ProofId, BLOCK_REWARD, CONFIRMATION_DEPTH,
+    ENCODING_LAYERS_TEST, EXPECTED_TIMESLOTS_PER_EON, INITIAL_SOLUTION_RANGE, MAX_EARLY_TIMESLOTS,
+    MAX_LATE_TIMESLOTS, PRIME_SIZE_BITS, PROPOSER_BLOCKS_PER_EON,
+    SOLUTION_RANGE_UPDATE_DELAY_IN_TIMESLOTS, TIMESLOT_DURATION, TX_BLOCKS_PER_PROPOSER_BLOCK,
 };
 
 use crate::metablocks::{MetaBlock, MetaBlocks};
-use async_std::task::JoinHandle;
 use log::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /* TESTING
  * Piece count is always 256 for testing for the merkle tree
@@ -34,8 +32,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // each proposer block and state block is stored in blocks by timeslot
 // request at each timeslot and return all blocks for that slot
 // bundle any transactions with transaction blocks
-
-// add a notion of tx blocks
 
 pub type BlockHeight = u64;
 pub type Timeslot = u64;
@@ -117,53 +113,32 @@ pub struct Ledger {
     pub unknown_tx_block_ids: HashSet<ContentId>,
     /// tracker for tx blocks that have been applied to the ledger
     pub applied_tx_block_ids: HashSet<ContentId>,
+    pub state: state::State,
     pub epoch_tracker: EpochTracker,
     pub timer_is_running: bool,
     pub quality: u32,
     pub keys: ed25519_dalek::Keypair,
     pub sloth: sloth::Sloth,
     pub genesis_timestamp: u64,
-    pub genesis_piece_hash: [u8; 32],
-    pub merkle_root: Vec<u8>,
-    pub merkle_proofs: Vec<Vec<u8>>,
-    pub tx_payload: Vec<u8>,
+    pub genesis_challenge: [u8; 32],
     pub current_timeslot: u64,
-    timer_handle: Option<JoinHandle<()>>,
-}
-
-impl Drop for Ledger {
-    fn drop(&mut self) {
-        let timer_handle: JoinHandle<()> = self.timer_handle.take().unwrap();
-        async_std::task::spawn(async move {
-            timer_handle.cancel().await;
-        });
-    }
 }
 
 impl Ledger {
     pub fn new(
-        merkle_root: Vec<u8>,
-        genesis_piece_hash: [u8; 32],
         keys: ed25519_dalek::Keypair,
-        tx_payload: Vec<u8>,
-        merkle_proofs: Vec<Vec<u8>>,
         epoch_tracker: EpochTracker,
+        state: state::State,
     ) -> Ledger {
         // init sloth
         let prime_size = PRIME_SIZE_BITS;
         let sloth = sloth::Sloth::init(prime_size);
-
-        let timer_handle = async_std::task::spawn(async {
-            // TODO: listen on the channel
-            // listen for the next timeslot
-            // increment the timeslot count
-            // stage early blocks for that timeslot
-        });
+        let genesis_challenge = [0u8; 32];
 
         // TODO: all of these data structures need to be periodically truncated
         let mut ledger = Ledger {
             balances: HashMap::new(),
-            metablocks: MetaBlocks::new(),
+            metablocks: MetaBlocks::new(genesis_challenge),
             recent_proof_ids: HashSet::new(),
             proof_ids_by_timeslot: BTreeMap::new(),
             cached_proposer_blocks_by_parent_content_id: HashMap::new(),
@@ -182,18 +157,15 @@ impl Ledger {
             unknown_tx_block_ids: HashSet::new(),
             applied_tx_block_ids: HashSet::new(),
             genesis_timestamp: 0,
+            genesis_challenge,
             timer_is_running: false,
             quality: 0,
+            state,
             epoch_tracker,
-            merkle_root,
-            genesis_piece_hash,
             sloth,
             keys,
-            tx_payload,
-            merkle_proofs,
             current_timeslot: 0,
-            timer_handle: Some(timer_handle),
-            last_eon_close_timeslot: GENESIS_OFFSET,
+            last_eon_close_timeslot: 0,
         };
 
         ledger
@@ -213,8 +185,7 @@ impl Ledger {
             self.current_solution_range = self.solution_range_update.solution_range;
 
             // track the current eon_index
-            let eon_index = (self.solution_range_update.block_height - GENESIS_OFFSET)
-                / PROPOSER_BLOCKS_PER_EON;
+            let eon_index = self.solution_range_update.block_height / PROPOSER_BLOCKS_PER_EON;
             self.solution_ranges_by_eon
                 .insert(eon_index, self.current_solution_range);
         }
@@ -263,6 +234,8 @@ impl Ledger {
     pub fn get_txs_for_sync(&self, blocks: &Vec<Block>) -> Vec<SimpleCreditTx> {
         let mut txs: HashMap<ContentId, SimpleCreditTx> = HashMap::new();
 
+        // TODO: remove map, already have refs from blocks
+
         blocks
             .iter()
             .filter(|block| block.content.parent_id.is_none())
@@ -303,7 +276,12 @@ impl Ledger {
 
     /// returns the tip of the longest chain as seen by this node
     fn get_head(&self) -> ContentId {
-        self.heads[0].content_id
+        if self.heads.is_empty() {
+            // TODO: replace with genesis seed
+            self.genesis_challenge
+        } else {
+            self.heads[0].content_id
+        }
     }
 
     /// updates an existing branch, setting to head if longest, or creates a new branch
@@ -356,93 +334,6 @@ impl Ledger {
         self.heads.remove(remove_index);
     }
 
-    /// Start a new chain from genesis as a gateway node
-    // TODO: this should solve from some genesis state block
-    pub async fn init_from_genesis(&mut self) -> u64 {
-        self.genesis_timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_millis() as u64;
-
-        let mut timestamp = self.genesis_timestamp as u64;
-        let mut parent_id: ContentId = [0u8; 32];
-
-        for _ in 0..CHALLENGE_LOOKBACK_EPOCHS {
-            let current_epoch_index = self.epoch_tracker.advance_epoch().await;
-            info!(
-                "Advanced to epoch {} during genesis init",
-                current_epoch_index
-            );
-
-            for current_timeslot in (0..TIMESLOTS_PER_EPOCH)
-                .map(|timeslot_index| timeslot_index + current_epoch_index * TIMESLOTS_PER_EPOCH)
-            {
-                let proof = Proof {
-                    randomness: self.genesis_piece_hash,
-                    epoch: current_epoch_index,
-                    timeslot: current_timeslot,
-                    public_key: self.keys.public.to_bytes(),
-                    tag: Tag::default(),
-                    // TODO: Fix this
-                    nonce: u64::from_le_bytes(
-                        crypto::create_hmac(&[], b"subspace")[0..8]
-                            .try_into()
-                            .unwrap(),
-                    ),
-                    piece_index: 0,
-                    solution_range: self.current_solution_range,
-                };
-
-                let proof_id = proof.get_id();
-                let coinbase_tx = CoinbaseTx::new(BLOCK_REWARD, self.keys.public, proof_id);
-
-                let mut content = Content {
-                    parent_id: Some(parent_id),
-                    proof_id,
-                    proof_signature: self.keys.sign(&proof_id).to_bytes().to_vec(),
-                    timestamp,
-                    refs: vec![coinbase_tx.get_id()],
-                    signature: Vec::new(),
-                };
-
-                content.signature = self.keys.sign(&content.get_id()).to_bytes().to_vec();
-
-                let data = Data {
-                    encoding: Vec::new(),
-                    merkle_proof: Vec::new(),
-                };
-
-                let block = Block {
-                    proof,
-                    coinbase_tx,
-                    content,
-                    data: Some(data),
-                };
-
-                // prepare the block for application to the ledger
-                self.stage_proposer_block(&block).await;
-
-                parent_id = block.content.get_id();
-
-                debug!(
-                    "Applied a genesis block to ledger with content id {}",
-                    hex::encode(&parent_id[0..8])
-                );
-                let time_now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("Time went backwards")
-                    .as_millis();
-
-                timestamp += TIMESLOT_DURATION;
-
-                //TODO: this should wait for the correct time to arrive rather than waiting for a fixed amount of time
-                async_std::task::sleep(Duration::from_millis(timestamp - time_now as u64)).await;
-            }
-        }
-
-        self.genesis_timestamp
-    }
-
     /// create a new block locally from a valid farming solution
     pub async fn create_and_apply_local_block(
         &mut self,
@@ -464,10 +355,21 @@ impl Ledger {
             piece_index: solution.piece_index,
             solution_range: solution.solution_range,
         };
+
+        // TODO: either decode each time or store the piece id in plot
+        let id = crypto::digest_sha_256(&proof.public_key);
+        let expanded_iv = crypto::expand_iv(id);
+        let layers = ENCODING_LAYERS_TEST;
+        let mut decoding = solution.encoding.clone();
+        self.sloth.decode(&mut decoding, expanded_iv, layers);
+        let piece_id = crypto::digest_sha_256(&decoding);
+
         let data = Data {
             encoding: solution.encoding.to_vec(),
-            merkle_proof: crypto::get_merkle_proof(solution.proof_index, &self.merkle_proofs),
+            merkle_proof: solution.merkle_proof,
+            piece_hash: piece_id,
         };
+
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
@@ -479,7 +381,6 @@ impl Ledger {
         let mut refs = vec![coinbase_tx.get_id()];
 
         // sortition between proposer blocks and tx blocks
-
         let target = u64::from_be_bytes(solution.target);
         let tag = u64::from_be_bytes(solution.tag);
 
@@ -588,24 +489,13 @@ impl Ledger {
         // TODO: how to validate the genesis block, which has no lookback?
 
         // get correct randomness for this block
-        let epoch = self
+        let (epoch_randomness, slot_challenge) = self
             .epoch_tracker
-            .get_lookback_epoch(block.proof.epoch)
+            .get_slot_challenge(block.proof.epoch, block.proof.timeslot)
             .await;
 
-        if !epoch.is_closed {
-            // TODO: ensure this cannot be exploited to crash a node
-            panic!("Epoch being used for randomness is still open!");
-        }
-
         // check if the block is valid
-        if !block.is_valid(
-            &self.merkle_root,
-            &self.genesis_piece_hash,
-            &epoch.randomness,
-            &epoch.get_challenge_for_timeslot(block.proof.timeslot),
-            &self.sloth,
-        ) {
+        if !block.is_valid(&self.state, &epoch_randomness, &slot_challenge, &self.sloth) {
             // TODO: block list this peer
             return false;
         }
@@ -639,7 +529,9 @@ impl Ledger {
 
         // if not the genesis block, get parent
         // TODO: this will need to be adjusted once we are solving from genesis
-        if block.proof.timeslot > 0 && block.content.parent_id.is_some() {
+        if block.content.parent_id.is_some()
+            && block.content.parent_id.unwrap() != self.genesis_challenge
+        {
             // have we already received parent? else error
             if !self
                 .metablocks
@@ -667,11 +559,9 @@ impl Ledger {
             }
         }
 
-        if block.proof.timeslot >= (CHALLENGE_LOOKBACK_EPOCHS * TIMESLOTS_PER_EPOCH) {
-            // block is valid?
-            if !(self.validate_block(block).await) {
-                return false;
-            }
+        // block is valid?
+        if !(self.validate_block(block).await) {
+            return false;
         }
 
         true
@@ -736,7 +626,9 @@ impl Ledger {
         }
 
         // if a proposer block, validate parent
-        if block.content.parent_id.is_some() {
+        if block.content.parent_id.is_some()
+            && block.content.parent_id.unwrap() != self.genesis_challenge
+        {
             // If we are not aware of the blocks parent, cache and apply once parent is seen
             if !self
                 .metablocks
@@ -780,7 +672,9 @@ impl Ledger {
 
     /// Completes validation for a cached proposer block received via gossip whose parent has been staged
     pub async fn validate_block_from_cache(&mut self, block: &Block) -> bool {
-        if block.content.parent_id.is_some() {
+        if block.content.parent_id.is_some()
+            && block.content.parent_id.unwrap() != self.genesis_challenge
+        {
             // is parent from earlier timeslot?
             let parent_metablock = self.metablocks.get_metablock_from_content_id(
                 &block.content.parent_id.expect("Already checked above"),
@@ -812,7 +706,9 @@ impl Ledger {
         }
 
         // only for proposer blocks
-        if block.content.parent_id.is_some() {
+        if block.content.parent_id.is_some()
+            && block.content.parent_id.unwrap() != self.genesis_challenge
+        {
             // If we are not aware of the blocks parent, cache and apply once parent is seen
             if !self
                 .metablocks
@@ -887,8 +783,6 @@ impl Ledger {
 
         let proof_id = block.proof.get_id();
 
-        // TODO: make sure the branch will not be below the current confirmed block height
-
         // check if block received during sync is in cached gossip and remove
         if self
             .cached_proposer_blocks_by_parent_content_id
@@ -913,7 +807,17 @@ impl Ledger {
         }
 
         // update head of this branch
+        // TODO: make sure the branch will not be below the current confirmed block height
         self.update_heads(parent_content_id, metablock.content_id, metablock.height);
+
+        // add to epoch tracker
+        self.epoch_tracker
+            .add_block_to_epoch(
+                metablock.block.proof.epoch,
+                metablock.height,
+                metablock.proof_id,
+            )
+            .await;
 
         // confirm the k-deep parent
         let mut confirmation_depth = 0;
@@ -1021,9 +925,7 @@ impl Ledger {
         // TODO: do we need to account for the timeslot offset here?
         // TODO: this should be a separate function
         // update the solution range on Eon boundary
-        if proposer_metablock.height > GENESIS_OFFSET
-            && (proposer_metablock.height - GENESIS_OFFSET) % PROPOSER_BLOCKS_PER_EON == 0
-        {
+        if proposer_metablock.height % PROPOSER_BLOCKS_PER_EON == 0 {
             /* Hypothesize as to why expected and actual differ...
              * as plot size increases, variance does not appear to change
              * as timeslots_per_block increases, adjustment decreases
@@ -1172,90 +1074,97 @@ impl Ledger {
                     .or_insert(vec![tx_block.proof.get_id()]);
             });
 
-        tx_blocks_by_height
+        for tx_block_proof_id in tx_blocks_by_height
             .values()
             .flatten()
-            .for_each(|tx_block_proof_id| {
-                let tx_block = self
-                    .metablocks
-                    .get_metablock_from_proof_id(tx_block_proof_id)
-                    .block;
+            .collect::<Vec<&ContentId>>()
+            .iter()
+        {
+            let tx_block = self
+                .metablocks
+                .get_metablock_from_proof_id(tx_block_proof_id)
+                .block;
 
-                // validate and apply each tx
-                for tx_id in tx_block.content.refs.iter() {
-                   match self.txs.get(tx_id).expect("Already checked") {
-                       Transaction::Coinbase(tx) => {
-                           // create or update account state
-                           self.balances
-                               .entry(tx.to_address)
-                               .and_modify(|account_state| account_state.balance += BLOCK_REWARD)
-                               .or_insert(AccountState {
-                                   nonce: 0,
-                                   balance: BLOCK_REWARD,
-                               });
+            // validate and apply each tx
+            for tx_id in tx_block.content.refs.iter() {
+                match self.txs.get(tx_id).expect("Already checked") {
+                    Transaction::Coinbase(tx) => {
+                        // create or update account state
+                        self.balances
+                            .entry(tx.to_address)
+                            .and_modify(|account_state| account_state.balance += BLOCK_REWARD)
+                            .or_insert(AccountState {
+                                nonce: 0,
+                                balance: BLOCK_REWARD,
+                            });
 
-                           debug!("Applied a coinbase tx to balances");
-                       }
-                       Transaction::Credit(tx) => {
-                           // check if the tx has already been applied
-                           let tx_id = tx.get_id();
-                           if self.applied_tx_ids.contains(&tx_id) {
-                               warn!(
-                                   "Transaction has already been referenced by a previous block, skipping"
-                               );
-                               continue;
-                           }
+                        self.state.add_data(tx.to_bytes()).await;
 
-                           // ensure the tx is still valid
-                           let sender_account_state = self
-                               .balances
-                               .get(&tx.from_address)
-                               .expect("Existence of account state has already been validated");
+                        debug!("Applied a coinbase tx to balances");
+                    }
+                    Transaction::Credit(tx) => {
+                        // check if the tx has already been applied
+                        let tx_id = tx.get_id();
+                        if self.applied_tx_ids.contains(&tx_id) {
+                            warn!(
+                                "Transaction has already been referenced by a previous block, skipping"
+                            );
+                            continue;
+                        }
 
-                           if sender_account_state.balance < tx.amount {
-                               error!("Invalid transaction, from account state has insufficient funds, transaction will not be applied");
-                               continue;
-                           }
+                        // ensure the tx is still valid
+                        let sender_account_state = self
+                            .balances
+                            .get(&tx.from_address)
+                            .expect("Existence of account state has already been validated");
 
-                           if sender_account_state.nonce >= tx.nonce {
-                               error!("Invalid transaction, tx nonce has already been used, transaction will not be applied");
-                               continue;
-                           }
+                        if sender_account_state.balance < tx.amount {
+                            error!("Invalid transaction, from account state has insufficient funds, transaction will not be applied");
+                            continue;
+                        }
 
-                           // debit the sender
-                           self.balances
-                               .entry(tx.from_address)
-                               .and_modify(|account_state| account_state.balance -= tx.amount);
+                        if sender_account_state.nonce >= tx.nonce {
+                            error!("Invalid transaction, tx nonce has already been used, transaction will not be applied");
+                            continue;
+                        }
 
-                           // credit  the receiver
-                           self.balances
-                               .entry(tx.to_address)
-                               .and_modify(|account_state| account_state.balance += tx.amount)
-                               .or_insert(AccountState {
-                                   nonce: 0,
-                                   balance: tx.amount,
-                               });
+                        // debit the sender
+                        self.balances
+                            .entry(tx.from_address)
+                            .and_modify(|account_state| account_state.balance -= tx.amount);
 
-                           // TODO: pay tx fee to farmer
-                       }
-                   }
+                        // credit  the receiver
+                        self.balances
+                            .entry(tx.to_address)
+                            .and_modify(|account_state| account_state.balance += tx.amount)
+                            .or_insert(AccountState {
+                                nonce: 0,
+                                balance: tx.amount,
+                            });
 
-                    // TODO: add tx to state buffer
+                        // TODO: pay tx fee to farmer
+                        self.state.add_data(tx.to_bytes()).await;
 
-                    // TODO: what do we do with invalid txs?
-                    // normally we would just include them but not apply them
-                    // then someone could upload a storage tx for free
-                    // if we don't include the content we could deal with that
-
-                    // track each applied tx
-                    self.applied_tx_ids.insert(*tx_id);
+                        // TODO: don't store the content if the tx is invalid
+                    }
                 }
 
-                // TODO: add each tx block header to state buffer
+                // TODO: what do we do with invalid txs?
+                // normally we would just include them but not apply them
+                // then someone could upload a storage tx for free
+                // if we don't include the content we could deal with that
 
-                // track each applied tx block
-                self.applied_tx_block_ids.insert(tx_block.content.get_id());
-            });
+                // track each applied tx
+                self.applied_tx_ids.insert(*tx_id);
+            }
+
+            // add tx block proof and content to state
+            self.state.add_data(tx_block.proof.to_bytes()).await;
+            self.state.add_data(tx_block.content.to_bytes()).await;
+
+            // track each applied tx block
+            self.applied_tx_block_ids.insert(tx_block.content.get_id());
+        }
 
         // add in the proposer block coinbase tx
         match self
@@ -1273,29 +1182,26 @@ impl Ledger {
                     });
 
                 self.applied_tx_ids.insert(tx.get_id());
-                // TODO: add to state
+                self.state.add_data(tx.to_bytes()).await;
             }
             Transaction::Credit(_) => {
                 error!("First ref in proposer block must be a coinbase tx");
             }
         }
 
-        // TODO: add proposer block header to state buffer
+        // add proposer block proof and content to state
+        self.state
+            .add_data(proposer_metablock.block.proof.to_bytes())
+            .await;
+        self.state
+            .add_data(proposer_metablock.block.content.to_bytes())
+            .await;
 
         self.confirmed_blocks.insert(proposer_metablock.proof_id);
 
-        // add to epoch tracker
-        self.epoch_tracker
-            .add_block_to_epoch(
-                proposer_metablock.block.proof.epoch,
-                proposer_metablock.height,
-                proposer_metablock.proof_id,
-            )
-            .await;
-
         // prune any siblings of this block
         if proposer_metablock.height > 0 {
-            let siblings = self
+            let mut siblings = self
                 .metablocks
                 .get_metablock_from_content_id(
                     &proposer_metablock
@@ -1309,7 +1215,10 @@ impl Ledger {
                 .collect();
 
             self.prune_blocks_recursive(siblings);
+            loop {}
         }
+
+        // TODO: perhaps use a single loop to add state
 
         // TODO: update chain quality
 
@@ -1317,9 +1226,18 @@ impl Ledger {
     }
 
     /// Recursively removes all siblings and their descendants when a new block is confirmed
-    fn prune_blocks_recursive(&mut self, proof_ids: Vec<ProofId>) {
+    async fn prune_blocks_recursive(&mut self, proof_ids: Vec<ProofId>) {
         for child_proof_id in proof_ids.iter() {
             let metablock = self.metablocks.remove(child_proof_id);
+
+            // remove from epoch tracker
+            self.epoch_tracker
+                .remove_block_from_epoch(
+                    metablock.block.proof.epoch,
+                    metablock.height,
+                    metablock.proof_id,
+                )
+                .await;
 
             // remove from blocks by timeslot
             self.proof_ids_by_timeslot

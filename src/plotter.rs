@@ -1,6 +1,7 @@
 use crate::plot::Plot;
+use crate::state::PieceBundle;
 use crate::{
-    crypto, sloth, utils, NodeID, Piece, CONSOLE, ENCODING_LAYERS_TEST, PIECE_SIZE, PLOT_SIZE,
+    crypto, sloth, NodeID, Piece, CONSOLE, ENCODING_LAYERS_TEST, PIECE_SIZE, PLOT_SIZE,
     PRIME_SIZE_BITS,
 };
 use async_std::path::PathBuf;
@@ -25,7 +26,7 @@ use std::time::Instant;
  *
 */
 
-pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot {
+pub async fn plot(path: PathBuf, node_id: NodeID, piece_bundles: Vec<PieceBundle>) -> Plot {
     // init plot
     let plot = Plot::open_or_create(&path).await.unwrap();
 
@@ -36,7 +37,6 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
             move || {
                 let expanded_iv = crypto::expand_iv(node_id);
                 let integer_expanded_iv = Integer::from_digits(&expanded_iv, Order::Lsf);
-                let piece = genesis_piece;
 
                 // init sloth
                 let sloth = sloth::Sloth::init(PRIME_SIZE_BITS);
@@ -46,16 +46,37 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
                     bar = Some(ProgressBar::new(PLOT_SIZE as u64))
                 };
 
+                /*
+                   Plot File -> all encodings
+                   Map DB -> (K: index, V: position)
+                   Tags DB -> (K: tag_prefix, V: index)
+
+                   FindByRange(target, range) -> Vec<Tag, index>
+                   Read(index) -> Encoding
+                   Write(encoding, nonce, index) -> Result()
+                   Remove(index) -> Result()
+
+                   Current Setup
+                   1. Single genesis piece
+                   2. Single set of merkle proofs from 0 to 255
+                   3. Index is used as IV to create different encodings for same node id and same piece
+                   4. The index and encoding are stored on disk
+                   5. The index and encoding are sent over the network
+                   6. To verify, compute merkle proof from index, decode with index to ensure it comes back to genesis piece
+
+                   New Setup
+                   1. Single genesis state block (256 pieces), many more later
+                   2. Index of the piece as it appears in the state is still used as IV (same IV for any node id / piece)
+                   3. Each piece is stored under both its index and piece id
+                   4. Merkle Proofs are also stored with encodings (writes should now accept merkle proofs)
+                   5.
+
+                */
+
                 // plot pieces in parallel on all cores, using IV as a source of randomness
                 // this is just for efficient testing atm
-                (0..PLOT_SIZE).into_par_iter().for_each(|index| {
-                    let mut piece = piece;
-
-                    // xor first 16 bytes of piece with the index to get a unique piece for each iteration
-                    let index_bytes = utils::usize_to_bytes(index);
-                    for i in 0..16 {
-                        piece[i] ^= index_bytes[i];
-                    }
+                piece_bundles.into_par_iter().for_each(|piece_bundle| {
+                    let mut piece = piece_bundle.piece;
 
                     sloth
                         .encode(&mut piece, &integer_expanded_iv, ENCODING_LAYERS_TEST)
@@ -72,7 +93,18 @@ pub async fn plot(path: PathBuf, node_id: NodeID, genesis_piece: Piece) -> Plot 
                         let plot = plot.clone();
 
                         async move {
-                            let _ = plot.write(piece, nonce, index).await;
+                            let result = plot
+                                .write(
+                                    piece,
+                                    nonce,
+                                    piece_bundle.piece_index,
+                                    piece_bundle.piece_proof,
+                                )
+                                .await;
+
+                            if let Err(error) = result {
+                                warn!("{}", error);
+                            }
                         }
                     });
                     if let Some(b) = &bar {

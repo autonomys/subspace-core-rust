@@ -12,10 +12,11 @@ use subspace_core_rust::farmer::FarmerMessage;
 use subspace_core_rust::ledger::Ledger;
 use subspace_core_rust::manager::ProtocolMessage;
 use subspace_core_rust::network::{Network, NodeType};
+use subspace_core_rust::plot::Plot;
 use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::{
-    console, crypto, farmer, manager, plotter, rpc, CONSOLE, DEV_GATEWAY_ADDR,
+    console, farmer, manager, plotter, rpc, state, CONSOLE, DEV_GATEWAY_ADDR,
     MAINTAIN_PEERS_INTERVAL, MAX_CONNECTED_PEERS, MAX_PEERS, MIN_CONNECTED_PEERS, MIN_PEERS,
 };
 use tui_logger::{init_logger, set_default_level};
@@ -24,28 +25,27 @@ use tui_logger::{init_logger, set_default_level};
 
  Next Steps
 
-   - Encode state
-   - Create the state chain
-   - Solve from genesis state
-   - Sync the state chain
-
+   - complete state encoding workflow
+   - improve console UX
    - finish p2p network impl
    - add remaining RPC messages
 
-   - Add nonce to tag computation
+   - Compute and enforce cost of storage
    - Storage accounts
    - Switch to Schnorr signatures
    - Improve tx script support
+   - Add nonce to tag computation
 
  Fixes
 
    - recover from missed gossip (else diverges) -> request blocks by parent_id
    - complete fine tuning parameters
    - initial tx validation is too strict (requires k-deep confirmation)
+   - recover from deep forks at network partitions
+   - derive randomness from the block with the most confirmations (not earliest)
 
  Security
 
-   - Ensure that block and tx signatures are not malleable
    - Ensure that an attacker cannot crash a node by intentionally creating a panic condition
    - No way to malleate on the difficulty target
 
@@ -65,7 +65,7 @@ async fn main() {
      */
 
     // create an async channel for console
-    let (state_sender, state_receiver) = unbounded::<AppState>();
+    let (app_state_sender, app_state_receiver) = unbounded::<AppState>();
 
     if CONSOLE {
         // setup the logger
@@ -75,20 +75,20 @@ async fn main() {
         // spawn a new thread to run the node else it will block the console
         thread::spawn(move || {
             task::spawn(async move {
-                run(state_sender).await;
+                run(app_state_sender).await;
             });
         });
 
         // run the console app in the foreground, passing the receiver
-        console::run(state_receiver).unwrap();
+        console::run(app_state_receiver).unwrap();
     } else {
         // TODO: fix default log level and occasionally print state to the console
         env_logger::init();
-        run(state_sender).await;
+        run(app_state_sender).await;
     }
 }
 
-pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
+pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
     let node_addr = "127.0.0.1:0".parse().unwrap();
     let node_type = env::args()
         .skip(1)
@@ -122,32 +122,15 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     );
 
     let wallet = Wallet::open_or_create(&path).expect("Failed to init wallet");
-    // derive node identity
     let keys = wallet.keypair;
     let node_id = wallet.node_id;
 
-    // derive genesis piece
-    let genesis_piece = crypto::genesis_piece_from_seed("SUBSPACE");
-    let genesis_piece_hash = crypto::digest_sha_256(&genesis_piece);
-
     // create the randomness tracker
     let epoch_tracker = if node_type == NodeType::Gateway {
-        EpochTracker::new_genesis()
+        EpochTracker::new_genesis().await
     } else {
         EpochTracker::new()
     };
-
-    // create the ledger
-    let (merkle_proofs, merkle_root) = crypto::build_merkle_tree();
-    let tx_payload = crypto::generate_random_piece().to_vec();
-    let ledger = Ledger::new(
-        merkle_root,
-        genesis_piece_hash,
-        keys,
-        tx_payload,
-        merkle_proofs,
-        epoch_tracker.clone(),
-    );
 
     let is_farming = matches!(node_type, NodeType::Gateway | NodeType::Farmer);
 
@@ -155,7 +138,31 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
     let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(32);
     let (timer_to_farmer_tx, timer_to_farmer_rx) = channel::<FarmerMessage>(32);
     let solver_to_main_tx = any_to_main_tx.clone();
+    let state_to_plotter_tx = any_to_main_tx.clone();
 
+    // create the state
+    let mut state = state::State::new(state_to_plotter_tx);
+
+    // optionally create the plot
+    let plot_option: Option<Plot> = match node_type {
+        NodeType::Gateway => {
+            // create the genesis state
+            let state_bundle = state.create_genesis_state("SUBSPACE", 256).await.unwrap();
+
+            // create the plot from genesis state
+            Some(plotter::plot(path.into(), node_id, state_bundle.piece_bundles).await)
+        }
+        NodeType::Farmer => {
+            // TODO: create an empty plot and send to manager
+            None
+        }
+        _ => None,
+    };
+
+    // create the ledger
+    let ledger = Ledger::new(keys, epoch_tracker.clone(), state);
+
+    // create the network
     let network_fut = Network::new(
         node_id,
         if node_type == NodeType::Gateway {
@@ -170,6 +177,8 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         MAINTAIN_PEERS_INTERVAL,
     );
     let network = network_fut.await.unwrap();
+
+    // initiate outbound netowrk connections
     if node_type != NodeType::Gateway {
         info!("Connecting to gateway node");
 
@@ -186,36 +195,33 @@ pub async fn run(state_sender: crossbeam_channel::Sender<AppState>) {
         }
     }
 
-    // manager loop
-    let main = manager::run(
-        node_type,
-        genesis_piece_hash,
-        ledger,
-        any_to_main_rx,
-        network.clone(),
-        state_sender,
-        timer_to_farmer_tx,
-        epoch_tracker,
-    );
-
+    // optionally create the RPC server
     let mut rpc_server = None;
     if std::env::var("RUN_WS_RPC")
         .map(|value| value == "1".to_string())
         .unwrap_or_default()
     {
-        rpc_server = Some(rpc::run(node_id, network));
+        rpc_server = Some(rpc::run(node_id, network.clone()));
     }
 
-    if is_farming {
-        // plot, slow...
-        let plot = plotter::plot(path.into(), node_id, genesis_piece).await;
-        // start solve loop
-        let farmer = farmer::run(timer_to_farmer_rx, solver_to_main_tx, &plot);
+    // create the manager
+    let manager = manager::run(
+        node_type,
+        ledger,
+        any_to_main_rx,
+        network,
+        app_state_sender,
+        timer_to_farmer_tx,
+        epoch_tracker,
+        plot_option.clone(),
+    );
 
-        join!(main, farmer);
+    if is_farming {
+        let plot = plot_option.unwrap();
+        let farmer = farmer::run(timer_to_farmer_rx, solver_to_main_tx, &plot);
+        join!(manager, farmer);
     } else {
-        // listen and farm
-        join!(main);
+        join!(manager);
     }
 
     // RPC server will stop when this is dropped

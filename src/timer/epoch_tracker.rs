@@ -1,5 +1,5 @@
 use crate::timer::Epoch;
-use crate::{ProofId, CHALLENGE_LOOKBACK_EPOCHS, EPOCH_CLOSE_WAIT_TIME};
+use crate::{crypto, ProofId, CHALLENGE_LOOKBACK_EPOCHS, EPOCH_CLOSE_WAIT_TIME};
 use async_std::sync::Mutex;
 use log::*;
 use std::collections::HashMap;
@@ -10,6 +10,21 @@ struct Inner {
     current_epoch: u64,
     epochs: HashMap<u64, Epoch>,
 }
+
+/*
+   Start with a short seed and genesis time
+   From the seed
+    We first derive the genesis state and plot
+    Then we derive the genesis epoch challenge and slot challenges
+
+   At any point we should be able to know time from epoch or timeslot index
+   We only need to store the randomness, blocks_at_height, and if_closed in the epoch.
+   Challenges can be derived from the randomness on demand
+
+   If get lookback is called on epoch 0 then we return the genesis epoch challenge
+
+
+*/
 
 impl Inner {
     fn advance_epoch(&mut self) -> u64 {
@@ -53,20 +68,22 @@ impl EpochTracker {
         }
     }
 
-    // TODO: does new and new_genesis still need to be seperate?
-    pub fn new_genesis() -> Self {
+    pub async fn new_genesis() -> Self {
         let inner = Inner::default();
 
-        Self {
+        let tracker = Self {
             inner: Arc::new(Mutex::new(inner)),
-        }
+        };
+
+        tracker.advance_epoch().await;
+        tracker
     }
 
     pub(super) async fn get_current_epoch(&self) -> u64 {
         self.inner.lock().await.current_epoch
     }
 
-    pub async fn get_epoch(&self, epoch_index: u64) -> Epoch {
+    async fn get_epoch(&self, epoch_index: u64) -> Epoch {
         self.inner
             .lock()
             .await
@@ -76,9 +93,35 @@ impl EpochTracker {
             .clone()
     }
 
-    pub async fn get_lookback_epoch(&self, epoch_index: u64) -> Epoch {
-        self.get_epoch(epoch_index - CHALLENGE_LOOKBACK_EPOCHS)
-            .await
+    pub async fn get_slot_challenge(
+        &self,
+        epoch_index: u64,
+        timeslot: u64,
+    ) -> ([u8; 32], [u8; 32]) {
+        let randomness: [u8; 32] = if epoch_index == 0 {
+            // return the genesis randomness
+            // TODO: make this work off the seed
+            [0u8; 32]
+        } else {
+            // get the randomness from the previous closed epoch
+            let lookback_epoch = self
+                .get_epoch(epoch_index - CHALLENGE_LOOKBACK_EPOCHS)
+                .await;
+
+            // TODO: this can cause panic if clocks are even slightly out of sync
+            if !lookback_epoch.is_closed {
+                panic!(
+                    "Epoch {} being used for randomness is still open!",
+                    epoch_index - CHALLENGE_LOOKBACK_EPOCHS
+                );
+            }
+
+            lookback_epoch.randomness
+        };
+
+        let slot_challenge =
+            crypto::digest_sha_256(&[&randomness[..], &timeslot.to_le_bytes()[..]].concat());
+        (randomness, slot_challenge)
     }
 
     /// Move to the next epoch
@@ -90,16 +133,27 @@ impl EpochTracker {
 
     /// Returns `true` in case no blocks for this timeslot existed before
     pub async fn add_block_to_epoch(&self, epoch_index: u64, block_height: u64, proof_id: ProofId) {
-        let mut inner = self.inner.lock().await;
-
-        if inner.epochs.is_empty() {
-            inner.advance_epoch();
-        }
-
-        inner
+        self.inner
+            .lock()
+            .await
             .epochs
             .get_mut(&epoch_index)
             .unwrap()
             .add_block_at_height(block_height, proof_id);
+    }
+
+    pub async fn remove_block_from_epoch(
+        &self,
+        epoch_index: u64,
+        block_height: u64,
+        proof_id: ProofId,
+    ) {
+        self.inner
+            .lock()
+            .await
+            .epochs
+            .get_mut(&epoch_index)
+            .unwrap()
+            .remove_block_at_height(block_height, proof_id);
     }
 }
