@@ -1,8 +1,8 @@
 use crate::manager::ProtocolMessage;
 use crate::{crypto, Piece, PIECES_PER_STATE_BLOCK, PIECE_SIZE, STATE_BLOCK_SIZE_IN_BYTES};
-use async_std::sync::{channel, Sender};
+use async_std::sync::Sender;
 use itertools::izip;
-use log::warn;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::convert::TryInto;
@@ -11,16 +11,13 @@ use std::convert::TryInto;
 
     IMMEDIATE
 
-    - extend plot for each new state block -> refactor plotter into plot function?
+    - refactor plot to work of the same method for startup and subsequent plotting
+    - Sync the state chain
+    - Sync archival state from state chain
 
-
-   - Sync the state chain
-   - get genesis challenge and timestamp
-   - Sync archival state from state chain
-
-   - Add index pieces to state
-   - Add erasure coding to state
-   - Add remaining fields to state block
+    - Add index pieces to state
+    - Add erasure coding to state
+    - Add remaining fields to state block
 
 
    LATER
@@ -53,6 +50,7 @@ pub struct NetworkPieceBundleById {
 
 #[derive(PartialEq, Debug, Clone)]
 pub struct StateBundle {
+    pub state_block: StateBlock,
     pub merkle_root: MerkleRoot,
     pub piece_bundles: Vec<PieceBundle>,
 }
@@ -100,7 +98,7 @@ impl State {
             blocks_by_id: HashMap::new(),
             blocks_by_height: BTreeMap::new(),
             last_state_block_id: StateBlockId::default(),
-            last_state_block_height: BlockHeight::default(),
+            last_state_block_height: 0,
             state_sender,
         }
     }
@@ -110,22 +108,28 @@ impl State {
         &mut self,
         seed: &str,
         piece_count: usize,
-    ) -> Option<StateBundle> {
+    ) -> Vec<PieceBundle> {
         if piece_count % PIECES_PER_STATE_BLOCK != 0 {
             panic!("Genesis piece set must always create an exact number of state blocks")
         }
 
         let mut input = seed.as_bytes().to_vec();
-        let mut state_bundle_option: Option<StateBundle> = None;
+        let mut piece_bundles: Vec<PieceBundle> = Vec::new();
 
         for _ in 0..piece_count {
             input = crypto::digest_sha_256_simple(&input[..]);
             let piece_seed = input[..].try_into().expect("32 bytes");
             let data = crypto::genesis_data_from_seed(piece_seed);
-            state_bundle_option = self.add_data(data).await;
+            match self.add_data(data).await {
+                Some(state_bundle) => state_bundle
+                    .piece_bundles
+                    .iter()
+                    .for_each(|piece_bundle| piece_bundles.push(piece_bundle.clone())),
+                None => {}
+            }
         }
 
-        state_bundle_option
+        piece_bundles
     }
 
     /// Apply length prefixed state to buffer, encode state when buffer is full.
@@ -217,13 +221,14 @@ impl State {
         self.save_state_block(&state_block);
 
         StateBundle {
+            state_block: state_block.clone(),
             merkle_root,
             piece_bundles,
         }
     }
 
     /// Save the state block and append to the state chain
-    fn save_state_block(&mut self, state_block: &StateBlock) {
+    pub fn save_state_block(&mut self, state_block: &StateBlock) {
         let state_block_id = state_block.get_id();
         self.blocks_by_id
             .insert(state_block_id, state_block.clone());
@@ -235,6 +240,8 @@ impl State {
         // TODO: ensure we don't increment by more than one
 
         self.last_state_block_id = state_block_id;
+
+        info!("Added state block with height: {}", state_block.height);
     }
 
     pub fn get_state_block_by_height(&self, height: BlockHeight) -> Option<&StateBlock> {
@@ -259,6 +266,7 @@ impl State {
 mod tests {
     use super::*;
     use crate::crypto::digest_sha_256_simple;
+    use async_std::sync::channel;
     use merkle_tree_binary::Tree;
 
     #[async_std::test]
@@ -306,6 +314,12 @@ mod tests {
         let state_block_from_height_map = state
             .get_state_block_by_height(state_block.height)
             .expect("Was just added");
+
+        // do they match
+        assert_eq!(
+            state_block_from_id_map.get_id(),
+            state_block_from_height_map.get_id()
+        );
 
         // is the last state block id correct?
         assert_eq!(state.last_state_block_id, state_block_id);
@@ -362,7 +376,7 @@ mod tests {
         let (tx, _) = channel::<ProtocolMessage>(32);
         let mut state = State::new(tx);
         let piece_count = 256;
-        let state_bundle = state.create_genesis_state("SUBSPACE", piece_count).await;
+        let piece_bundles = state.create_genesis_state("SUBSPACE", piece_count).await;
 
         // ensure the correct number of state blocks were created
         assert_eq!(
@@ -374,7 +388,7 @@ mod tests {
         assert_eq!(state.pending_state.len(), 0);
 
         // did we get the state bundle for plotting?
-        assert!(state_bundle.is_some());
+        assert!(piece_bundles.len() > 0);
 
         // ensure we can get the first state block
         state.get_state_block_by_height(0);

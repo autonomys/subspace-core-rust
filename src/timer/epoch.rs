@@ -1,4 +1,3 @@
-use crate::ledger::BlockHeight;
 use crate::EpochChallenge;
 use crate::{crypto, ProofId};
 use log::*;
@@ -14,7 +13,6 @@ pub struct Epoch {
     pub branches: Vec<Vec<ProofId>>,
 }
 
-// TODO: Make into an enum for a cleaner implementation, separate into active and closed epoch
 impl Epoch {
     pub(super) fn new(index: u64) -> Epoch {
         let initial_randomness = crypto::digest_sha_256(&index.to_le_bytes());
@@ -55,10 +53,10 @@ impl Epoch {
                     return;
                 }
             }
-
-            // edge case 2, parent not found, creates a new branch
-            self.branches.push(vec![new_proof_id]);
         }
+
+        // edge case 2, parent not found, creates a new branch
+        self.branches.push(vec![new_proof_id]);
     }
 
     /// Close the epoch and derive randomness from the proof with most confirmations
@@ -89,7 +87,7 @@ impl Epoch {
                         if self.branches[*branch_index].first().expect("Has a proof")
                             != first_proof_id
                         {
-                            panic!("Epoch cannot be closed due to a deep fork");
+                            error!("Epoch cannot be  properly closed due to a deep fork");
                         }
                     }
                     first_proof_id.clone()

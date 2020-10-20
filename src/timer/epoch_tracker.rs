@@ -11,21 +11,6 @@ struct Inner {
     epochs: HashMap<u64, Epoch>,
 }
 
-/*
-   Start with a short seed and genesis time
-   From the seed
-    We first derive the genesis state and plot
-    Then we derive the genesis epoch challenge and slot challenges
-
-   At any point we should be able to know time from epoch or timeslot index
-   We only need to store the randomness, blocks_at_height, and if_closed in the epoch.
-   Challenges can be derived from the randomness on demand
-
-   If get lookback is called on epoch 0 then we return the genesis epoch challenge
-
-
-*/
-
 impl Inner {
     fn advance_epoch(&mut self) -> u64 {
         if self.epochs.is_empty() {

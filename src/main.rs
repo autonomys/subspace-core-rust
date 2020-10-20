@@ -17,7 +17,8 @@ use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::{
     console, farmer, manager, network, plotter, rpc, state, BLOCK_LIST_SIZE, CONSOLE,
-    DEV_GATEWAY_ADDR, MAINTAIN_PEERS_INTERVAL, MAX_CONTACTS, MAX_PEERS, MIN_CONTACTS, MIN_PEERS,
+    DEV_GATEWAY_ADDR, GENESIS_PIECE_COUNT, MAINTAIN_PEERS_INTERVAL, MAX_CONTACTS, MAX_PEERS,
+    MIN_CONTACTS, MIN_PEERS,
 };
 use tui_logger::{init_logger, set_default_level};
 
@@ -27,6 +28,7 @@ use tui_logger::{init_logger, set_default_level};
 
    - complete state encoding workflow
    - improve console UX
+   - test transaction throughput
    - finish p2p network impl (Nazar)
 
    - Compute and enforce cost of storage
@@ -37,7 +39,7 @@ use tui_logger::{init_logger, set_default_level};
 
  Fixes
 
-   - recover from missed gossip (else diverges) -> request blocks by parent_id
+   - request block by content_id once if unknown parent on missed gossip
    - complete fine tuning parameters
    - initial tx validation is too strict (requires k-deep confirmation)
    - recover from deep forks at network partitions
@@ -119,6 +121,7 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
         node_type, path
     );
 
+    // create or open wallet
     let wallet = Wallet::open_or_create(&path).expect("Failed to init wallet");
     let keys = wallet.keypair;
     let node_id = wallet.node_id;
@@ -130,10 +133,8 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
         EpochTracker::new()
     };
 
-    let is_farming = matches!(node_type, NodeType::Gateway | NodeType::Farmer);
-
     // create channels between background tasks
-    let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(32);
+    let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(128);
     let (timer_to_farmer_tx, timer_to_farmer_rx) = channel::<FarmerMessage>(32);
     let solver_to_main_tx = any_to_main_tx.clone();
     let state_to_plotter_tx = any_to_main_tx.clone();
@@ -141,26 +142,30 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
     // create the state
     let mut state = state::State::new(state_to_plotter_tx);
 
-    // optionally create the plot
+    // create the plot
     let plot: Plot = match node_type {
         NodeType::Gateway => {
             // create the genesis state
-            let state_bundle = state.create_genesis_state("SUBSPACE", 256).await.unwrap();
+            let state_bundle = state
+                .create_genesis_state("SUBSPACE", GENESIS_PIECE_COUNT)
+                .await;
 
             // create the plot from genesis state
-            plotter::plot(path.into(), node_id, state_bundle.piece_bundles).await
+            plotter::plot(path.into(), node_id, state_bundle).await
         }
         _ => {
-            // TODO: create an empty plot and send to manager
+            // create an empty plot
             plotter::plot(path.into(), node_id, vec![]).await
         }
     };
+
+    // create the farming loop
+    let farmer = farmer::run(timer_to_farmer_rx, solver_to_main_tx, &plot);
 
     // create the ledger
     let ledger = Ledger::new(keys, epoch_tracker.clone(), state);
 
     // create the network
-
     let startup_network_fut = StartupNetwork::new(
         node_id,
         if node_type == NodeType::Gateway {
@@ -177,7 +182,7 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
         network::create_backoff,
     );
 
-    // initiate outbound netowrk connections
+    // initiate outbound network connections
     let startup_network = startup_network_fut.await.unwrap();
     if node_type != NodeType::Gateway {
         info!("Connecting to gateway node");
@@ -225,6 +230,7 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
     // create the manager
     let manager = manager::run(
         node_type,
+        node_id,
         ledger,
         any_to_main_rx,
         network,
@@ -234,12 +240,7 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
         plot.clone(),
     );
 
-    if is_farming {
-        let farmer = farmer::run(timer_to_farmer_rx, solver_to_main_tx, &plot);
-        futures::join!(manager, farmer);
-    } else {
-        futures::join!(manager);
-    }
+    futures::join!(manager, farmer);
 
     // RPC server will stop when this is dropped
     drop(rpc_server);

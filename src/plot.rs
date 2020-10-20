@@ -1,5 +1,8 @@
-use crate::state::NetworkPieceBundleByIndex;
-use crate::{crypto, Piece, PieceIndex, Tag, PIECE_SIZE};
+use crate::state::{NetworkPieceBundleByIndex, PieceBundle};
+use crate::{
+    crypto, sloth, NodeID, Piece, PieceId, PieceIndex, Tag, ENCODING_LAYERS_TEST, PIECE_SIZE,
+    PRIME_SIZE_BITS,
+};
 use async_std::fs::OpenOptions;
 use async_std::path::PathBuf;
 use async_std::task;
@@ -11,6 +14,8 @@ use futures::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SinkExt, StreamExt};
 use log::*;
 use rocksdb::IteratorMode;
 use rocksdb::DB;
+use rug::integer::Order;
+use rug::Integer;
 use std::convert::TryInto;
 use std::io;
 use std::io::SeekFrom;
@@ -274,7 +279,7 @@ impl Plot {
 
                         let _ = result_sender.send(
                             try {
-                                let position = plot_file.seek(SeekFrom::Current(0)).await?;
+                                let position = plot_file.seek(SeekFrom::End(0)).await?;
                                 plot_file.write_all(&encoding).await?;
 
                                 // TODO: remove unwrap
@@ -387,7 +392,7 @@ impl Plot {
         }
     }
 
-    pub async fn get_piece_bundle_by_id(&self, index: PieceIndex) {
+    pub async fn _get_piece_bundle_by_id(&self, _id: PieceId) {
         // get index from id -- needs a new table
         // then call get piece_bundle_from_index
         // needs to include the index
@@ -442,6 +447,50 @@ impl Plot {
         result_receiver
             .await
             .expect("Write encoding result sender was dropped")
+    }
+
+    pub async fn plot_pieces(&self, node_id: NodeID, piece_bundles: Vec<PieceBundle>) {
+        let expanded_iv = crypto::expand_iv(node_id);
+        let integer_expanded_iv = Arc::new(Integer::from_digits(&expanded_iv, Order::Lsf));
+        let sloth = Arc::new(sloth::Sloth::init(PRIME_SIZE_BITS));
+
+        for piece_bundle in piece_bundles.into_iter() {
+            let mut piece = piece_bundle.piece;
+
+            // TODO: encode pieces first, then add to plot
+
+            let piece = task::spawn_blocking({
+                let sloth = Arc::clone(&sloth);
+                let integer_expanded_iv = Arc::clone(&integer_expanded_iv);
+                move || {
+                    sloth
+                        .encode(&mut piece, &integer_expanded_iv, ENCODING_LAYERS_TEST)
+                        .unwrap();
+                    piece
+                }
+            })
+            .await;
+
+            // TODO: Replace challenge here and in other places
+            let nonce = u64::from_le_bytes(
+                crypto::create_hmac(&piece, b"subspace")[0..8]
+                    .try_into()
+                    .unwrap(),
+            );
+
+            let result = self
+                .write(
+                    piece,
+                    nonce,
+                    piece_bundle.piece_index,
+                    piece_bundle.piece_proof,
+                )
+                .await;
+
+            if let Err(error) = result {
+                warn!("{}", error);
+            }
+        }
     }
 
     /// Removes a piece from the plot by index, by deleting its index from the map

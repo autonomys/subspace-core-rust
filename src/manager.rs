@@ -2,13 +2,13 @@ use crate::block::Block;
 use crate::console::AppState;
 use crate::farmer::{FarmerMessage, Solution};
 use crate::ledger::Ledger;
-use crate::network::messages::ResponseMessage::PieceByIndex;
 use crate::network::messages::{
     BlockRequestByContentId, BlockRequestByProofId, BlockResponseByContentId,
-    BlockResponseByProofId, BlocksRequest, BlocksResponse, GossipMessage, PieceRequestById,
-    PieceRequestByIndex, PieceResponseByIndex, RequestMessage, ResponseMessage,
-    StateBlockRequestByHeight, StateBlockRequestById, StateBlockResponseByHeight,
-    StateBlockResponseById, TxRequestById, TxResponseById,
+    BlockResponseByProofId, BlocksRequest, BlocksResponse, GenesisConfigRequest,
+    GenesisConfigResponse, GossipMessage, PieceRequestById, PieceRequestByIndex,
+    PieceResponseByIndex, RequestMessage, ResponseMessage, StateBlockRequestByHeight,
+    StateBlockRequestById, StateBlockResponseByHeight, StateBlockResponseById, TxRequestById,
+    TxResponseById,
 };
 use crate::network::{Network, NodeType};
 use crate::plot::Plot;
@@ -16,16 +16,24 @@ use crate::state::StateBundle;
 use crate::timer::EpochTracker;
 use crate::transaction::Transaction;
 use crate::{
-    timer, ContentId, CONSOLE, MIN_PEERS, PLOT_SIZE, TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+    timer, ContentId, NodeID, CONSOLE, GENESIS_STATE_BLOCKS, MIN_PEERS, PLOT_SIZE,
+    TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
 };
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
 use futures::lock::Mutex;
 use log::*;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::Display;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+pub struct GenesisConfig {
+    pub genesis_timestamp: u64,
+    pub genesis_challenge: [u8; 32],
+}
 
 pub enum ProtocolMessage {
     /// Solver sends a set of solutions back to main for application
@@ -76,6 +84,7 @@ pub fn start_timer(
 /// Starts the manager process, a broker loop that acts as the central async message hub for the node
 pub async fn run(
     node_type: NodeType,
+    node_id: NodeID,
     ledger: Ledger,
     any_to_main_rx: Receiver<ProtocolMessage>,
     network: Network,
@@ -85,7 +94,7 @@ pub async fn run(
     plot: Plot,
 ) {
     let ledger: SharedLedger = Arc::new(Mutex::new(ledger));
-    let plot: SharedPlot = Arc::new(Mutex::new(plot));
+    // let plot: SharedPlot = Arc::new(Mutex::new(plot));
 
     {
         let network = network.clone();
@@ -166,13 +175,15 @@ pub async fn run(
     {
         let network = network.clone();
         let ledger = Arc::clone(&ledger);
-        let plot = Arc::clone(&plot);
+        // let plot = Arc::clone(&plot);
+        let plot = plot.clone();
 
         async_std::task::spawn(async move {
             let requests_receiver = network.get_requests_receiver().unwrap();
             while let Ok((message, response_sender)) = requests_receiver.recv().await {
                 let ledger = Arc::clone(&ledger);
-                let plot = Arc::clone(&plot);
+                // let plot = Arc::clone(&plot);
+                let plot = plot.clone();
 
                 async_std::task::spawn(async move {
                     match message {
@@ -253,15 +264,25 @@ pub async fn run(
                             )));
                         }
                         RequestMessage::PieceByIndex(PieceRequestByIndex { index }) => {
-                            let piece_bundle =
-                                plot.lock().await.get_piece_bundle_by_index(index).await;
+                            let piece_bundle = plot.get_piece_bundle_by_index(index).await;
 
                             drop(response_sender.send(ResponseMessage::PieceByIndex(
                                 PieceResponseByIndex { piece_bundle },
                             )));
                         }
-                        RequestMessage::PieceById(PieceRequestById { id }) => {
+                        RequestMessage::PieceById(PieceRequestById { id: _ }) => {
                             // TODO: store pieces by piece_id for retrieval
+                        }
+                        RequestMessage::GenesisConfig(GenesisConfigRequest {}) => {
+                            let locked_ledger = ledger.lock().await;
+                            let genesis_config = GenesisConfig {
+                                genesis_timestamp: locked_ledger.genesis_timestamp,
+                                genesis_challenge: locked_ledger.genesis_challenge,
+                            };
+
+                            drop(response_sender.send(ResponseMessage::GenesisConfig(
+                                GenesisConfigResponse { genesis_config },
+                            )));
                         }
                     }
                 });
@@ -330,8 +351,14 @@ pub async fn run(
                         }
                     }
                     ProtocolMessage::StateBundle { state_bundle } => {
-                        // TODO: only plot pieces that evict other pieces
-                        // plot each piece
+                        // TODO: move encoding of new state to a background task
+                        // then write to plot in batches
+
+                        if state_bundle.state_block.height >= GENESIS_STATE_BLOCKS as u64 {
+                            // TODO: only plot pieces that evict other pieces
+                            warn!("Plotting pieces from new confirmed state");
+                            plot.plot_pieces(node_id, state_bundle.piece_bundles).await;
+                        }
                     }
                 },
                 Err(error) => {
@@ -355,6 +382,115 @@ pub async fn run(
 
                 let is_farming = matches!(node_type, NodeType::Gateway | NodeType::Farmer);
 
+                /*
+                   New Startup workflow
+
+                   Initial Case
+
+                   - get genesis data (timestamp, challenge)
+                   - sync the state chain
+                   - sync head of the ledger and start solving
+                   - sync state and plot
+
+                   Ideal Case
+
+                   1. Query several nodes for the last state block and see if they agree
+                   2. Sync the state chain, starting from height 0 until a None is returned
+                   3. Then sync head of the ledger
+                   4. Then conduct logarithmic verification of state blocks
+                   5. Once the state chain and head of ledger have been validated
+                   6. Fetch pieces over the DHT from closest farmers
+                   7. Decode and verify each piece against the state chain
+                   8. Plot each piece locally
+                   9. Start solving once the plot is full
+
+                   Need to define a workflow for piece retrieval and plotting
+
+                   1. Send a request for a range of pieces
+                   2. Receive as a stream
+                   3. For each piece received, decode and validate against state chain
+                   4. Write the piece to disk
+                   5. Add the piece to a queue
+                   6. Read, encode, and plot the piece once it arrives in the queue
+                */
+
+                // sync the genesis config
+                match network.request_genesis_config().await {
+                    Ok(genesis_config) => {
+                        ledger.lock().await.set_genesis_config(genesis_config);
+                    }
+                    Err(error) => {
+                        panic!("Failed to request genesis config: {:?}", error);
+                    }
+                }
+
+                // sync the state chain, verify each new block and add to the state chain
+                let mut state_block_height = 0;
+                let mut last_state_block_id = [0u8; 32];
+                let mut locked_ledger = ledger.lock().await;
+                loop {
+                    match network
+                        .request_state_block_by_height(state_block_height)
+                        .await
+                    {
+                        Ok(state_block) => {
+                            match state_block {
+                                Some(state_block) => {
+                                    if state_block_height > 0 {
+                                        if state_block.previous_state_block_id
+                                            != last_state_block_id
+                                        {
+                                            // TODO: should block list this peer and request from another peer
+                                            panic!("Received an invalid state block during state chain sync");
+                                        }
+                                    }
+
+                                    last_state_block_id = state_block.get_id();
+                                    state_block_height += 1;
+                                    locked_ledger.state.save_state_block(&state_block);
+                                }
+                                None => break,
+                            }
+                        }
+                        Err(error) => {
+                            panic!(
+                                "Failed to request state block for height {}: {:?}",
+                                state_block_height, error
+                            );
+                        }
+                    }
+                }
+                info!("Synced the state chain!");
+
+                // sync state and plot
+                let piece_index = 0;
+                loop {
+                    match network.request_piece_by_index(piece_index).await {
+                        Ok(piece_bundle) => {
+                            match piece_bundle {
+                                Some(_piece_bundle) => {
+                                    // decode the piece (where is node_id)
+                                    // compute the piece hash
+                                    // use the piece index to compute the state block and get merkle root
+                                    // verify the merkle proof
+
+                                    // encode with node_id
+                                    // send to plotter for writes
+                                }
+                                None => break,
+                            }
+                        }
+                        Err(error) => {
+                            panic!(
+                                "Failed to request piece for index {}: {:?}",
+                                piece_index, error
+                            );
+                        }
+                    }
+                }
+                info!("Synced state and completed plotting!");
+
+                // TODO: just sync head of the ledger
                 let mut timeslot: u64 = 0;
                 loop {
                     info!("Requesting blocks for timeslot {} during sync", timeslot);

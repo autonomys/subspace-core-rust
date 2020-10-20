@@ -8,9 +8,10 @@ use crate::{
     crypto, sloth, state, ContentId, ProofId, BLOCK_REWARD, CONFIRMATION_DEPTH,
     ENCODING_LAYERS_TEST, EXPECTED_TIMESLOTS_PER_EON, INITIAL_SOLUTION_RANGE, MAX_EARLY_TIMESLOTS,
     MAX_LATE_TIMESLOTS, PRIME_SIZE_BITS, PROPOSER_BLOCKS_PER_EON,
-    SOLUTION_RANGE_UPDATE_DELAY_IN_TIMESLOTS, TIMESLOT_DURATION, TX_BLOCKS_PER_PROPOSER_BLOCK,
+    SOLUTION_RANGE_UPDATE_DELAY_IN_TIMESLOTS, TX_BLOCKS_PER_PROPOSER_BLOCK,
 };
 
+use crate::manager::GenesisConfig;
 use crate::metablocks::{MetaBlock, MetaBlocks};
 use log::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -173,6 +174,13 @@ impl Ledger {
             .insert(0, INITIAL_SOLUTION_RANGE);
 
         ledger
+    }
+
+    /// Sets genesis data from config received over the network
+    // TODO: this should be hardcoded into the ref implementation
+    pub fn set_genesis_config(&mut self, genesis_config: GenesisConfig) {
+        self.genesis_challenge = genesis_config.genesis_challenge;
+        self.genesis_timestamp = genesis_config.genesis_timestamp;
     }
 
     /// Update the timeslot, then validates and stages all early blocks that have arrived
@@ -638,8 +646,8 @@ impl Ledger {
                     "Caching a block received via gossip with unknown parent content id: {}",
                     hex::encode(&block.content.parent_id.expect("Is Some")[0..8])
                 );
-                self.cache_remote_proposer_block(block);
-                return false;
+                // self.cache_remote_proposer_block(block);
+                // return false;
             }
 
             let parent_metablock = self.metablocks.get_metablock_from_content_id(
@@ -718,8 +726,8 @@ impl Ledger {
                     "Caching a block received via gossip with unknown parent content id: {}",
                     hex::encode(&block.content.parent_id.expect("Is Some")[0..8])
                 );
-                self.cache_remote_proposer_block(block);
-                return false;
+                // self.cache_remote_proposer_block(block);
+                // return false;
             }
 
             let parent_metablock = self.metablocks.get_metablock_from_content_id(
@@ -1209,7 +1217,7 @@ impl Ledger {
 
         // prune any siblings of this block
         if proposer_metablock.height > 0 {
-            let mut siblings = self
+            let siblings = self
                 .metablocks
                 .get_metablock_from_content_id(
                     &proposer_metablock
@@ -1237,15 +1245,6 @@ impl Ledger {
     fn prune_blocks_recursive(&mut self, proof_ids: Vec<ProofId>) {
         for child_proof_id in proof_ids.iter() {
             let metablock = self.metablocks.remove(child_proof_id);
-
-            // remove from epoch tracker
-            // self.epoch_tracker
-            //     .remove_block_from_epoch(
-            //         metablock.block.proof.epoch,
-            //         metablock.height,
-            //         metablock.proof_id,
-            //     )
-            //     .await;
 
             // remove from blocks by timeslot
             self.proof_ids_by_timeslot

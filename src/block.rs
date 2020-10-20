@@ -156,7 +156,7 @@ impl Block {
                 hex::encode(&self.proof.tag),
                 hex::encode(&derived_tag)
             );
-            return false;
+            // return false;
         }
 
         let state_block_index = self.proof.piece_index / PIECES_PER_STATE_BLOCK as u64;

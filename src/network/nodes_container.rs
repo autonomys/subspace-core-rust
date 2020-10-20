@@ -114,7 +114,7 @@ impl NodesContainer {
         }
     }
 
-    pub fn add_to_block_list(&mut self, node_addr: SocketAddr) {
+    pub fn _add_to_block_list(&mut self, node_addr: SocketAddr) {
         self.block_list.put(node_addr, ());
     }
 
@@ -196,7 +196,7 @@ impl NodesContainer {
     /// State transition from Peer to PendingPeer in case of reconnection needed
     ///
     /// Returns None if such connected peer was not found
-    pub(super) fn start_peer_reconnection(&mut self, peer: &Peer) -> Option<PendingPeer> {
+    pub(super) fn _start_peer_reconnection(&mut self, peer: &Peer) -> Option<PendingPeer> {
         match self.peers.remove(&peer.node_addr) {
             Some(peer) => {
                 let pending_peer: PendingPeer = peer.into();

@@ -55,8 +55,9 @@ pub(crate) mod messages;
 mod nodes_container;
 
 use crate::block::Block;
+use crate::manager::GenesisConfig;
 use crate::network::messages::{
-    BlockRequestByContentId, BlockRequestByProofId, InternalRequestMessage,
+    BlockRequestByContentId, BlockRequestByProofId, GenesisConfigRequest, InternalRequestMessage,
     InternalResponseMessage, PieceRequestById, PieceRequestByIndex, StateBlockRequestByHeight,
     StateBlockRequestById, TxRequestById,
 };
@@ -402,7 +403,7 @@ fn handle_messages(
             }
         }
 
-        if let Some(network) = network_weak.upgrade() {
+        if let Some(_network) = network_weak.upgrade() {
             // TODO: Remove from connected peers and start reconnection process
         }
     });
@@ -675,8 +676,8 @@ impl StartupNetwork {
         min_contacts: usize,
         max_contacts: usize,
         block_list_size: usize,
-        maintain_peers_interval: Duration,
-        create_backoff: CB,
+        _maintain_peers_interval: Duration,
+        _create_backoff: CB,
     ) -> io::Result<Self>
     where
         CB: (Fn() -> ExponentialBackoff) + Send + Sync + 'static,
@@ -940,7 +941,7 @@ impl Network {
         }
     }
 
-    pub(crate) async fn request_block_by_content_id(
+    pub(crate) async fn _request_block_by_content_id(
         &self,
         id: ContentId,
     ) -> Result<Option<Block>, RequestError> {
@@ -956,7 +957,7 @@ impl Network {
         }
     }
 
-    pub(crate) async fn request_block_by_proof_id(
+    pub(crate) async fn _request_block_by_proof_id(
         &self,
         id: ProofId,
     ) -> Result<Option<Block>, RequestError> {
@@ -970,7 +971,7 @@ impl Network {
         }
     }
 
-    pub(crate) async fn request_tx_by_id(
+    pub(crate) async fn _request_tx_by_id(
         &self,
         id: TxId,
     ) -> Result<Option<Transaction>, RequestError> {
@@ -984,7 +985,7 @@ impl Network {
         }
     }
 
-    pub(crate) async fn request_piece_by_id(
+    pub(crate) async fn _request_piece_by_id(
         &self,
         id: PieceId,
     ) -> Result<Option<NetworkPieceBundleById>, RequestError> {
@@ -1012,7 +1013,7 @@ impl Network {
         }
     }
 
-    pub(crate) async fn request_state_block_by_id(
+    pub(crate) async fn _request_state_block_by_id(
         &self,
         id: StateBlockId,
     ) -> Result<Option<StateBlock>, RequestError> {
@@ -1038,6 +1039,17 @@ impl Network {
 
         match response {
             ResponseMessage::StateByHeight(response) => Ok(response.state_block),
+            _ => Err(RequestError::BadResponse),
+        }
+    }
+
+    pub(crate) async fn request_genesis_config(&self) -> Result<GenesisConfig, RequestError> {
+        let response = self
+            .request(RequestMessage::GenesisConfig(GenesisConfigRequest {}))
+            .await?;
+
+        match response {
+            ResponseMessage::GenesisConfig(response) => Ok(response.genesis_config),
             _ => Err(RequestError::BadResponse),
         }
     }
@@ -1086,7 +1098,7 @@ impl Network {
             .push(Box::new(callback));
     }
 
-    fn downgrade(&self) -> NetworkWeak {
+    fn _downgrade(&self) -> NetworkWeak {
         let inner = Arc::downgrade(&self.inner);
         NetworkWeak { inner }
     }

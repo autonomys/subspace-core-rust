@@ -1,4 +1,5 @@
 use crate::block::Block;
+use crate::manager::GenesisConfig;
 use crate::state::{
     BlockHeight, NetworkPieceBundleById, NetworkPieceBundleByIndex, StateBlock, StateBlockId,
 };
@@ -113,6 +114,14 @@ pub(crate) struct StateBlockResponseByHeight {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct GenesisConfigRequest {}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct GenesisConfigResponse {
+    pub(crate) genesis_config: GenesisConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum RequestMessage {
     Blocks(BlocksRequest),
     BlockByContentId(BlockRequestByContentId),
@@ -122,6 +131,7 @@ pub(crate) enum RequestMessage {
     PieceByIndex(PieceRequestByIndex),
     StateById(StateBlockRequestById),
     StateByHeight(StateBlockRequestByHeight),
+    GenesisConfig(GenesisConfigRequest),
 }
 
 impl Display for RequestMessage {
@@ -138,6 +148,7 @@ impl Display for RequestMessage {
                 Self::PieceByIndex { .. } => "PieceByIndex",
                 Self::StateById { .. } => "StateById",
                 Self::StateByHeight { .. } => "StateByHeight",
+                Self::GenesisConfig { .. } => "GenesisConfig",
             }
         )
     }
@@ -153,6 +164,7 @@ pub(crate) enum ResponseMessage {
     PieceByIndex(PieceResponseByIndex),
     StateById(StateBlockResponseById),
     StateByHeight(StateBlockResponseByHeight),
+    GenesisConfig(GenesisConfigResponse),
 }
 
 impl Display for ResponseMessage {
@@ -169,6 +181,7 @@ impl Display for ResponseMessage {
                 Self::PieceByIndex { .. } => "PieceByIndex",
                 Self::StateById { .. } => "StateById",
                 Self::StateByHeight { .. } => "StateByHeight",
+                Self::GenesisConfig { .. } => "GenesisConfig",
             }
         )
     }

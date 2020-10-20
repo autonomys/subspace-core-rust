@@ -48,8 +48,6 @@ pub const PRIME_SIZE_BYTES: usize = PRIME_SIZE_BITS / 8;
 pub const IV_SIZE: usize = 32;
 pub const PIECE_SIZE: usize = 4096;
 pub const PIECE_COUNT: usize = 256;
-pub const REPLICATION_FACTOR: usize = 1;
-pub const PLOT_SIZE: usize = PIECE_COUNT * REPLICATION_FACTOR;
 pub const BLOCKS_PER_ENCODING: usize = PIECE_SIZE / PRIME_SIZE_BYTES;
 pub const ENCODING_LAYERS_TEST: usize = 1;
 pub const ENCODING_LAYERS_PROD: usize = BLOCKS_PER_ENCODING;
@@ -69,7 +67,7 @@ pub const CONSOLE: bool = false;
 pub const BLOCK_REWARD: u64 = 1;
 pub const MAX_EARLY_TIMESLOTS: u64 = 10;
 pub const MAX_LATE_TIMESLOTS: u64 = 10;
-pub const TIMESLOT_DURATION: u64 = 100;
+pub const TIMESLOT_DURATION: u64 = 1000;
 pub const CHALLENGE_LOOKBACK_EPOCHS: u64 = 1;
 /// Time in epochs
 pub const EPOCH_CLOSE_WAIT_TIME: u64 = 1;
@@ -89,8 +87,16 @@ pub const INITIAL_SOLUTION_RANGE: u64 = u64::MAX / PLOT_SIZE as u64 / TIMESLOTS_
 pub const SOLUTION_RANGE_UPDATE_DELAY_IN_TIMESLOTS: u64 = 10;
 
 /// State Encoding
-pub const STATE_BLOCK_SIZE_IN_BYTES: usize = 1024 * 1024;
+/// 8k
+pub const STATE_BLOCK_SIZE_IN_BYTES: usize = 8 * 1024;
+/// 2
 pub const PIECES_PER_STATE_BLOCK: usize = STATE_BLOCK_SIZE_IN_BYTES / PIECE_SIZE;
+/// 128
+pub const GENESIS_STATE_BLOCKS: usize = (1024 * 1024) / STATE_BLOCK_SIZE_IN_BYTES;
+/// 256
+pub const GENESIS_PIECE_COUNT: usize = PIECES_PER_STATE_BLOCK * GENESIS_STATE_BLOCKS;
+
+pub const PLOT_SIZE: usize = GENESIS_PIECE_COUNT;
 
 // Assertions about acceptable values for above parameters:
 // Lookback should always be at least one

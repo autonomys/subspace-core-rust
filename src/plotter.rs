@@ -1,8 +1,7 @@
 use crate::plot::Plot;
 use crate::state::PieceBundle;
 use crate::{
-    crypto, sloth, NodeID, Piece, CONSOLE, ENCODING_LAYERS_TEST, PIECE_SIZE, PLOT_SIZE,
-    PRIME_SIZE_BITS,
+    crypto, sloth, NodeID, CONSOLE, ENCODING_LAYERS_TEST, PIECE_SIZE, PLOT_SIZE, PRIME_SIZE_BITS,
 };
 use async_std::path::PathBuf;
 use async_std::task;
