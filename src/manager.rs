@@ -16,14 +16,18 @@ use crate::state::StateBundle;
 use crate::timer::EpochTracker;
 use crate::transaction::Transaction;
 use crate::{
-    timer, ContentId, NodeID, CONSOLE, GENESIS_STATE_BLOCKS, MIN_PEERS, PLOT_SIZE,
-    TIMESLOTS_PER_EPOCH, TIMESLOT_DURATION,
+    crypto, sloth, timer, ContentId, NodeID, CONSOLE, ENCODING_LAYERS_TEST, GENESIS_STATE_BLOCKS,
+    MIN_PEERS, PIECES_PER_STATE_BLOCK, PLOT_SIZE, PRIME_SIZE_BITS, TIMESLOTS_PER_EPOCH,
+    TIMESLOT_DURATION,
 };
 use async_std::sync::{Receiver, Sender};
 use async_std::task;
 use futures::lock::Mutex;
 use log::*;
+use rug::integer::Order;
+use rug::Integer;
 use serde::{Deserialize, Serialize};
+use std::convert::TryInto;
 use std::fmt;
 use std::fmt::Display;
 use std::sync::Arc;
@@ -59,7 +63,6 @@ impl Display for ProtocolMessage {
 }
 
 pub type SharedLedger = Arc<Mutex<Ledger>>;
-pub type SharedPlot = Arc<Mutex<Plot>>;
 
 // TODO: start the timer once
 /// start the timer after syncing the ledger
@@ -94,7 +97,6 @@ pub async fn run(
     plot: Plot,
 ) {
     let ledger: SharedLedger = Arc::new(Mutex::new(ledger));
-    // let plot: SharedPlot = Arc::new(Mutex::new(plot));
 
     {
         let network = network.clone();
@@ -264,7 +266,7 @@ pub async fn run(
                             )));
                         }
                         RequestMessage::PieceByIndex(PieceRequestByIndex { index }) => {
-                            let piece_bundle = plot.get_piece_bundle_by_index(index).await;
+                            let piece_bundle = plot.get_piece_bundle_by_index(index, node_id).await;
 
                             drop(response_sender.send(ResponseMessage::PieceByIndex(
                                 PieceResponseByIndex { piece_bundle },
@@ -387,10 +389,12 @@ pub async fn run(
 
                    Initial Case
 
-                   - get genesis data (timestamp, challenge)
+                   - get genesis config
                    - sync the state chain
-                   - sync head of the ledger and start solving
                    - sync state and plot
+                   - sync head of the ledger and start solving
+
+                   * if ledger state has been encoded before sync, it will be re-encoded on ledger sync
 
                    Ideal Case
 
@@ -463,19 +467,80 @@ pub async fn run(
                 info!("Synced the state chain!");
 
                 // sync state and plot
-                let piece_index = 0;
+                let mut piece_index = 0;
+                let sloth = sloth::Sloth::init(PRIME_SIZE_BITS);
                 loop {
                     match network.request_piece_by_index(piece_index).await {
                         Ok(piece_bundle) => {
                             match piece_bundle {
-                                Some(_piece_bundle) => {
-                                    // decode the piece (where is node_id)
+                                Some(piece_bundle) => {
+                                    // decode the piece
+                                    let expanded_iv = crypto::expand_iv(piece_bundle.node_id);
+                                    let mut decoding = piece_bundle.encoding.clone();
+                                    sloth.decode(
+                                        decoding.as_mut(),
+                                        expanded_iv,
+                                        ENCODING_LAYERS_TEST,
+                                    );
+
                                     // compute the piece hash
+                                    let decoding_hash = crypto::digest_sha_256(&decoding);
+
                                     // use the piece index to compute the state block and get merkle root
+                                    let state_block_index =
+                                        piece_index / PIECES_PER_STATE_BLOCK as u64;
+
+                                    let merkle_root = locked_ledger
+                                        .state
+                                        .get_state_block_by_height(state_block_index)
+                                        .unwrap()
+                                        .piece_merkle_root;
+
                                     // verify the merkle proof
+                                    if !crypto::validate_merkle_proof(
+                                        decoding_hash,
+                                        &piece_bundle.piece_proof,
+                                        &merkle_root,
+                                    ) {
+                                        panic!("Invalid piece received via sync, merkle proof is invalid!");
+                                    }
 
                                     // encode with node_id
-                                    // send to plotter for writes
+                                    let expanded_iv = crypto::expand_iv(node_id);
+                                    let integer_expanded_iv =
+                                        Integer::from_digits(&expanded_iv, Order::Lsf);
+                                    let mut encoding = decoding[..].try_into().unwrap();
+
+                                    sloth
+                                        .encode(
+                                            &mut encoding,
+                                            &integer_expanded_iv,
+                                            ENCODING_LAYERS_TEST,
+                                        )
+                                        .unwrap();
+
+                                    // compute the nonce
+                                    let nonce = u64::from_le_bytes(
+                                        crypto::create_hmac(&encoding, b"subspace")[0..8]
+                                            .try_into()
+                                            .unwrap(),
+                                    );
+
+                                    // add to the plot
+                                    let result = plot
+                                        .write(
+                                            encoding,
+                                            nonce,
+                                            piece_index,
+                                            piece_bundle.piece_proof,
+                                        )
+                                        .await;
+
+                                    if let Err(error) = result {
+                                        warn!("{}", error);
+                                    }
+
+                                    piece_index += 1;
                                 }
                                 None => break,
                             }
@@ -496,7 +561,7 @@ pub async fn run(
                     info!("Requesting blocks for timeslot {} during sync", timeslot);
                     match network.request_blocks(timeslot).await {
                         Ok(bundle) => {
-                            let mut locked_ledger = ledger.lock().await;
+                            // let mut locked_ledger = ledger.lock().await;
 
                             for tx in bundle.1.iter() {
                                 let tx_id = tx.get_id();

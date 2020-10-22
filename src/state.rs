@@ -1,8 +1,8 @@
 use crate::manager::ProtocolMessage;
-use crate::{crypto, Piece, PIECES_PER_STATE_BLOCK, PIECE_SIZE, STATE_BLOCK_SIZE_IN_BYTES};
+use crate::{crypto, NodeID, Piece, PIECES_PER_STATE_BLOCK, PIECE_SIZE, STATE_BLOCK_SIZE_IN_BYTES};
 use async_std::sync::Sender;
 use itertools::izip;
-use log::{info, warn};
+use log::warn;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::convert::TryInto;
@@ -39,6 +39,7 @@ pub struct PieceBundle {
 pub struct NetworkPieceBundleByIndex {
     pub encoding: Vec<u8>,
     pub piece_proof: Vec<u8>,
+    pub node_id: NodeID,
 }
 
 #[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
@@ -240,8 +241,6 @@ impl State {
         // TODO: ensure we don't increment by more than one
 
         self.last_state_block_id = state_block_id;
-
-        info!("Added state block with height: {}", state_block.height);
     }
 
     pub fn get_state_block_by_height(&self, height: BlockHeight) -> Option<&StateBlock> {

@@ -47,13 +47,7 @@ pub struct EpochTracker {
 }
 
 impl EpochTracker {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::default(),
-        }
-    }
-
-    pub async fn new_genesis() -> Self {
+    pub async fn new() -> Self {
         let inner = Inner::default();
 
         let tracker = Self {

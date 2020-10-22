@@ -382,11 +382,13 @@ impl Plot {
     pub async fn get_piece_bundle_by_index(
         &self,
         index: PieceIndex,
+        node_id: NodeID,
     ) -> Option<NetworkPieceBundleByIndex> {
         match self.read(index).await {
             Ok((encoding, merkle_proof)) => Some(NetworkPieceBundleByIndex {
                 encoding: encoding.to_vec(),
                 piece_proof: merkle_proof,
+                node_id,
             }),
             Err(_) => None,
         }

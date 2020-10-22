@@ -127,11 +127,7 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
     let node_id = wallet.node_id;
 
     // create the randomness tracker
-    let epoch_tracker = if node_type == NodeType::Gateway {
-        EpochTracker::new_genesis().await
-    } else {
-        EpochTracker::new()
-    };
+    let epoch_tracker = EpochTracker::new().await;
 
     // create channels between background tasks
     let (any_to_main_tx, any_to_main_rx) = channel::<ProtocolMessage>(128);
