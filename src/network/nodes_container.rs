@@ -1,4 +1,4 @@
-use async_std::net::TcpStream;
+use async_std::net::{Shutdown, TcpStream};
 use async_std::sync::{channel, Sender};
 use bytes::Bytes;
 use futures::{AsyncWriteExt, StreamExt};
@@ -75,6 +75,7 @@ impl PendingPeer {
 pub struct Peer {
     node_addr: SocketAddr,
     bytes_sender: Sender<Bytes>,
+    stream: TcpStream,
 }
 
 impl Peer {
@@ -134,11 +135,17 @@ impl NodesContainer {
         }
     }
 
-    pub fn add_to_block_list(&mut self, node_addr: SocketAddr) {
+    /// Add address to block list and drop active connection if there is any
+    pub(super) fn add_to_block_list(&mut self, node_addr: SocketAddr) {
         self.block_list.put(node_addr, ());
+        self.contacts.remove(&node_addr);
+        self.pending_peers.remove(&node_addr);
+        if let Some(peer) = self.peers.remove(&node_addr) {
+            drop(peer.stream.shutdown(Shutdown::Both));
+        }
     }
 
-    pub fn check_is_in_block_list(&mut self, node_addr: &SocketAddr) -> bool {
+    pub(super) fn check_is_in_block_list(&mut self, node_addr: &SocketAddr) -> bool {
         self.block_list.get(node_addr).is_some()
     }
 
@@ -261,12 +268,13 @@ impl NodesContainer {
         pending_peer: &PendingPeer,
         stream: TcpStream,
     ) -> Option<Peer> {
-        let bytes_sender = create_bytes_sender(stream);
+        let bytes_sender = create_bytes_sender(stream.clone());
         match self.pending_peers.remove(&pending_peer.node_addr) {
             Some(PendingPeer { node_addr }) => {
                 let peer = Peer {
                     node_addr,
                     bytes_sender,
+                    stream,
                 };
                 self.peers.insert(node_addr, peer.clone());
 

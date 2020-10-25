@@ -1153,6 +1153,15 @@ impl Network {
         self.inner.request_receiver.lock().unwrap().take()
     }
 
+    /// Add address to block list and drop active connection if there is any
+    pub(super) async fn add_to_block_list(&self, node_addr: SocketAddr) {
+        self.inner
+            .nodes_container
+            .lock()
+            .await
+            .add_to_block_list(node_addr);
+    }
+
     pub(crate) async fn get_state(&self) -> console::AppState {
         let connections = self.inner.nodes_container.lock().await.get_peers().len();
         console::AppState {
