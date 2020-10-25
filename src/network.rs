@@ -581,6 +581,7 @@ trait TransportCommon {
 
         match response {
             InternalResponseMessage::Contacts(contacts) => {
+                // TODO: Try to connect to each contact before adding
                 self.nodes_container().lock().await.add_contacts(&contacts);
 
                 Ok(())
@@ -882,13 +883,17 @@ impl TransportCommon for Network {
 impl Network {
     fn new(inner: Arc<Inner>) -> Self {
         let maintain_peers_interval = inner.maintain_peers_interval;
+        let network = Self { inner };
+
         let maintain_contacts_handle = async_std::task::spawn({
-            let inner = Arc::clone(&inner);
+            let inner = Arc::clone(&network.inner);
+            let network_weak = network.downgrade();
 
             async move {
                 let mut interval = async_std::stream::interval(maintain_peers_interval);
                 while let Some(_) = interval.next().await {
-                    for addr in inner.nodes_container.lock().await.get_contacts_to_check() {
+                    let mut nodes_container = inner.nodes_container.lock().await;
+                    for addr in nodes_container.get_contacts_to_check() {
                         async_std::task::spawn({
                             let inner = Arc::clone(&inner);
 
@@ -914,12 +919,27 @@ impl Network {
                         });
                     }
 
-                    // TODO: Request contacts from peers if not at min contacts
+                    if !nodes_container.contacts_level().min_contacts() {
+                        let peer = (nodes_container.get_peers().choose(&mut rand::thread_rng())
+                            as Option<&Peer>)
+                            .cloned();
+                        drop(nodes_container);
+
+                        if let Some(peer) = peer {
+                            if let Some(network) = network_weak.upgrade() {
+                                if let Err(error) = network.sync_contacts(peer).await {
+                                    debug!("Failed to sync contacts on maintenance: {:?}", error);
+                                }
+                            }
+                        } else {
+                            warn!("Below min contacts and don't have any peers to request contacts from");
+                        }
+                    }
                 }
             }
         });
         let maintain_peers_handle = async_std::task::spawn({
-            let inner = Arc::clone(&inner);
+            let inner = Arc::clone(&network.inner);
 
             async move {
                 let mut interval = async_std::stream::interval(maintain_peers_interval);
@@ -929,11 +949,12 @@ impl Network {
             }
         });
         {
-            let mut background_tasks = inner.background_tasks.lock().unwrap();
+            let mut background_tasks = network.inner.background_tasks.lock().unwrap();
             background_tasks.push(maintain_contacts_handle);
             background_tasks.push(maintain_peers_handle);
         }
-        Self { inner }
+
+        network
     }
 
     pub fn address(&self) -> SocketAddr {

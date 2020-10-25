@@ -9,7 +9,7 @@ use std::time::Instant;
 #[derive(Debug, Copy, Clone)]
 pub(super) struct Contact {
     node_addr: SocketAddr,
-    // TODO: Use this field for periodic pings
+    // TODO: Make this non-optional when we do check before adding contact
     first_checked: Option<Instant>,
     currently_checking: bool,
 }
