@@ -1325,10 +1325,16 @@ impl Network {
                 }
             }
 
-            let mut nodes_container = self.inner.nodes_container.lock().await;
-            nodes_container.finish_failed_connection_attempt(&pending_peer);
-            if !nodes_container.peers_level().min_peers() {
-                drop(nodes_container);
+            self.on_connection_failure(&pending_peer).await;
+
+            if !self
+                .inner
+                .nodes_container
+                .lock()
+                .await
+                .peers_level()
+                .min_peers()
+            {
                 // Below min_peers, let's connect to someone
                 loop {
                     // TODO: This can quickly exhaust contacts in case of temporary network
