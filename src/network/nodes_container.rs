@@ -7,6 +7,7 @@ use rand::seq::IteratorRandom;
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::{Arc, Weak};
 
 fn create_bytes_sender(mut stream: TcpStream) -> Sender<Bytes> {
     let (bytes_sender, mut bytes_receiver) = channel::<Bytes>(32);
@@ -60,8 +61,10 @@ impl From<Contact> for PendingPeer {
 }
 
 impl From<Peer> for PendingPeer {
-    fn from(Peer { node_addr, .. }: Peer) -> Self {
-        PendingPeer { node_addr }
+    fn from(peer: Peer) -> Self {
+        PendingPeer {
+            node_addr: peer.inner.node_addr,
+        }
     }
 }
 
@@ -72,19 +75,47 @@ impl PendingPeer {
 }
 
 #[derive(Debug, Clone)]
-pub struct Peer {
+struct PeerInner {
     node_addr: SocketAddr,
     bytes_sender: Sender<Bytes>,
     stream: TcpStream,
 }
 
+impl Drop for PeerInner {
+    fn drop(&mut self) {
+        drop(self.stream.shutdown(Shutdown::Both));
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Peer {
+    inner: Arc<PeerInner>,
+}
+
 impl Peer {
     pub fn address(&self) -> &SocketAddr {
-        &self.node_addr
+        &self.inner.node_addr
     }
 
     pub(super) async fn send(&self, bytes: Bytes) {
-        self.bytes_sender.send(bytes).await
+        self.inner.bytes_sender.send(bytes).await
+    }
+
+    pub fn downgrade(&self) -> PeerWeak {
+        PeerWeak {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerWeak {
+    inner: Weak<PeerInner>,
+}
+
+impl PeerWeak {
+    pub fn upgrade(&self) -> Option<Peer> {
+        self.inner.upgrade().map(|inner| Peer { inner })
     }
 }
 
@@ -140,9 +171,7 @@ impl NodesContainer {
         self.block_list.put(node_addr, ());
         self.contacts.remove(&node_addr);
         self.pending_peers.remove(&node_addr);
-        if let Some(peer) = self.peers.remove(&node_addr) {
-            drop(peer.stream.shutdown(Shutdown::Both));
-        }
+        self.peers.remove(&node_addr);
     }
 
     pub(super) fn check_is_in_block_list(&mut self, node_addr: &SocketAddr) -> bool {
@@ -271,11 +300,15 @@ impl NodesContainer {
         let bytes_sender = create_bytes_sender(stream.clone());
         match self.pending_peers.remove(&pending_peer.node_addr) {
             Some(PendingPeer { node_addr }) => {
-                let peer = Peer {
+                let inner = PeerInner {
                     node_addr,
                     bytes_sender,
                     stream,
                 };
+                let peer = Peer {
+                    inner: Arc::new(inner),
+                };
+
                 self.peers.insert(node_addr, peer.clone());
 
                 Some(peer)

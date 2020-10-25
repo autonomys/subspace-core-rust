@@ -285,12 +285,9 @@ async fn exchange_peer_addr(own_addr: SocketAddr, stream: &mut TcpStream) -> Opt
     }
 }
 
-fn handle_messages(
-    network_weak: NetworkWeak,
-    mut message_receiver: Receiver<Message>,
-    peer_addr: SocketAddr,
-    peer: Peer,
-) {
+fn handle_messages(network_weak: NetworkWeak, mut message_receiver: Receiver<Message>, peer: Peer) {
+    let peer_addr = *peer.address();
+    let peer_weak = peer.downgrade();
     async_std::task::spawn(async move {
         while let Some(message) = message_receiver.next().await {
             // TODO: This is probably suboptimal, we can probably get rid of it if we have special
@@ -315,8 +312,7 @@ fn handle_messages(
                             .send((message, response_sender))
                             .await,
                     );
-                    {
-                        let peer = peer.clone();
+                    if let Some(peer) = peer_weak.upgrade() {
                         async_std::task::spawn(async move {
                             if let Ok(message) = response_receiver.await {
                                 peer.send(Message::Response { id, message }.to_bytes())
@@ -356,14 +352,16 @@ fn handle_messages(
                                 .collect(),
                         ),
                     };
-                    peer.send(
-                        Message::InternalResponse {
-                            id,
-                            message: response,
-                        }
-                        .to_bytes(),
-                    )
-                    .await;
+                    if let Some(peer) = peer_weak.upgrade() {
+                        peer.send(
+                            Message::InternalResponse {
+                                id,
+                                message: response,
+                            }
+                            .to_bytes(),
+                        )
+                        .await;
+                    }
                 }
                 Message::InternalResponse { id, message } => {
                     if let Some(response_sender) = network
@@ -428,6 +426,7 @@ struct Handlers {
     peer: AsyncMutex<Vec<Box<dyn Fn(&Peer) + Send>>>,
     gossip: AsyncMutex<Vec<Box<dyn Fn(&GossipMessage) + Send>>>,
 }
+
 struct Inner {
     node_id: NodeID,
     nodes_container: Arc<AsyncMutex<NodesContainer>>,
@@ -512,12 +511,7 @@ trait TransportCommon {
         if let Some(peer) = &peer {
             let message_receiver = create_message_receiver(stream);
 
-            handle_messages(
-                self.downgrade(),
-                message_receiver,
-                *peer.address(),
-                peer.clone(),
-            );
+            handle_messages(self.downgrade(), message_receiver, peer.clone());
 
             for callback in self.handlers().peer.lock().await.iter() {
                 callback(peer);
@@ -545,6 +539,7 @@ trait TransportCommon {
             // No need to request more contacts
             return Ok(());
         }
+
         let response = self
             .internal_request(peer, InternalRequestMessage::Contacts)
             .await?;
@@ -1631,12 +1626,12 @@ mod tests {
                 }
 
                 assert!(
-                        matches!(
+                    matches!(
                             gateway_gossip.next().await,
                             Some((_, GossipMessage::BlockProposal { .. }))
                         ),
-                        "Expected block proposal gossip massage",
-                    );
+                    "Expected block proposal gossip massage",
+                );
             }
         });
     }
@@ -1818,79 +1813,111 @@ mod tests {
         });
     }
 
-    //     // TODO: Unlock when reconnection is triggered
-    //     // #[test]
-    //     // fn test_reconnection() {
-    //     //     init();
-    //     //     executor::block_on(async {
-    //     //         let gateway_network = Network::new(
-    //     //             NodeID::default(),
-    //     //             "127.0.0.1:0".parse().unwrap(),
-    //     //             1,
-    //     //             2,
-    //     //             5,
-    //     //             10,
-    //     //             Duration::from_millis(100),
-    //     //             || {
-    //     //                 let mut backoff = ExponentialBackoff::default();
-    //     //                 backoff.initial_interval = Duration::from_millis(100);
-    //     //                 backoff.max_interval = Duration::from_secs(5);
-    //     //                 backoff
-    //     //             },
-    //     //         )
-    //     //         .await
-    //     //         .expect("Network failed to start");
-    //     //
-    //     //         let gateway_addr = gateway_network.address();
-    //     //
-    //     //         let peer_network_1 = Network::new(
-    //     //             NodeID::default(),
-    //     //             "127.0.0.1:0".parse().unwrap(),
-    //     //             1,
-    //     //             2,
-    //     //             5,
-    //     //             10,
-    //     //             Duration::from_millis(100),
-    //     //             create_backoff,
-    //     //         )
-    //     //         .await
-    //     //         .expect("Network failed to start");
-    //     //
-    //     //         peer_network_1
-    //     //             .connect_to(gateway_addr)
-    //     //             .await
-    //     //             .expect("Failed to connect to gateway");
-    //     //
-    //     //         let peer_network_1_address = peer_network_1.address();
-    //     //
-    //     //         drop(peer_network_1);
-    //     //
-    //     //         async_std::task::sleep(Duration::from_millis(500)).await;
-    //     //
-    //     //         assert!(
-    //     //             gateway_network.get_random_connected_peer().await.is_none(),
-    //     //             "All peers must be disconnected",
-    //     //         );
-    //     //
-    //     //         let peer_network_1 = Network::new(
-    //     //             NodeID::default(),
-    //     //             peer_network_1_address,
-    //     //             1,
-    //     //             2,
-    //     //             5,
-    //     //             10,
-    //     //             Duration::from_millis(100),
-    //     //             create_backoff,
-    //     //         )
-    //     //         .await
-    //     //         .expect("Network failed to start");
-    //     //
-    //     //         async_std::task::sleep(Duration::from_millis(500)).await;
-    //     //
-    //     //         assert!(
-    //     //             gateway_network.get_random_connected_peer().await.is_some(),
-    //     //             "Must reconnect to peer that re-appeared on the network",
-    //     //         );
-    //     //     });
-    //     // }
+    // TODO: Unlock when reconnection is triggered
+    #[test]
+    fn test_reconnection() {
+        init();
+        executor::block_on(async {
+            let path_gateway = TargetDirectory::new("test_reconnection_gateway");
+
+            let gateway_network = StartupNetwork::new(
+                NodeID::default(),
+                "127.0.0.1:0".parse().unwrap(),
+                &path_gateway,
+                1,
+                2,
+                5,
+                10,
+                10,
+                Duration::from_millis(100),
+                || {
+                    let mut backoff = ExponentialBackoff::default();
+                    backoff.initial_interval = Duration::from_millis(100);
+                    backoff.max_interval = Duration::from_secs(5);
+                    backoff
+                },
+            )
+            .await
+            .expect("Network failed to start")
+            .finish_startup();
+
+            let gateway_addr = gateway_network.address();
+
+            let path_peer_1 = TargetDirectory::new("test_reconnection_peer_1");
+
+            let peer_startup_network_1 = StartupNetwork::new(
+                NodeID::default(),
+                "127.0.0.1:0".parse().unwrap(),
+                &path_peer_1,
+                1,
+                2,
+                5,
+                10,
+                10,
+                Duration::from_millis(100),
+                create_backoff,
+            )
+            .await
+            .expect("Network failed to start");
+
+            peer_startup_network_1
+                .connect(gateway_addr)
+                .await
+                .expect("Failed to connect to gateway");
+
+            let peer_network_1 = peer_startup_network_1.finish_startup();
+
+            let peer_network_1_address = peer_network_1.address();
+
+            drop(peer_network_1);
+
+            async_std::task::sleep(Duration::from_millis(500)).await;
+
+            assert_eq!(
+                0,
+                gateway_network
+                    .inner
+                    .nodes_container
+                    .lock()
+                    .await
+                    .get_peers()
+                    .count(),
+                "All peers must be disconnected",
+            );
+
+            let peer_startup_network_1 = StartupNetwork::new(
+                NodeID::default(),
+                peer_network_1_address,
+                &path_peer_1,
+                1,
+                2,
+                5,
+                10,
+                10,
+                Duration::from_millis(100),
+                create_backoff,
+            )
+            .await
+            .expect("Network failed to start");
+
+            async_std::task::sleep(Duration::from_millis(500)).await;
+
+            let contacts = gateway_network
+                .inner
+                .nodes_container
+                .lock()
+                .await
+                .get_contacts()
+                .cloned()
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                vec![peer_network_1_address],
+                contacts,
+                "Must reconnect to the peer automatically"
+            );
+
+            drop(peer_startup_network_1);
+        });
+    }
 }
