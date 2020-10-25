@@ -1384,7 +1384,7 @@ impl NetworkWeak {
 mod tests {
     use super::*;
     use crate::block::{Block, Content, Proof};
-    //     use crate::network::messages::BlocksResponse;
+    use crate::network::messages::BlocksResponse;
     use crate::transaction::{AccountAddress, CoinbaseTx, SimpleCreditTx};
     use crate::{ContentId, ProofId, Tag};
     use futures::executor;
@@ -1453,9 +1453,9 @@ mod tests {
         }
     }
 
-    // fn fake_tx() -> SimpleCreditTx {
-    //     SimpleCreditTx::new(0, [0u8; 32], 0, &crate::crypto::gen_keys_random())
-    // }
+    fn fake_tx() -> SimpleCreditTx {
+        SimpleCreditTx::new(0, [0u8; 32], 0, &crate::crypto::gen_keys_random())
+    }
 
     #[test]
     fn test_create() {
@@ -1645,79 +1645,94 @@ mod tests {
         });
     }
 
-    //     #[test]
-    //     fn test_request_response() {
-    //         init();
-    //         executor::block_on(async {
-    //             let gateway_network = Network::new(
-    //                 NodeID::default(),
-    //                 "127.0.0.1:0".parse().unwrap(),
-    //                 1,
-    //                 2,
-    //                 5,
-    //                 10,
-    //                 Duration::from_secs(60),
-    //                 create_backoff,
-    //             )
-    //             .await
-    //             .expect("Network failed to start");
-    //             let mut gateway_requests = gateway_network.get_requests_receiver().unwrap();
-    //
-    //             let peer_network = Network::new(
-    //                 NodeID::default(),
-    //                 "127.0.0.1:0".parse().unwrap(),
-    //                 1,
-    //                 2,
-    //                 5,
-    //                 10,
-    //                 Duration::from_secs(60),
-    //                 create_backoff,
-    //             )
-    //             .await
-    //             .expect("Network failed to start");
-    //
-    //             peer_network
-    //                 .connect_to(gateway_network.address())
-    //                 .await
-    //                 .expect("Failed to connect to gateway");
-    //
-    //             {
-    //                 let (response_sender, response_receiver) =
-    //                     async_oneshot::oneshot::<(Vec<Block>, Vec<SimpleCreditTx>)>();
-    //                 {
-    //                     let peer_network = peer_network.clone();
-    //                     async_std::task::spawn(async move {
-    //                         let bundle = peer_network.request_blocks(0).await.unwrap();
-    //                         response_sender.send(bundle).unwrap();
-    //                     });
-    //                 }
-    //
-    //                 {
-    //                     let (request, sender) = gateway_requests.next().await.unwrap();
-    //                     assert!(
-    //                         matches!(request, RequestMessage::Blocks(..)),
-    //                         "Expected blocks request",
-    //                     );
-    //
-    //                     sender
-    //                         .send(ResponseMessage::Blocks(BlocksResponse {
-    //                             blocks: vec![fake_block()],
-    //                             transactions: vec![fake_tx()],
-    //                         }))
-    //                         .unwrap();
-    //                 }
-    //
-    //                 let blocks = response_receiver.await.unwrap();
-    //
-    //                 assert_eq!(
-    //                     (vec![fake_block()], vec![fake_tx()]),
-    //                     blocks,
-    //                     "Bad blocks response"
-    //                 );
-    //             }
-    //         });
-    //     }
-    //
+    #[test]
+    fn test_request_response() {
+        init();
+        executor::block_on(async {
+            let path_gateway = TargetDirectory::new("test_request_response_gateway");
+
+            let gateway_network = StartupNetwork::new(
+                NodeID::default(),
+                "127.0.0.1:0".parse().unwrap(),
+                &path_gateway,
+                1,
+                2,
+                5,
+                10,
+                10,
+                Duration::from_secs(60),
+                create_backoff,
+            )
+            .await
+            .expect("Network failed to start")
+            .finish_startup();
+
+            let mut gateway_requests = gateway_network.get_requests_receiver().unwrap();
+
+            let path_peer = TargetDirectory::new("test_request_response_peer");
+
+            let peer_startup_network = StartupNetwork::new(
+                NodeID::default(),
+                "127.0.0.1:0".parse().unwrap(),
+                &path_peer,
+                1,
+                2,
+                5,
+                10,
+                10,
+                Duration::from_secs(60),
+                create_backoff,
+            )
+            .await
+            .expect("Network failed to start");
+
+            peer_startup_network
+                .connect(gateway_network.address())
+                .await
+                .expect("Failed to connect to gateway");
+
+            let peer_network = peer_startup_network.finish_startup();
+
+            {
+                let fake_block = fake_block();
+                let fake_tx = fake_tx();
+
+                let (response_sender, response_receiver) =
+                    async_oneshot::oneshot::<(Vec<Block>, Vec<SimpleCreditTx>)>();
+                {
+                    let peer_network = peer_network.clone();
+                    async_std::task::spawn(async move {
+                        let bundle = peer_network.request_blocks(0).await.unwrap();
+                        response_sender.send(bundle).unwrap();
+                    });
+                }
+
+                {
+                    let (request, sender) = gateway_requests.next().await.unwrap();
+                    assert!(
+                        matches!(request, RequestMessage::Blocks(..)),
+                        "Expected blocks request",
+                    );
+
+                    sender
+                        .send(ResponseMessage::Blocks(BlocksResponse {
+                            blocks: vec![fake_block.clone()],
+                            transactions: vec![fake_tx.clone()],
+                        }))
+                        .unwrap();
+                }
+
+                let blocks = response_receiver.await.unwrap();
+
+                assert_eq!(
+                    (vec![fake_block], vec![fake_tx]),
+                    blocks,
+                    "Bad blocks response"
+                );
+            }
+        });
+    }
+
     //     #[test]
     //     fn test_get_peers() {
     //         init();
