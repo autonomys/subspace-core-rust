@@ -552,20 +552,11 @@ trait TransportCommon {
         match response {
             InternalResponseMessage::Contacts(contacts) => {
                 for contact in contacts {
-                    let network_weak = self.downgrade();
-                    async_std::task::spawn(async move {
-                        if let Ok(stream) = TcpStream::connect(contact).await {
-                            drop(stream);
-                            if let Some(network) = network_weak.upgrade() {
-                                network
-                                    .inner
-                                    .nodes_container
-                                    .lock()
-                                    .await
-                                    .add_contacts(&[contact]);
-                            }
-                        }
-                    });
+                    trace!("Received contact {:?}, trying to connect", contact);
+                    if let Ok(stream) = TcpStream::connect(contact).await {
+                        drop(stream);
+                        self.nodes_container().lock().await.add_contacts(&[contact]);
+                    }
                 }
 
                 Ok(())
@@ -886,6 +877,7 @@ impl Network {
             async move {
                 let mut interval = async_std::stream::interval(maintain_peers_interval);
                 while let Some(_) = interval.next().await {
+                    trace!("Maintaining contacts");
                     let mut nodes_container_locked = nodes_container.lock().await;
 
                     let contacts = nodes_container_locked
@@ -930,6 +922,7 @@ impl Network {
                     }
 
                     if !nodes_container_locked.contacts_level().min_contacts() {
+                        trace!("Below min contacts, requesting more");
                         let peer = (nodes_container_locked
                             .get_peers()
                             .choose(&mut rand::thread_rng())
@@ -957,7 +950,10 @@ impl Network {
             async move {
                 let mut interval = async_std::stream::interval(maintain_peers_interval);
                 while let Some(_) = interval.next().await {
+                    trace!("Maintaining peers");
                     if !nodes_container.lock().await.peers_level().min_peers() {
+                        trace!("Below min peers, trying to establish more connections");
+
                         while let Some(network) = network_weak.upgrade() {
                             match network.connect_to_random_contact().await {
                                 Ok(_) => {
@@ -1733,283 +1729,95 @@ mod tests {
         });
     }
 
-    //     #[test]
-    //     fn test_get_peers() {
-    //         init();
-    //         executor::block_on(async {
-    //             let gateway_network = Network::new(
-    //                 NodeID::default(),
-    //                 "127.0.0.1:0".parse().unwrap(),
-    //                 1,
-    //                 2,
-    //                 5,
-    //                 10,
-    //                 Duration::from_secs(60),
-    //                 create_backoff,
-    //             )
-    //             .await
-    //             .expect("Network failed to start");
-    //
-    //             let peer_network_1 = Network::new(
-    //                 NodeID::default(),
-    //                 "127.0.0.1:0".parse().unwrap(),
-    //                 1,
-    //                 2,
-    //                 5,
-    //                 10,
-    //                 Duration::from_secs(60),
-    //                 create_backoff,
-    //             )
-    //             .await
-    //             .expect("Network failed to start");
-    //
-    //             peer_network_1
-    //                 .connect_to(gateway_network.address())
-    //                 .await
-    //                 .expect("Failed to connect to gateway");
-    //
-    //             let peer_network_2 = Network::new(
-    //                 NodeID::default(),
-    //                 "127.0.0.1:0".parse().unwrap(),
-    //                 1,
-    //                 2,
-    //                 5,
-    //                 10,
-    //                 Duration::from_secs(60),
-    //                 create_backoff,
-    //             )
-    //             .await
-    //             .expect("Network failed to start");
-    //
-    //             peer_network_2
-    //                 .connect_to(gateway_network.address())
-    //                 .await
-    //                 .expect("Failed to connect to gateway");
-    //
-    //             let random_peer = peer_network_1
-    //                 .get_random_connected_peer()
-    //                 .await
-    //                 .expect("Must be connected to gateway");
-    //             let peers = peer_network_1
-    //                 .request_contacts(random_peer)
-    //                 .await
-    //                 .expect("Should return peers");
-    //
-    //             assert_eq!(vec![peer_network_2.address()], peers, "Bad list of peers");
-    //         });
-    //     }
-    //
-    //     #[test]
-    //     fn test_peers_discovery() {
-    //         init();
-    //         executor::block_on(async {
-    //             let gateway_network = Network::new(
-    //                 NodeID::default(),
-    //                 "127.0.0.1:0".parse().unwrap(),
-    //                 1,
-    //                 2,
-    //                 5,
-    //                 10,
-    //                 Duration::from_secs(60),
-    //                 create_backoff,
-    //             )
-    //             .await
-    //             .expect("Network failed to start");
-    //
-    //             let gateway_addr = gateway_network.address();
-    //
-    //             let peer_network_1 = Network::new(
-    //                 NodeID::default(),
-    //                 "127.0.0.1:0".parse().unwrap(),
-    //                 1,
-    //                 2,
-    //                 5,
-    //                 10,
-    //                 Duration::from_secs(60),
-    //                 create_backoff,
-    //             )
-    //             .await
-    //             .expect("Network failed to start");
-    //
-    //             peer_network_1
-    //                 .connect_to(gateway_addr)
-    //                 .await
-    //                 .expect("Failed to connect to gateway");
-    //
-    //             let peer_network_2 = Network::new(
-    //                 NodeID::default(),
-    //                 "127.0.0.1:0".parse().unwrap(),
-    //                 2,
-    //                 2,
-    //                 5,
-    //                 10,
-    //                 Duration::from_secs(60),
-    //                 create_backoff,
-    //             )
-    //             .await
-    //             .expect("Network failed to start");
-    //
-    //             let connected_peers = Arc::new(AtomicUsize::new(0));
-    //             {
-    //                 let connected_peers = Arc::clone(&connected_peers);
-    //                 peer_network_2
-    //                     .on_connected_peer({
-    //                         move |_connected_peer| {
-    //                             connected_peers.fetch_add(1, Ordering::SeqCst);
-    //                         }
-    //                     })
-    //                     .await;
-    //             }
-    //
-    //             let (second_peer_sender, second_peer_receiver) = async_oneshot::oneshot::<SocketAddr>();
-    //             {
-    //                 let second_peer_sender = StdMutex::new(Some(second_peer_sender));
-    //                 peer_network_2
-    //                     .on_peer({
-    //                         move |peer| {
-    //                             if peer != gateway_addr {
-    //                                 if let Some(sender) = second_peer_sender.lock().unwrap().take() {
-    //                                     drop(sender.send(peer));
-    //                                 }
-    //                             }
-    //                         }
-    //                     })
-    //                     .await;
-    //             }
-    //
-    //             peer_network_2
-    //                 .connect_to(gateway_addr)
-    //                 .await
-    //                 .expect("Failed to connect to gateway");
-    //
-    //             peer_network_2
-    //                 .connect_to(second_peer_receiver.await.unwrap())
-    //                 .await
-    //                 .expect("Failed to connect to the other peer");
-    //
-    //             assert_eq!(
-    //                 2,
-    //                 connected_peers.load(Ordering::SeqCst),
-    //                 "Should have 2 peers connected",
-    //             );
-    //         });
-    //     }
-    //
-    //     #[test]
-    //     fn test_peers_maintenance() {
-    //         init();
-    //         executor::block_on(async {
-    //             let gateway_network = Network::new(
-    //                 NodeID::default(),
-    //                 "127.0.0.1:0".parse().unwrap(),
-    //                 1,
-    //                 2,
-    //                 5,
-    //                 10,
-    //                 Duration::from_millis(100),
-    //                 create_backoff,
-    //             )
-    //             .await
-    //             .expect("Network failed to start");
-    //
-    //             let gateway_addr = gateway_network.address();
-    //
-    //             let peer_network_1 = Network::new(
-    //                 NodeID::default(),
-    //                 "127.0.0.1:0".parse().unwrap(),
-    //                 1,
-    //                 2,
-    //                 5,
-    //                 10,
-    //                 Duration::from_millis(100),
-    //                 create_backoff,
-    //             )
-    //             .await
-    //             .expect("Network failed to start");
-    //
-    //             peer_network_1
-    //                 .connect_to(gateway_addr)
-    //                 .await
-    //                 .expect("Failed to connect to gateway");
-    //
-    //             let peer_network_1_address = peer_network_1.address();
-    //
-    //             let peer_network_2 = Network::new(
-    //                 NodeID::default(),
-    //                 "127.0.0.1:0".parse().unwrap(),
-    //                 1,
-    //                 2,
-    //                 2,
-    //                 10,
-    //                 Duration::from_millis(100),
-    //                 create_backoff,
-    //             )
-    //             .await
-    //             .expect("Network failed to start");
-    //
-    //             let (second_peer_sender, second_peer_receiver) = async_oneshot::oneshot::<SocketAddr>();
-    //             {
-    //                 let second_peer_sender = StdMutex::new(Some(second_peer_sender));
-    //                 peer_network_2
-    //                     .on_peer({
-    //                         move |peer| {
-    //                             if peer != gateway_addr {
-    //                                 if let Some(sender) = second_peer_sender.lock().unwrap().take() {
-    //                                     drop(sender.send(peer));
-    //                                 }
-    //                             }
-    //                         }
-    //                     })
-    //                     .await;
-    //             }
-    //
-    //             peer_network_2
-    //                 .connect_to(gateway_addr)
-    //                 .await
-    //                 .expect("Failed to connect to gateway");
-    //
-    //             drop(second_peer_receiver.await);
-    //
-    //             drop(peer_network_1);
-    //
-    //             async_std::task::sleep(Duration::from_millis(500)).await;
-    //
-    //             assert_eq!(
-    //                 peer_network_2.pull_random_disconnected_node().await,
-    //                 None,
-    //                 "Must have no disconnected peers",
-    //             );
-    //
-    //             let peer_network_1 = Network::new(
-    //                 NodeID::default(),
-    //                 peer_network_1_address,
-    //                 1,
-    //                 2,
-    //                 5,
-    //                 10,
-    //                 Duration::from_millis(100),
-    //                 create_backoff,
-    //             )
-    //             .await
-    //             .expect("Network failed to start");
-    //
-    //             peer_network_1
-    //                 .connect_to(gateway_addr)
-    //                 .await
-    //                 .expect("Failed to connect to gateway");
-    //
-    //             async_std::task::sleep(Duration::from_millis(500)).await;
-    //
-    //             assert!(
-    //                 peer_network_2
-    //                     .pull_random_disconnected_node()
-    //                     .await
-    //                     .is_some(),
-    //                 "Must have disconnected peer received from gateway",
-    //             );
-    //         });
-    //     }
-    //
+    #[test]
+    fn test_maintain_contacts_and_peers() {
+        init();
+        executor::block_on(async {
+            let path_gateway = TargetDirectory::new("test_maintain_contacts_and_peers_gateway");
+
+            let gateway_network = StartupNetwork::new(
+                NodeID::default(),
+                "127.0.0.1:0".parse().unwrap(),
+                &path_gateway,
+                1,
+                2,
+                5,
+                10,
+                10,
+                Duration::from_secs(60),
+                create_backoff,
+            )
+            .await
+            .expect("Network failed to start")
+            .finish_startup();
+
+            let path_peer_1 = TargetDirectory::new("test_maintain_contacts_and_peers_peer_1");
+
+            let peer_startup_network_1 = StartupNetwork::new(
+                NodeID::default(),
+                "127.0.0.1:0".parse().unwrap(),
+                &path_peer_1,
+                2,
+                2,
+                5,
+                10,
+                10,
+                Duration::from_millis(100),
+                create_backoff,
+            )
+            .await
+            .expect("Network failed to start");
+
+            peer_startup_network_1
+                .connect(gateway_network.address())
+                .await
+                .expect("Failed to connect to gateway");
+
+            let peer_network_1 = peer_startup_network_1.finish_startup();
+
+            let path_peer_2 = TargetDirectory::new("test_maintain_contacts_and_peers_peer_2");
+
+            let peer_startup_network_2 = StartupNetwork::new(
+                NodeID::default(),
+                "127.0.0.1:0".parse().unwrap(),
+                &path_peer_2,
+                1,
+                2,
+                5,
+                10,
+                10,
+                Duration::from_secs(60),
+                create_backoff,
+            )
+            .await
+            .expect("Network failed to start");
+
+            peer_startup_network_2
+                .connect(gateway_network.address())
+                .await
+                .expect("Failed to connect to gateway");
+
+            let peer_network_2 = peer_startup_network_2.finish_startup();
+
+            async_std::task::sleep(Duration::from_millis(300)).await;
+
+            let contacts = peer_network_1
+                .inner
+                .nodes_container
+                .lock()
+                .await
+                .get_contacts()
+                .cloned()
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                vec![gateway_network.address(), peer_network_2.address()],
+                contacts,
+                "Must already be connected to both gateway and peer other peer"
+            );
+        });
+    }
+
     //     // TODO: Unlock when reconnection is triggered
     //     // #[test]
     //     // fn test_reconnection() {
