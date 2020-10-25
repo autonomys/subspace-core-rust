@@ -781,13 +781,8 @@ impl StartupNetwork {
         Ok(network)
     }
 
-    // TODO: Maybe some kind of parameter to make sure this can only be called during bootstrap
-    //  process
     /// Connect during bootstrap process
-    pub async fn startup_connect(
-        &self,
-        peer_addr: SocketAddr,
-    ) -> Result<ContactsLevel, ConnectionError> {
+    pub async fn connect(&self, peer_addr: SocketAddr) -> Result<ContactsLevel, ConnectionError> {
         // TODO: This function probably needs timeouts for various operations
         let mut nodes_container = self.inner.nodes_container.lock().await;
 
@@ -1125,7 +1120,6 @@ impl Network {
             return Err(RequestError::MessageTooLong);
         }
 
-        // TODO: Previous version of the code used peers instead of connections, was it correct?
         let peer = (self
             .inner
             .nodes_container

@@ -184,7 +184,7 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
         info!("Connecting to gateway node");
 
         let contacts_level = startup_network
-            .startup_connect(DEV_GATEWAY_ADDR.parse().unwrap())
+            .connect(DEV_GATEWAY_ADDR.parse().unwrap())
             .await
             .expect("Failed to connect to a single gateway node");
 
