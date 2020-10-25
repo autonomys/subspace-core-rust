@@ -147,11 +147,11 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
                 .await;
 
             // create the plot from genesis state
-            plotter::plot(path.into(), node_id, state_bundle).await
+            plotter::plot(path.clone().into(), node_id, state_bundle).await
         }
         _ => {
             // create an empty plot
-            plotter::plot(path.into(), node_id, vec![]).await
+            plotter::plot(path.clone().into(), node_id, vec![]).await
         }
     };
 
@@ -169,6 +169,7 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
         } else {
             node_addr
         },
+        &path,
         MIN_PEERS,
         MAX_PEERS,
         MIN_CONTACTS,

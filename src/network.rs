@@ -70,6 +70,7 @@ use crate::state::{
 use crate::transaction::{SimpleCreditTx, Transaction, TxId};
 use crate::{console, ContentId, PieceIndex, ProofId};
 use crate::{NodeID, PieceId};
+use async_std::fs::{File, OpenOptions};
 use async_std::net::{TcpListener, TcpStream};
 use async_std::sync::{channel, Receiver};
 use async_std::task::JoinHandle;
@@ -77,8 +78,9 @@ use async_trait::async_trait;
 use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
 use bytes::BytesMut;
+use futures::io::SeekFrom;
 use futures::lock::{Mutex as AsyncMutex, Mutex};
-use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
+use futures::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, StreamExt};
 use futures_lite::future;
 use log::*;
 use messages::{BlocksRequest, GossipMessage, Message, RequestMessage, ResponseMessage};
@@ -88,6 +90,7 @@ use std::convert::TryInto;
 use std::fmt::{Debug, Display};
 use std::io::Write;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
@@ -427,7 +430,7 @@ struct Handlers {
 }
 struct Inner {
     node_id: NodeID,
-    nodes_container: AsyncMutex<NodesContainer>,
+    nodes_container: Arc<AsyncMutex<NodesContainer>>,
     background_tasks: StdMutex<Vec<JoinHandle<()>>>,
     handlers: Handlers,
     gossip_sender: async_channel::Sender<(SocketAddr, GossipMessage)>,
@@ -441,6 +444,7 @@ struct Inner {
     node_addr: SocketAddr,
     create_backoff: Box<dyn (Fn() -> ExponentialBackoff) + Send + Sync + 'static>,
     maintain_peers_interval: Duration,
+    contacts_file: Arc<AsyncMutex<File>>,
 }
 
 impl Drop for Inner {
@@ -681,6 +685,7 @@ impl StartupNetwork {
     pub async fn new<CB>(
         node_id: NodeID,
         addr: SocketAddr,
+        path: &PathBuf,
         min_peers: usize,
         max_peers: usize,
         min_contacts: usize,
@@ -700,15 +705,22 @@ impl StartupNetwork {
         let node_addr = listener.local_addr()?;
 
         let handlers = Handlers::default();
+        let contacts_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path.join("contacts.json"))
+            .await?;
+
         let inner = Arc::new(Inner {
             node_id,
-            nodes_container: AsyncMutex::new(NodesContainer::new(
+            nodes_container: Arc::new(AsyncMutex::new(NodesContainer::new(
                 min_contacts,
                 max_contacts,
                 min_peers,
                 max_peers,
                 block_list_size,
-            )),
+            ))),
             background_tasks: StdMutex::default(),
             handlers,
             gossip_sender,
@@ -720,6 +732,7 @@ impl StartupNetwork {
             node_addr,
             create_backoff: Box::new(create_backoff),
             maintain_peers_interval,
+            contacts_file: Arc::new(AsyncMutex::new(contacts_file)),
         });
 
         let network = Self { inner };
@@ -866,30 +879,47 @@ impl Network {
         let network = Self { inner };
 
         let maintain_contacts_handle = async_std::task::spawn({
-            let inner = Arc::clone(&network.inner);
+            let nodes_container = Arc::clone(&network.inner.nodes_container);
+            let contacts_file = Arc::clone(&network.inner.contacts_file);
             let network_weak = network.downgrade();
 
             async move {
                 let mut interval = async_std::stream::interval(maintain_peers_interval);
                 while let Some(_) = interval.next().await {
-                    let mut nodes_container = inner.nodes_container.lock().await;
-                    for addr in nodes_container.get_contacts_to_check() {
-                        async_std::task::spawn({
-                            let inner = Arc::clone(&inner);
+                    let mut nodes_container_locked = nodes_container.lock().await;
 
+                    let contacts = nodes_container_locked
+                        .get_contacts()
+                        .map(|addr| addr.to_string())
+                        .collect::<Vec<_>>();
+
+                    let result: io::Result<()> = try {
+                        let mut contacts_file = contacts_file.lock().await;
+                        let data = serde_json::to_vec(&contacts).unwrap();
+                        contacts_file.seek(SeekFrom::Start(0)).await?;
+                        contacts_file.write_all(&data).await?;
+                        contacts_file.set_len(data.len() as u64).await?;
+                        contacts_file.sync_all().await?;
+                    };
+
+                    if let Err(error) = result {
+                        error!("Failed to persist contacts: {:?}", error);
+                    }
+
+                    for addr in nodes_container_locked.get_contacts_to_check() {
+                        async_std::task::spawn({
+                            let nodes_container = Arc::clone(&nodes_container);
                             async move {
                                 match TcpStream::connect(addr).await {
                                     Ok(stream) => {
                                         drop(stream);
-                                        inner
-                                            .nodes_container
+                                        nodes_container
                                             .lock()
                                             .await
                                             .finish_successful_contact_check(&addr);
                                     }
                                     Err(_error) => {
-                                        inner
-                                            .nodes_container
+                                        nodes_container
                                             .lock()
                                             .await
                                             .finish_failed_contact_check(&addr);
@@ -899,11 +929,13 @@ impl Network {
                         });
                     }
 
-                    if !nodes_container.contacts_level().min_contacts() {
-                        let peer = (nodes_container.get_peers().choose(&mut rand::thread_rng())
+                    if !nodes_container_locked.contacts_level().min_contacts() {
+                        let peer = (nodes_container_locked
+                            .get_peers()
+                            .choose(&mut rand::thread_rng())
                             as Option<&Peer>)
                             .cloned();
-                        drop(nodes_container);
+                        drop(nodes_container_locked);
 
                         if let Some(peer) = peer {
                             if let Some(network) = network_weak.upgrade() {
@@ -919,18 +951,17 @@ impl Network {
             }
         });
         let maintain_peers_handle = async_std::task::spawn({
-            let inner = Arc::clone(&network.inner);
+            let nodes_container = Arc::clone(&network.inner.nodes_container);
             let network_weak = network.downgrade();
 
             async move {
                 let mut interval = async_std::stream::interval(maintain_peers_interval);
                 while let Some(_) = interval.next().await {
-                    if !inner.nodes_container.lock().await.peers_level().min_peers() {
+                    if !nodes_container.lock().await.peers_level().min_peers() {
                         while let Some(network) = network_weak.upgrade() {
                             match network.connect_to_random_contact().await {
                                 Ok(_) => {
-                                    if inner.nodes_container.lock().await.peers_level().min_peers()
-                                    {
+                                    if nodes_container.lock().await.peers_level().min_peers() {
                                         // Got enough peers, good
                                         break;
                                     } else {
