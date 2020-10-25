@@ -472,6 +472,7 @@ struct Inner {
     internal_requests_container: Arc<AsyncMutex<RequestsContainer<InternalResponseMessage>>>,
     node_addr: SocketAddr,
     create_backoff: Box<dyn (Fn() -> ExponentialBackoff) + Send + Sync + 'static>,
+    maintain_peers_interval: Duration,
 }
 
 impl Drop for Inner {
@@ -704,7 +705,7 @@ impl StartupNetwork {
         min_contacts: usize,
         max_contacts: usize,
         block_list_size: usize,
-        _maintain_peers_interval: Duration,
+        maintain_peers_interval: Duration,
         create_backoff: CB,
     ) -> io::Result<Self>
     where
@@ -737,6 +738,7 @@ impl StartupNetwork {
             internal_requests_container: Arc::default(),
             node_addr,
             create_backoff: Box::new(create_backoff),
+            maintain_peers_interval,
         });
 
         let network = Self { inner };
@@ -879,7 +881,58 @@ impl TransportCommon for Network {
 
 impl Network {
     fn new(inner: Arc<Inner>) -> Self {
-        // TODO: Background processes
+        let maintain_peers_interval = inner.maintain_peers_interval;
+        let maintain_contacts_handle = async_std::task::spawn({
+            let inner = Arc::clone(&inner);
+
+            async move {
+                let mut interval = async_std::stream::interval(maintain_peers_interval);
+                while let Some(_) = interval.next().await {
+                    for addr in inner.nodes_container.lock().await.get_contacts_to_check() {
+                        async_std::task::spawn({
+                            let inner = Arc::clone(&inner);
+
+                            async move {
+                                match TcpStream::connect(addr).await {
+                                    Ok(stream) => {
+                                        drop(stream);
+                                        inner
+                                            .nodes_container
+                                            .lock()
+                                            .await
+                                            .finish_successful_contact_check(&addr);
+                                    }
+                                    Err(_error) => {
+                                        inner
+                                            .nodes_container
+                                            .lock()
+                                            .await
+                                            .finish_failed_contact_check(&addr);
+                                    }
+                                }
+                            }
+                        });
+                    }
+
+                    // TODO: Request contacts from peers if not at min contacts
+                }
+            }
+        });
+        let maintain_peers_handle = async_std::task::spawn({
+            let inner = Arc::clone(&inner);
+
+            async move {
+                let mut interval = async_std::stream::interval(maintain_peers_interval);
+                while let Some(_) = interval.next().await {
+                    // TODO: Maintain peers
+                }
+            }
+        });
+        {
+            let mut background_tasks = inner.background_tasks.lock().unwrap();
+            background_tasks.push(maintain_contacts_handle);
+            background_tasks.push(maintain_peers_handle);
+        }
         Self { inner }
     }
 

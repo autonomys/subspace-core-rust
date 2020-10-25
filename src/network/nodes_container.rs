@@ -11,6 +11,7 @@ pub(super) struct Contact {
     node_addr: SocketAddr,
     // TODO: Use this field for periodic pings
     first_checked: Option<Instant>,
+    currently_checking: bool,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -122,7 +123,6 @@ impl NodesContainer {
         self.block_list.get(node_addr).is_some()
     }
 
-    // TODO: Should this return contact structs?
     /// Returns all known contacts, including those that are already connected or pending
     pub(super) fn get_contacts(&self) -> impl Iterator<Item = &SocketAddr> {
         // TODO: Should we prefer peers here (load balancing)
@@ -131,6 +131,19 @@ impl NodesContainer {
                 .iter()
                 .filter_map(|(addr, contact)| contact.first_checked.map(|_| addr)),
         )
+    }
+
+    /// Returns all known contacts, including those that are already connected or pending
+    pub(super) fn get_contacts_to_check(&mut self) -> impl Iterator<Item = SocketAddr> + '_ {
+        // TODO: Should we prefer peers here (load balancing)
+        self.contacts.iter_mut().filter_map(|(addr, contact)| {
+            if contact.currently_checking {
+                None
+            } else {
+                contact.currently_checking = true;
+                Some(*addr)
+            }
+        })
     }
 
     /// Add contacts to the list (will skip contacts that are already connected or pending)
@@ -146,10 +159,24 @@ impl NodesContainer {
                     Contact {
                         node_addr,
                         first_checked: None,
+                        currently_checking: false,
                     },
                 );
             }
         }
+    }
+
+    pub(super) fn finish_successful_contact_check(&mut self, addr: &SocketAddr) {
+        if let Some(contact) = self.contacts.get_mut(addr) {
+            contact.currently_checking = false;
+            if contact.first_checked.is_none() {
+                contact.first_checked.replace(Instant::now());
+            }
+        }
+    }
+
+    pub(super) fn finish_failed_contact_check(&mut self, addr: &SocketAddr) {
+        self.contacts.remove(addr);
     }
 
     /// State transition from Contact to PendingPeer for random known contact
