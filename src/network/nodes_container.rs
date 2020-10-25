@@ -9,8 +9,6 @@ use std::time::Instant;
 #[derive(Debug, Copy, Clone)]
 pub(super) struct Contact {
     node_addr: SocketAddr,
-    // TODO: Make this non-optional when we do check before adding contact
-    first_checked: Option<Instant>,
     currently_checking: bool,
 }
 
@@ -126,11 +124,10 @@ impl NodesContainer {
     /// Returns all known contacts, including those that are already connected or pending
     pub(super) fn get_contacts(&self) -> impl Iterator<Item = &SocketAddr> {
         // TODO: Should we prefer peers here (load balancing)
-        self.peers.keys().chain(self.pending_peers.keys()).chain(
-            self.contacts
-                .iter()
-                .filter_map(|(addr, contact)| contact.first_checked.map(|_| addr)),
-        )
+        self.peers
+            .keys()
+            .chain(self.pending_peers.keys())
+            .chain(self.contacts.keys())
     }
 
     /// Returns all known contacts, including those that are already connected or pending
@@ -158,7 +155,6 @@ impl NodesContainer {
                     node_addr,
                     Contact {
                         node_addr,
-                        first_checked: None,
                         currently_checking: false,
                     },
                 );
@@ -169,9 +165,6 @@ impl NodesContainer {
     pub(super) fn finish_successful_contact_check(&mut self, addr: &SocketAddr) {
         if let Some(contact) = self.contacts.get_mut(addr) {
             contact.currently_checking = false;
-            if contact.first_checked.is_none() {
-                contact.first_checked.replace(Instant::now());
-            }
         }
     }
 

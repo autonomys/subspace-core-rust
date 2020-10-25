@@ -581,8 +581,22 @@ trait TransportCommon {
 
         match response {
             InternalResponseMessage::Contacts(contacts) => {
-                // TODO: Try to connect to each contact before adding
-                self.nodes_container().lock().await.add_contacts(&contacts);
+                for contact in contacts {
+                    let network_weak = self.downgrade();
+                    async_std::task::spawn(async move {
+                        if let Ok(stream) = TcpStream::connect(contact).await {
+                            drop(stream);
+                            if let Some(network) = network_weak.upgrade() {
+                                network
+                                    .inner
+                                    .nodes_container
+                                    .lock()
+                                    .await
+                                    .add_contacts(&[contact]);
+                            }
+                        }
+                    });
+                }
 
                 Ok(())
             } // _ => Err(RequestError::BadResponse),
