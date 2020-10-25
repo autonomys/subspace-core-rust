@@ -645,7 +645,7 @@ trait TransportCommon {
         .await
     }
 
-    async fn connect_to_random_contact(&self) -> Result<PeersLevel, ConnectionError> {
+    async fn connect_to_random_contact(&self) -> Result<(), ConnectionError> {
         let pending_peer = match self
             .nodes_container()
             .lock()
@@ -661,7 +661,7 @@ trait TransportCommon {
         match self.connect_simple(pending_peer).await {
             Ok(peer) => {
                 drop(self.sync_contacts(peer).await);
-                Ok(self.nodes_container().lock().await.peers_level())
+                Ok(())
             }
             Err(error) => Err(error),
         }
@@ -838,7 +838,10 @@ impl StartupNetwork {
     }
 
     pub async fn connect_to_random_contact(&self) -> Result<PeersLevel, ConnectionError> {
-        TransportCommon::connect_to_random_contact(self).await
+        match TransportCommon::connect_to_random_contact(self).await {
+            Ok(_) => Ok(self.nodes_container().lock().await.peers_level()),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn finish_startup(self) -> Network {
@@ -1214,8 +1217,11 @@ impl Network {
                 drop(nodes_container);
                 // Below min_peers, let's connect to someone
                 loop {
+                    // TODO: This will establish one connection, but it may also fail; there should
+                    //  be a mechanism to establish connections when new contacts are requested and
+                    //  we are below min peers
                     match self.connect_to_random_contact().await {
-                        Ok(_peer_level) => {
+                        Ok(_peers_level) => {
                             // Connected, good, move on
                             break;
                         }
