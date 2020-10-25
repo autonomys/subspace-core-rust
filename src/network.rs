@@ -954,11 +954,37 @@ impl Network {
         });
         let maintain_peers_handle = async_std::task::spawn({
             let inner = Arc::clone(&network.inner);
+            let network_weak = network.downgrade();
 
             async move {
                 let mut interval = async_std::stream::interval(maintain_peers_interval);
                 while let Some(_) = interval.next().await {
-                    // TODO: Maintain peers
+                    if !inner.nodes_container.lock().await.peers_level().min_peers() {
+                        while let Some(network) = network_weak.upgrade() {
+                            match network.connect_to_random_contact().await {
+                                Ok(_) => {
+                                    if inner.nodes_container.lock().await.peers_level().min_peers()
+                                    {
+                                        // Got enough peers, good
+                                        break;
+                                    } else {
+                                        continue;
+                                    }
+                                }
+                                Err(error) => match error {
+                                    ConnectionError::NoContact => {
+                                        // No contacts left, give up
+                                        warn!("No contacts left for peers maintenance below min peers");
+                                        break;
+                                    }
+                                    _ => {
+                                        // Try again with a different peer
+                                        continue;
+                                    }
+                                },
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -1311,7 +1337,7 @@ impl Network {
                     //  be a mechanism to establish connections when new contacts are requested and
                     //  we are below min peers
                     match self.connect_to_random_contact().await {
-                        Ok(_peers_level) => {
+                        Ok(_) => {
                             // Connected, good, move on
                             break;
                         }

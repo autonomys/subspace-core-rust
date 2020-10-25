@@ -4,7 +4,6 @@ use lru::LruCache;
 use rand::seq::IteratorRandom;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::Instant;
 
 #[derive(Debug, Copy, Clone)]
 pub(super) struct Contact {
