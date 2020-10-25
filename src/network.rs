@@ -1217,6 +1217,8 @@ impl Network {
                 drop(nodes_container);
                 // Below min_peers, let's connect to someone
                 loop {
+                    // TODO: This can quickly exhaust contacts in case of temporary network
+                    //  disruption, isn't this a problem?
                     // TODO: This will establish one connection, but it may also fail; there should
                     //  be a mechanism to establish connections when new contacts are requested and
                     //  we are below min peers
