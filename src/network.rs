@@ -74,6 +74,7 @@ use async_std::net::{TcpListener, TcpStream};
 use async_std::sync::{channel, Receiver, Sender};
 use async_std::task::JoinHandle;
 use async_trait::async_trait;
+use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
 use bytes::{Bytes, BytesMut};
 use futures::lock::{Mutex as AsyncMutex, Mutex};
@@ -403,8 +404,8 @@ fn handle_messages(
             }
         }
 
-        if let Some(_network) = network_weak.upgrade() {
-            // TODO: Remove from connected peers and start reconnection process
+        if let Some(network) = network_weak.upgrade() {
+            network.reconnect(peer_addr).await;
         }
     });
 }
@@ -468,6 +469,7 @@ struct Inner {
     requests_container: Arc<AsyncMutex<RequestsContainer<ResponseMessage>>>,
     internal_requests_container: Arc<AsyncMutex<RequestsContainer<InternalResponseMessage>>>,
     node_addr: SocketAddr,
+    create_backoff: Box<dyn (Fn() -> ExponentialBackoff) + Send + Sync + 'static>,
 }
 
 impl Drop for Inner {
@@ -512,7 +514,7 @@ trait TransportCommon {
         };
 
         match exchange_peer_addr(own_address, &mut stream).await {
-            Some(_) => match self.on_connection_success(&pending_peer, stream).await {
+            Some(_peer_addr) => match self.on_connection_success(&pending_peer, stream).await {
                 Some(peer) => Ok(peer),
                 None => Err(ConnectionError::NoPendingPeer),
             },
@@ -677,7 +679,7 @@ impl StartupNetwork {
         max_contacts: usize,
         block_list_size: usize,
         _maintain_peers_interval: Duration,
-        _create_backoff: CB,
+        create_backoff: CB,
     ) -> io::Result<Self>
     where
         CB: (Fn() -> ExponentialBackoff) + Send + Sync + 'static,
@@ -708,6 +710,7 @@ impl StartupNetwork {
             requests_container: Arc::default(),
             internal_requests_container: Arc::default(),
             node_addr,
+            create_backoff: Box::new(create_backoff),
         });
 
         let network = Self { inner };
@@ -746,7 +749,7 @@ impl StartupNetwork {
 
                             let mut nodes_container = network.inner.nodes_container.lock().await;
 
-                            if nodes_container.is_in_block_list(&peer_addr) {
+                            if nodes_container.check_is_in_block_list(&peer_addr) {
                                 return;
                             }
                             nodes_container.add_contacts(&[peer_addr]);
@@ -1093,11 +1096,6 @@ impl Network {
             .push(Box::new(callback));
     }
 
-    fn _downgrade(&self) -> NetworkWeak {
-        let inner = Arc::downgrade(&self.inner);
-        NetworkWeak { inner }
-    }
-
     /// Non-generic method to avoid significant duplication in final binary
     async fn request(&self, message: RequestMessage) -> Result<ResponseMessage, RequestError> {
         let id;
@@ -1152,6 +1150,67 @@ impl Network {
             },
         )
         .await
+    }
+
+    // TODO: This function probably needs timeouts for various operations
+    async fn reconnect(&self, node_addr: SocketAddr) {
+        let pending_peer = self
+            .inner
+            .nodes_container
+            .lock()
+            .await
+            .start_peer_reconnection(&node_addr);
+        if let Some(pending_peer) = pending_peer {
+            let mut backoff = (self.inner.create_backoff)();
+            while let Some(delay) = backoff.next_backoff() {
+                debug!(
+                    "Reconnecting to peer {:?} after {} seconds",
+                    pending_peer,
+                    delay.as_secs_f32(),
+                );
+                async_std::task::sleep(delay).await;
+
+                let mut stream = match TcpStream::connect(pending_peer.address()).await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        debug!("Failed to reconnect to peer {:?}: {}", pending_peer, error);
+
+                        continue;
+                    }
+                };
+
+                match exchange_peer_addr(self.inner.node_addr, &mut stream).await {
+                    Some(_peer_addr) => {
+                        match self.on_connection_success(&pending_peer, stream).await {
+                            Some(_peer) => {
+                                debug!("Successfully reconnected to peer {:?}", pending_peer);
+                                return;
+                            }
+                            None => {
+                                debug!(
+                                    "Failed to reconnect to peer {:?}: no pending peer",
+                                    pending_peer,
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        debug!(
+                            "Failed to reconnect to peer {:?}: failed to exchange address",
+                            pending_peer,
+                        );
+                    }
+                }
+            }
+
+            self.inner
+                .nodes_container
+                .lock()
+                .await
+                .finish_failed_connection_attempt(&pending_peer);
+
+            // TODO: Check min peers and connect to random peer
+        }
     }
 }
 

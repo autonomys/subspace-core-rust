@@ -114,11 +114,11 @@ impl NodesContainer {
         }
     }
 
-    pub fn _add_to_block_list(&mut self, node_addr: SocketAddr) {
+    pub fn add_to_block_list(&mut self, node_addr: SocketAddr) {
         self.block_list.put(node_addr, ());
     }
 
-    pub fn is_in_block_list(&mut self, node_addr: &SocketAddr) -> bool {
+    pub fn check_is_in_block_list(&mut self, node_addr: &SocketAddr) -> bool {
         self.block_list.get(node_addr).is_some()
     }
 
@@ -139,7 +139,7 @@ impl NodesContainer {
         for node_addr in contacts.iter().take(contacts_until_max).copied() {
             if !(self.pending_peers.contains_key(&node_addr)
                 || self.peers.contains_key(&node_addr)
-                || self.is_in_block_list(&node_addr))
+                || self.check_is_in_block_list(&node_addr))
             {
                 self.contacts.insert(
                     node_addr,
@@ -196,8 +196,11 @@ impl NodesContainer {
     /// State transition from Peer to PendingPeer in case of reconnection needed
     ///
     /// Returns None if such connected peer was not found
-    pub(super) fn _start_peer_reconnection(&mut self, peer: &Peer) -> Option<PendingPeer> {
-        match self.peers.remove(&peer.node_addr) {
+    pub(super) fn start_peer_reconnection(
+        &mut self,
+        node_addr: &SocketAddr,
+    ) -> Option<PendingPeer> {
+        match self.peers.remove(&node_addr) {
             Some(peer) => {
                 let pending_peer: PendingPeer = peer.into();
                 self.pending_peers
