@@ -405,7 +405,9 @@ fn handle_messages(
         }
 
         if let Some(network) = network_weak.upgrade() {
-            network.reconnect(peer_addr).await;
+            async_std::task::spawn(async move {
+                network.reconnect(peer_addr).await;
+            });
         }
     });
 }
@@ -489,6 +491,8 @@ impl Drop for Inner {
 trait TransportCommon {
     fn nodes_container(&self) -> &AsyncMutex<NodesContainer>;
 
+    fn node_addr(&self) -> SocketAddr;
+
     // TODO: It is ugly that we can get regular Network from StartupNetwork instance this way
     fn downgrade(&self) -> NetworkWeak;
 
@@ -499,11 +503,7 @@ trait TransportCommon {
     ) -> &AsyncMutex<RequestsContainer<InternalResponseMessage>>;
 
     // TODO: This function probably needs timeouts for various operations
-    async fn connect_simple(
-        &self,
-        own_address: SocketAddr,
-        pending_peer: PendingPeer,
-    ) -> Result<Peer, ConnectionError> {
+    async fn connect_simple(&self, pending_peer: PendingPeer) -> Result<Peer, ConnectionError> {
         let mut stream = match TcpStream::connect(pending_peer.address()).await {
             Ok(stream) => stream,
             Err(error) => {
@@ -513,7 +513,7 @@ trait TransportCommon {
             }
         };
 
-        match exchange_peer_addr(own_address, &mut stream).await {
+        match exchange_peer_addr(self.node_addr(), &mut stream).await {
             Some(_peer_addr) => match self.on_connection_success(&pending_peer, stream).await {
                 Some(peer) => Ok(peer),
                 None => Err(ConnectionError::NoPendingPeer),
@@ -644,6 +644,28 @@ trait TransportCommon {
         )
         .await
     }
+
+    async fn connect_to_random_contact(&self) -> Result<PeersLevel, ConnectionError> {
+        let pending_peer = match self
+            .nodes_container()
+            .lock()
+            .await
+            .connect_to_random_contact()
+        {
+            Some(pending_peer) => pending_peer,
+            None => {
+                return Err(ConnectionError::NoContact);
+            }
+        };
+
+        match self.connect_simple(pending_peer).await {
+            Ok(peer) => {
+                drop(self.sync_contacts(peer).await);
+                Ok(self.nodes_container().lock().await.peers_level())
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 pub struct StartupNetwork {
@@ -653,6 +675,10 @@ pub struct StartupNetwork {
 impl TransportCommon for StartupNetwork {
     fn nodes_container(&self) -> &Mutex<NodesContainer> {
         &self.inner.nodes_container
+    }
+
+    fn node_addr(&self) -> SocketAddr {
+        self.inner.node_addr
     }
 
     fn downgrade(&self) -> NetworkWeak {
@@ -799,10 +825,7 @@ impl StartupNetwork {
         };
         drop(nodes_container);
 
-        match self
-            .connect_simple(self.inner.node_addr, pending_peer)
-            .await
-        {
+        match self.connect_simple(pending_peer).await {
             Ok(peer) => match self.sync_contacts(peer).await {
                 Ok(_) => Ok(self.inner.nodes_container.lock().await.contacts_level()),
                 Err(error) => {
@@ -815,29 +838,7 @@ impl StartupNetwork {
     }
 
     pub async fn connect_to_random_contact(&self) -> Result<PeersLevel, ConnectionError> {
-        let pending_peer = match self
-            .inner
-            .nodes_container
-            .lock()
-            .await
-            .connect_to_random_contact()
-        {
-            Some(pending_peer) => pending_peer,
-            None => {
-                return Err(ConnectionError::NoContact);
-            }
-        };
-
-        match self
-            .connect_simple(self.inner.node_addr, pending_peer)
-            .await
-        {
-            Ok(peer) => {
-                drop(self.sync_contacts(peer).await);
-                Ok(self.inner.nodes_container.lock().await.peers_level())
-            }
-            Err(error) => Err(error),
-        }
+        TransportCommon::connect_to_random_contact(self).await
     }
 
     pub fn finish_startup(self) -> Network {
@@ -853,6 +854,10 @@ pub struct Network {
 impl TransportCommon for Network {
     fn nodes_container(&self) -> &Mutex<NodesContainer> {
         &self.inner.nodes_container
+    }
+
+    fn node_addr(&self) -> SocketAddr {
+        self.inner.node_addr
     }
 
     fn downgrade(&self) -> NetworkWeak {
@@ -1203,13 +1208,29 @@ impl Network {
                 }
             }
 
-            self.inner
-                .nodes_container
-                .lock()
-                .await
-                .finish_failed_connection_attempt(&pending_peer);
-
-            // TODO: Check min peers and connect to random peer
+            let mut nodes_container = self.inner.nodes_container.lock().await;
+            nodes_container.finish_failed_connection_attempt(&pending_peer);
+            if !nodes_container.peers_level().min_peers() {
+                drop(nodes_container);
+                // Below min_peers, let's connect to someone
+                loop {
+                    match self.connect_to_random_contact().await {
+                        Ok(_peer_level) => {
+                            // Connected, good, move on
+                            break;
+                        }
+                        Err(error) => match error {
+                            ConnectionError::NoContact => {
+                                // No contacts left, give up
+                                break;
+                            }
+                            _ => {
+                                continue;
+                            }
+                        },
+                    }
+                }
+            }
         }
     }
 }
