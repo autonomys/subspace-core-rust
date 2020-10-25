@@ -71,12 +71,12 @@ use crate::transaction::{SimpleCreditTx, Transaction, TxId};
 use crate::{console, ContentId, PieceIndex, ProofId};
 use crate::{NodeID, PieceId};
 use async_std::net::{TcpListener, TcpStream};
-use async_std::sync::{channel, Receiver, Sender};
+use async_std::sync::{channel, Receiver};
 use async_std::task::JoinHandle;
 use async_trait::async_trait;
 use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use futures::lock::{Mutex as AsyncMutex, Mutex};
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use futures_lite::future;
@@ -236,25 +236,6 @@ fn create_message_receiver(mut stream: TcpStream) -> Receiver<Message> {
     message_receiver
 }
 
-fn create_bytes_sender(mut stream: TcpStream) -> Sender<Bytes> {
-    let (bytes_sender, mut bytes_receiver) = channel::<Bytes>(32);
-
-    async_std::task::spawn(async move {
-        while let Some(bytes) = bytes_receiver.next().await {
-            let length = bytes.len() as u16;
-            let result: io::Result<()> = try {
-                stream.write_all(&length.to_le_bytes()).await?;
-                stream.write_all(&bytes).await?
-            };
-            if result.is_err() {
-                break;
-            }
-        }
-    });
-
-    bytes_sender
-}
-
 async fn exchange_peer_addr(own_addr: SocketAddr, stream: &mut TcpStream) -> Option<SocketAddr> {
     // TODO: Timeout for this function
     let own_addr_string = own_addr.to_string();
@@ -305,7 +286,7 @@ fn handle_messages(
     network_weak: NetworkWeak,
     mut message_receiver: Receiver<Message>,
     peer_addr: SocketAddr,
-    bytes_sender: Sender<Bytes>,
+    peer: Peer,
 ) {
     async_std::task::spawn(async move {
         while let Some(message) = message_receiver.next().await {
@@ -332,14 +313,11 @@ fn handle_messages(
                             .await,
                     );
                     {
-                        let client_sender = bytes_sender.clone();
+                        let peer = peer.clone();
                         async_std::task::spawn(async move {
                             if let Ok(message) = response_receiver.await {
-                                drop(
-                                    client_sender
-                                        .send(Message::Response { id, message }.to_bytes())
-                                        .await,
-                                );
+                                peer.send(Message::Response { id, message }.to_bytes())
+                                    .await;
                             }
                         });
                     }
@@ -375,17 +353,14 @@ fn handle_messages(
                                 .collect(),
                         ),
                     };
-                    drop(
-                        bytes_sender
-                            .send(
-                                Message::InternalResponse {
-                                    id,
-                                    message: response,
-                                }
-                                .to_bytes(),
-                            )
-                            .await,
-                    );
+                    peer.send(
+                        Message::InternalResponse {
+                            id,
+                            message: response,
+                        }
+                        .to_bytes(),
+                    )
+                    .await;
                 }
                 Message::InternalResponse { id, message } => {
                     if let Some(response_sender) = network
@@ -450,13 +425,6 @@ struct Handlers {
     peer: AsyncMutex<Vec<Box<dyn Fn(&Peer) + Send>>>,
     gossip: AsyncMutex<Vec<Box<dyn Fn(&GossipMessage) + Send>>>,
 }
-
-#[derive(Clone)]
-pub struct ConnectedPeer {
-    addr: SocketAddr,
-    bytes_sender: Sender<Bytes>,
-}
-
 struct Inner {
     node_id: NodeID,
     nodes_container: AsyncMutex<NodesContainer>,
@@ -531,13 +499,11 @@ trait TransportCommon {
         pending_peer: &PendingPeer,
         stream: TcpStream,
     ) -> Option<Peer> {
-        let bytes_sender = create_bytes_sender(stream.clone());
-
         let peer = self
             .nodes_container()
             .lock()
             .await
-            .finish_successful_connection_attempt(pending_peer, bytes_sender.clone());
+            .finish_successful_connection_attempt(pending_peer, stream.clone());
 
         if let Some(peer) = &peer {
             let message_receiver = create_message_receiver(stream);
@@ -546,7 +512,7 @@ trait TransportCommon {
                 self.downgrade(),
                 message_receiver,
                 *peer.address(),
-                bytes_sender,
+                peer.clone(),
             );
 
             for callback in self.handlers().peer.lock().await.iter() {

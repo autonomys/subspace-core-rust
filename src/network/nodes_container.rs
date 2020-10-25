@@ -1,9 +1,31 @@
-use async_std::sync::Sender;
+use async_std::net::TcpStream;
+use async_std::sync::{channel, Sender};
 use bytes::Bytes;
+use futures::{AsyncWriteExt, StreamExt};
 use lru::LruCache;
 use rand::seq::IteratorRandom;
 use std::collections::HashMap;
+use std::io;
 use std::net::SocketAddr;
+
+fn create_bytes_sender(mut stream: TcpStream) -> Sender<Bytes> {
+    let (bytes_sender, mut bytes_receiver) = channel::<Bytes>(32);
+
+    async_std::task::spawn(async move {
+        while let Some(bytes) = bytes_receiver.next().await {
+            let length = bytes.len() as u16;
+            let result: io::Result<()> = try {
+                stream.write_all(&length.to_le_bytes()).await?;
+                stream.write_all(&bytes).await?
+            };
+            if result.is_err() {
+                break;
+            }
+        }
+    });
+
+    bytes_sender
+}
 
 #[derive(Debug, Copy, Clone)]
 pub(super) struct Contact {
@@ -237,8 +259,9 @@ impl NodesContainer {
     pub(super) fn finish_successful_connection_attempt(
         &mut self,
         pending_peer: &PendingPeer,
-        bytes_sender: Sender<Bytes>,
+        stream: TcpStream,
     ) -> Option<Peer> {
+        let bytes_sender = create_bytes_sender(stream);
         match self.pending_peers.remove(&pending_peer.node_addr) {
             Some(PendingPeer { node_addr }) => {
                 let peer = Peer {
