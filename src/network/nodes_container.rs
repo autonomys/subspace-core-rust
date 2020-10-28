@@ -1,16 +1,37 @@
-use async_std::sync::Sender;
+use async_std::net::{Shutdown, TcpStream};
+use async_std::sync::{channel, Sender};
 use bytes::Bytes;
+use futures::{AsyncWriteExt, StreamExt};
 use lru::LruCache;
 use rand::seq::IteratorRandom;
 use std::collections::HashMap;
+use std::io;
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::sync::{Arc, Weak};
+
+fn create_bytes_sender(mut stream: TcpStream) -> Sender<Bytes> {
+    let (bytes_sender, mut bytes_receiver) = channel::<Bytes>(32);
+
+    async_std::task::spawn(async move {
+        while let Some(bytes) = bytes_receiver.next().await {
+            let length = bytes.len() as u16;
+            let result: io::Result<()> = try {
+                stream.write_all(&length.to_le_bytes()).await?;
+                stream.write_all(&bytes).await?
+            };
+            if result.is_err() {
+                break;
+            }
+        }
+    });
+
+    bytes_sender
+}
 
 #[derive(Debug, Copy, Clone)]
 pub(super) struct Contact {
     node_addr: SocketAddr,
-    // TODO: Use this field for periodic pings
-    first_checked: Option<Instant>,
+    currently_checking: bool,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -40,8 +61,10 @@ impl From<Contact> for PendingPeer {
 }
 
 impl From<Peer> for PendingPeer {
-    fn from(Peer { node_addr, .. }: Peer) -> Self {
-        PendingPeer { node_addr }
+    fn from(peer: Peer) -> Self {
+        PendingPeer {
+            node_addr: peer.inner.node_addr,
+        }
     }
 }
 
@@ -52,18 +75,47 @@ impl PendingPeer {
 }
 
 #[derive(Debug, Clone)]
-pub struct Peer {
+struct PeerInner {
     node_addr: SocketAddr,
     bytes_sender: Sender<Bytes>,
+    stream: TcpStream,
+}
+
+impl Drop for PeerInner {
+    fn drop(&mut self) {
+        drop(self.stream.shutdown(Shutdown::Both));
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Peer {
+    inner: Arc<PeerInner>,
 }
 
 impl Peer {
     pub fn address(&self) -> &SocketAddr {
-        &self.node_addr
+        &self.inner.node_addr
     }
 
     pub(super) async fn send(&self, bytes: Bytes) {
-        self.bytes_sender.send(bytes).await
+        self.inner.bytes_sender.send(bytes).await
+    }
+
+    pub fn downgrade(&self) -> PeerWeak {
+        PeerWeak {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerWeak {
+    inner: Weak<PeerInner>,
+}
+
+impl PeerWeak {
+    pub fn upgrade(&self) -> Option<Peer> {
+        self.inner.upgrade().map(|inner| Peer { inner })
     }
 }
 
@@ -114,23 +166,38 @@ impl NodesContainer {
         }
     }
 
-    pub fn _add_to_block_list(&mut self, node_addr: SocketAddr) {
+    /// Add address to block list and drop active connection if there is any
+    pub(super) fn add_to_block_list(&mut self, node_addr: SocketAddr) {
         self.block_list.put(node_addr, ());
+        self.contacts.remove(&node_addr);
+        self.pending_peers.remove(&node_addr);
+        self.peers.remove(&node_addr);
     }
 
-    pub fn is_in_block_list(&mut self, node_addr: &SocketAddr) -> bool {
+    pub(super) fn check_is_in_block_list(&mut self, node_addr: &SocketAddr) -> bool {
         self.block_list.get(node_addr).is_some()
     }
 
-    // TODO: Should this return contact structs?
     /// Returns all known contacts, including those that are already connected or pending
     pub(super) fn get_contacts(&self) -> impl Iterator<Item = &SocketAddr> {
         // TODO: Should we prefer peers here (load balancing)
-        self.peers.keys().chain(self.pending_peers.keys()).chain(
-            self.contacts
-                .iter()
-                .filter_map(|(addr, contact)| contact.first_checked.map(|_| addr)),
-        )
+        self.peers
+            .keys()
+            .chain(self.pending_peers.keys())
+            .chain(self.contacts.keys())
+    }
+
+    /// Returns all known contacts, including those that are already connected or pending
+    pub(super) fn get_contacts_to_check(&mut self) -> impl Iterator<Item = SocketAddr> + '_ {
+        // TODO: Should we prefer peers here (load balancing)
+        self.contacts.iter_mut().filter_map(|(addr, contact)| {
+            if contact.currently_checking {
+                None
+            } else {
+                contact.currently_checking = true;
+                Some(*addr)
+            }
+        })
     }
 
     /// Add contacts to the list (will skip contacts that are already connected or pending)
@@ -139,17 +206,27 @@ impl NodesContainer {
         for node_addr in contacts.iter().take(contacts_until_max).copied() {
             if !(self.pending_peers.contains_key(&node_addr)
                 || self.peers.contains_key(&node_addr)
-                || self.is_in_block_list(&node_addr))
+                || self.check_is_in_block_list(&node_addr))
             {
                 self.contacts.insert(
                     node_addr,
                     Contact {
                         node_addr,
-                        first_checked: None,
+                        currently_checking: false,
                     },
                 );
             }
         }
+    }
+
+    pub(super) fn finish_successful_contact_check(&mut self, addr: &SocketAddr) {
+        if let Some(contact) = self.contacts.get_mut(addr) {
+            contact.currently_checking = false;
+        }
+    }
+
+    pub(super) fn finish_failed_contact_check(&mut self, addr: &SocketAddr) {
+        self.contacts.remove(addr);
     }
 
     /// State transition from Contact to PendingPeer for random known contact
@@ -196,8 +273,11 @@ impl NodesContainer {
     /// State transition from Peer to PendingPeer in case of reconnection needed
     ///
     /// Returns None if such connected peer was not found
-    pub(super) fn _start_peer_reconnection(&mut self, peer: &Peer) -> Option<PendingPeer> {
-        match self.peers.remove(&peer.node_addr) {
+    pub(super) fn start_peer_reconnection(
+        &mut self,
+        node_addr: &SocketAddr,
+    ) -> Option<PendingPeer> {
+        match self.peers.remove(&node_addr) {
             Some(peer) => {
                 let pending_peer: PendingPeer = peer.into();
                 self.pending_peers
@@ -215,14 +295,20 @@ impl NodesContainer {
     pub(super) fn finish_successful_connection_attempt(
         &mut self,
         pending_peer: &PendingPeer,
-        bytes_sender: Sender<Bytes>,
+        stream: TcpStream,
     ) -> Option<Peer> {
+        let bytes_sender = create_bytes_sender(stream.clone());
         match self.pending_peers.remove(&pending_peer.node_addr) {
             Some(PendingPeer { node_addr }) => {
-                let peer = Peer {
+                let inner = PeerInner {
                     node_addr,
                     bytes_sender,
+                    stream,
                 };
+                let peer = Peer {
+                    inner: Arc::new(inner),
+                };
+
                 self.peers.insert(node_addr, peer.clone());
 
                 Some(peer)
