@@ -31,6 +31,10 @@ use tui_logger::{init_logger, set_default_level};
    - test transaction throughput
    - finish p2p network impl (Nazar)
 
+   - refactor plot to work of the same method for startup and subsequent plotting
+   - refactor sloth into encoder/decoder
+   - handle deep forks when there are only two blocks for the same first timeslot
+
    - Compute and enforce cost of storage
    - Storage accounts
    - Switch to Schnorr signatures

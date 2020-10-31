@@ -11,14 +11,9 @@ use std::convert::TryInto;
 
     IMMEDIATE
 
-    - refactor plot to work of the same method for startup and subsequent plotting
-    - Sync the state chain
-    - Sync archival state from state chain
-
     - Add index pieces to state
     - Add erasure coding to state
     - Add remaining fields to state block
-
 
    LATER
 
