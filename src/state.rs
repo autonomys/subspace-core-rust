@@ -130,6 +130,7 @@ impl State {
 
     /// Apply length prefixed state to buffer, encode state when buffer is full.
     pub async fn add_data(&mut self, mut data: Vec<u8>) -> Option<StateBundle> {
+        // TODO: add an assertion
         let data_len = data.len() as u16;
         let mut len_as_bytes = data_len.to_be_bytes().to_vec();
         let full_len = data_len + 2;
@@ -141,6 +142,8 @@ impl State {
         // if data does not reach boundary: just add state
 
         let new_len = self.pending_state.len() + full_len as usize;
+
+        // TODO: maybe rewrite as if/else-if/else
 
         // add data first
         if new_len == STATE_BLOCK_SIZE_IN_BYTES {
@@ -178,13 +181,13 @@ impl State {
         // pad to state block size
         new_state.resize(STATE_BLOCK_SIZE_IN_BYTES, 0u8);
 
+        // TODO: erasure code state here: 1:1 ratio of source:parity pieces
+
         // slice into pieces
         let pieces: Vec<Piece> = new_state
             .chunks_exact(PIECE_SIZE)
             .map(|piece| piece.try_into().unwrap())
             .collect();
-
-        // TODO: erasure code state here
 
         let piece_ids: Vec<[u8; 32]> = pieces
             .iter()

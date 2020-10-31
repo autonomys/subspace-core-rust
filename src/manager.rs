@@ -466,6 +466,9 @@ pub async fn run(
                 }
                 info!("Synced the state chain!");
 
+                // TODO: Handle the edge case where ...
+                // TODO: what if the we sync the state chain, then a new state block is encoded before and we try to sync those pieces with no merkle root to validate against
+
                 // sync state and plot
                 let mut piece_index = 0;
                 let sloth = sloth::Sloth::init(PRIME_SIZE_BITS);
@@ -537,7 +540,7 @@ pub async fn run(
                                         .await;
 
                                     if let Err(error) = result {
-                                        warn!("{}", error);
+                                        panic!("{}", error);
                                     }
 
                                     piece_index += 1;
