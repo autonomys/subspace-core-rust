@@ -280,7 +280,7 @@ mod tests {
         let data = crypto::generate_random_piece();
         state.add_data(data.to_vec()).await;
 
-        expected_length += (4096 + 2);
+        expected_length += 4096 + 2;
         assert_eq!(state.pending_state.len(), expected_length);
     }
 
