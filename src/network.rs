@@ -105,10 +105,11 @@ use log::*;
 use messages::{BlocksRequest, GossipMessage, Message, RequestMessage, ResponseMessage};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt::{Debug, Display};
 use std::io::Write;
+use std::iter::FromIterator;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -142,8 +143,9 @@ const MAX_MESSAGE_CONTENTS_LENGTH: usize = 2usize.pow(16) - 1;
 // TODO: Consider adaptive request timeout for more efficient sync
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const INITIAL_BACKOFF_INTERVAL: Duration = Duration::from_secs(1);
-const MAX_BACKOFF_INTERVAL: Duration = Duration::from_secs(60);
-const BACKOFF_MULTIPLIER: f64 = 10_f64;
+const MAX_BACKOFF_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_BACKOFF_ELAPSED_TIME: Duration = Duration::from_secs(60);
+const BACKOFF_MULTIPLIER: f64 = 5_f64;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum NodeType {
@@ -180,6 +182,7 @@ pub fn create_backoff() -> ExponentialBackoff {
     backoff.initial_interval = INITIAL_BACKOFF_INTERVAL;
     backoff.max_interval = MAX_BACKOFF_INTERVAL;
     backoff.multiplier = BACKOFF_MULTIPLIER;
+    backoff.max_elapsed_time = Some(MAX_BACKOFF_ELAPSED_TIME);
     backoff
 }
 
@@ -458,12 +461,12 @@ struct Handlers {
 
 struct Inner {
     node_id: NodeID,
-    gateway_nodes: Vec<SocketAddr>,
+    gateway_nodes: HashSet<SocketAddr>,
     nodes_container: Arc<AsyncMutex<NodesContainer>>,
     background_tasks: StdMutex<Vec<JoinHandle<()>>>,
     // Paused is used as synchronization mechanism during pause/resume transition, it will be locked
     // while network is paused
-    paused: AsyncMutex<()>,
+    paused: Arc<AsyncMutex<()>>,
     handlers: Handlers,
     gossip_sender: async_channel::Sender<(SocketAddr, GossipMessage)>,
     gossip_receiver: StdMutex<Option<async_channel::Receiver<(SocketAddr, GossipMessage)>>>,
@@ -563,10 +566,10 @@ impl Network {
 
         let inner = Arc::new(Inner {
             node_id,
-            gateway_nodes: gateway_nodes.clone(),
+            gateway_nodes: HashSet::from_iter(gateway_nodes.iter().copied()),
             nodes_container: Arc::new(AsyncMutex::new(nodes_container)),
             background_tasks: StdMutex::default(),
-            paused: AsyncMutex::new(()),
+            paused: Arc::new(AsyncMutex::new(())),
             handlers,
             gossip_sender,
             gossip_receiver: StdMutex::new(Some(gossip_receiver)),
@@ -736,6 +739,46 @@ impl Network {
                     }
                 }
 
+                // If not enough peers - connect to random contacts
+                loop {
+                    match network.connect_to_random_contact().await {
+                        Ok(_) => {
+                            if network
+                                .inner
+                                .nodes_container
+                                .lock()
+                                .await
+                                .peers_level()
+                                .min_peers()
+                            {
+                                break;
+                            }
+                        }
+                        Err(error) => match error {
+                            ConnectionError::NoContact => {
+                                break;
+                            }
+                            _ => {
+                                trace!(
+                                    "Failed to connect to random contact on startup: {:?}",
+                                    error
+                                );
+                            }
+                        },
+                    }
+                }
+
+                if network
+                    .inner
+                    .nodes_container
+                    .lock()
+                    .await
+                    .peers_level()
+                    .min_peers()
+                {
+                    break;
+                }
+
                 warn!("Have not connected to enough peers, waiting 10 seconds and trying again");
 
                 async_std::task::sleep(Duration::from_secs(10)).await;
@@ -754,16 +797,13 @@ impl Network {
             let nodes_container = Arc::clone(&self.inner.nodes_container);
             let nodes_file = Arc::clone(&self.inner.nodes_file);
             let network_weak = self.downgrade();
+            let paused = Arc::clone(&self.inner.paused);
 
             async move {
-                let mut interval = async_std::stream::interval(maintain_peers_interval);
-                while let Some(_) = interval.next().await {
-                    if let Some(network) = network_weak.upgrade() {
-                        // Make sure network is not paused
-                        network.inner.paused.lock().await;
-                    } else {
-                        break;
-                    }
+                loop {
+                    async_std::task::sleep(maintain_peers_interval).await;
+                    // Make sure network is not paused
+                    paused.lock().await;
 
                     trace!("Maintaining contacts");
                     let mut nodes_container_locked = nodes_container.lock().await;
@@ -831,27 +871,24 @@ impl Network {
         let maintain_peers_handle = async_std::task::spawn({
             let nodes_container = Arc::clone(&self.inner.nodes_container);
             let network_weak = self.downgrade();
+            let paused = Arc::clone(&self.inner.paused);
 
             async move {
-                let mut interval = async_std::stream::interval(maintain_peers_interval);
-                while let Some(_) = interval.next().await {
-                    if let Some(network) = network_weak.upgrade() {
-                        // Make sure network is not paused
-                        network.inner.paused.lock().await;
-                    } else {
-                        break;
-                    }
+                loop {
+                    async_std::task::sleep(maintain_peers_interval).await;
+                    // Make sure network is not paused
+                    paused.lock().await;
 
                     trace!("Maintaining peers");
                     if !nodes_container.lock().await.peers_level().min_peers() {
                         trace!("Below min peers, trying to establish more connections");
 
-                        while let Some(network) = network_weak.upgrade() {
+                        'network: while let Some(network) = network_weak.upgrade() {
                             match network.connect_to_random_contact().await {
                                 Ok(_) => {
                                     if nodes_container.lock().await.peers_level().min_peers() {
                                         // Got enough peers, good
-                                        break;
+                                        break 'network;
                                     } else {
                                         continue;
                                     }
@@ -860,7 +897,7 @@ impl Network {
                                     ConnectionError::NoContact => {
                                         // No contacts left, give up
                                         warn!("No contacts left for peers maintenance below min peers");
-                                        break;
+                                        break 'network;
                                     }
                                     _ => {
                                         // Try again with a different peer
@@ -1064,7 +1101,11 @@ impl Network {
         let pending_peer = match nodes_container.connect_to_specific_contact(&peer_addr) {
             Some(pending_peer) => pending_peer,
             None => {
-                return Err(ConnectionError::NoContact);
+                return if nodes_container.is_peer_connected(&peer_addr) {
+                    Err(ConnectionError::AlreadyConnected)
+                } else {
+                    Err(ConnectionError::NoContact)
+                };
             }
         };
         drop(nodes_container);
@@ -1373,10 +1414,20 @@ impl Network {
     }
 
     // TODO: This function probably needs timeouts for various operations
+    // TODO: Check if we really need to reconnect, maybe we above min_peers already and don't care
     async fn reconnect(&self, node_addr: SocketAddr) {
         let pending_peer = {
             let mut nodes_container = self.inner.nodes_container.lock().await;
-            let pending_peer = nodes_container.start_peer_reconnection(&node_addr);
+            // We do not reconnect to gateways in a regular way since otherwise it will conflict
+            // with code below that tries to establish connections to gateways specifically and will
+            // cause that code being unable to establish a connection (remember, regular
+            // reconnections are paused while we wait for network connection to recover)
+            let pending_peer = if self.inner.gateway_nodes.contains(&node_addr) {
+                nodes_container.remove_peer(&node_addr);
+                None
+            } else {
+                nodes_container.start_peer_reconnection(&node_addr)
+            };
             let peers_count = nodes_container.get_peers().len();
             drop(nodes_container);
 
@@ -1392,19 +1443,25 @@ impl Network {
                     }
                 });
 
-                // Take lock on paused network
+                // TODO: This may also prevent network from shutting down, needs to happen in the
+                //  background
+                // Take lock on paused network such that nothing else can take it
                 if let Some(paused) = self.inner.paused.try_lock() {
                     self.inner.handlers.pause.call_simple();
+
+                    let mut backoff: ExponentialBackoff = (self.inner.create_backoff)();
+                    backoff.max_elapsed_time = None;
 
                     // Looks like we've lost all connections, try to reconnect to one of the
                     // gateways, this will indicate that network works again
                     'outer_loop: loop {
-                        let mut gateway_nodes = self.inner.gateway_nodes.clone();
+                        let mut gateway_nodes =
+                            self.inner.gateway_nodes.iter().copied().collect::<Vec<_>>();
                         gateway_nodes.shuffle(&mut rand::thread_rng());
 
                         for addr in gateway_nodes {
                             match self.connect(addr).await {
-                                Ok(_) => {
+                                Ok(_) | Err(ConnectionError::AlreadyConnected) => {
                                     break 'outer_loop;
                                 }
                                 Err(error) => {
@@ -1415,12 +1472,15 @@ impl Network {
                                 }
                             }
 
+                            let delay = backoff.next_backoff().expect("No limit");
+
+                            async_std::task::sleep(delay).await;
+
                             warn!(
                                 "Have not connected to a gateway after lost network, \
-                                waiting 10 seconds and trying again"
+                                waiting {} seconds and trying again",
+                                delay.as_secs_f32(),
                             );
-
-                            async_std::task::sleep(Duration::from_secs(10)).await;
                         }
                     }
 
@@ -1437,86 +1497,107 @@ impl Network {
             }
             pending_peer
         };
+
         if let Some(pending_peer) = pending_peer {
-            let mut backoff = (self.inner.create_backoff)();
-            while let Some(delay) = backoff.next_backoff() {
-                // Make sure network is not paused
-                self.inner.paused.lock().await;
+            let mut backoff: ExponentialBackoff = (self.inner.create_backoff)();
+            let network_weak = self.downgrade();
+            let paused = Arc::clone(&self.inner.paused);
 
-                debug!(
-                    "Reconnecting to peer {:?} after {} seconds",
-                    pending_peer,
-                    delay.as_secs_f32(),
-                );
-                async_std::task::sleep(delay).await;
+            // This may prevent network from shutting down, hence running in the background
+            async_std::task::spawn(async move {
+                while let Some(delay) = backoff.next_backoff() {
+                    debug!(
+                        "Reconnecting to peer {:?} after {} seconds",
+                        pending_peer,
+                        delay.as_secs_f32(),
+                    );
+                    async_std::task::sleep(delay).await;
 
-                let mut stream = match TcpStream::connect(pending_peer.address()).await {
-                    Ok(stream) => stream,
-                    Err(error) => {
-                        debug!("Failed to reconnect to peer {:?}: {}", pending_peer, error);
+                    // Make sure network is not paused
+                    paused.lock().await;
 
-                        continue;
+                    let network = match network_weak.upgrade() {
+                        Some(network) => network,
+                        None => {
+                            return;
+                        }
+                    };
+
+                    let mut stream = match TcpStream::connect(pending_peer.address()).await {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            debug!("Failed to reconnect to peer {:?}: {}", pending_peer, error);
+
+                            continue;
+                        }
+                    };
+
+                    match exchange_peer_addr(network.inner.node_addr, &mut stream).await {
+                        Some(_peer_addr) => {
+                            match network.on_connection_success(&pending_peer, stream).await {
+                                Some(_peer) => {
+                                    debug!("Successfully reconnected to peer {:?}", pending_peer);
+                                    return;
+                                }
+                                None => {
+                                    debug!(
+                                        "Failed to reconnect to peer {:?}: no pending peer",
+                                        pending_peer,
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            debug!(
+                                "Failed to reconnect to peer {:?}: failed to exchange address",
+                                pending_peer,
+                            );
+                        }
+                    }
+                }
+
+                let network = match network_weak.upgrade() {
+                    Some(network) => network,
+                    None => {
+                        return;
                     }
                 };
 
-                match exchange_peer_addr(self.inner.node_addr, &mut stream).await {
-                    Some(_peer_addr) => {
-                        match self.on_connection_success(&pending_peer, stream).await {
-                            Some(_peer) => {
-                                debug!("Successfully reconnected to peer {:?}", pending_peer);
-                                return;
-                            }
-                            None => {
-                                debug!(
-                                    "Failed to reconnect to peer {:?}: no pending peer",
-                                    pending_peer,
-                                );
-                            }
-                        }
-                    }
-                    None => {
-                        debug!(
-                            "Failed to reconnect to peer {:?}: failed to exchange address",
-                            pending_peer,
-                        );
-                    }
-                }
-            }
+                network.on_connection_failure(&pending_peer).await;
 
-            self.on_connection_failure(&pending_peer).await;
-
-            if !self
-                .inner
-                .nodes_container
-                .lock()
-                .await
-                .peers_level()
-                .min_peers()
-            {
-                // Below min_peers, let's connect to someone
-                loop {
-                    // TODO: This can quickly exhaust contacts in case of temporary network
-                    //  disruption, isn't this a problem?
-                    // TODO: This will establish one connection, but it may also fail; there should
-                    //  be a mechanism to establish connections when new contacts are requested and
-                    //  we are below min peers
-                    match self.connect_to_random_contact().await {
-                        Ok(_) => {
-                            // Connected, good, move on
-                            break;
-                        }
-                        Err(error) => match error {
-                            ConnectionError::NoContact => {
-                                // No contacts left, give up
+                if !network
+                    .inner
+                    .nodes_container
+                    .lock()
+                    .await
+                    .peers_level()
+                    .min_peers()
+                {
+                    // Below min_peers, let's connect to someone
+                    loop {
+                        // TODO: This can quickly exhaust contacts in case of temporary network
+                        //  disruption, isn't this a problem?
+                        // TODO: This will establish one connection, but it may also fail; there should
+                        //  be a mechanism to establish connections when new contacts are requested and
+                        //  we are below min peers
+                        match network.connect_to_random_contact().await {
+                            Ok(_) => {
+                                // Connected, good, move on
                                 break;
                             }
-                            _ => {
-                                continue;
-                            }
-                        },
+                            Err(error) => match error {
+                                ConnectionError::NoContact => {
+                                    // No contacts left, give up
+                                    break;
+                                }
+                                _ => {
+                                    continue;
+                                }
+                            },
+                        }
                     }
                 }
-            }
+            });
         }
     }
 }
@@ -1542,7 +1623,7 @@ mod tests {
     use futures::executor;
     use std::fs;
     use std::ops::Deref;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -1934,6 +2015,7 @@ mod tests {
 
             async_std::task::sleep(Duration::from_millis(300)).await;
 
+            // TODO: Check peers too
             let contacts = peer_network_1
                 .inner
                 .nodes_container
@@ -2016,11 +2098,13 @@ mod tests {
                 "All peers must be disconnected",
             );
 
+            let path_peer_2 = TargetDirectory::new("test_reconnection_peer_2");
+
             let peer_startup_network_1 = Network::new(
                 NodeID::default(),
                 peer_network_1_address,
                 vec![],
-                &path_peer_1,
+                &path_peer_2,
                 1,
                 2,
                 5,
@@ -2050,6 +2134,177 @@ mod tests {
             );
 
             drop(peer_startup_network_1);
+        });
+    }
+
+    #[test]
+    fn test_network_outage() {
+        init();
+        executor::block_on(async {
+            let create_backoff = || {
+                let mut backoff = ExponentialBackoff::default();
+                backoff.initial_interval = Duration::from_millis(100);
+                backoff.max_interval = Duration::from_millis(100);
+                backoff
+            };
+
+            let path_gateway = TargetDirectory::new("test_network_outage_gateway");
+
+            let gateway_network = Network::new(
+                NodeID::default(),
+                "127.0.0.1:0".parse().unwrap(),
+                vec![],
+                &path_gateway,
+                1,
+                2,
+                5,
+                10,
+                10,
+                Duration::from_millis(100),
+                create_backoff,
+            )
+            .await
+            .expect("Network failed to start");
+
+            let gateway_addr = gateway_network.address();
+
+            let path_peer_1 = TargetDirectory::new("test_network_outage_peer_1");
+
+            let peer_network_1 = Network::new(
+                NodeID::default(),
+                "127.0.0.1:0".parse().unwrap(),
+                vec![gateway_addr],
+                &path_peer_1,
+                1,
+                2,
+                5,
+                10,
+                10,
+                Duration::from_millis(100),
+                create_backoff,
+            )
+            .await
+            .expect("Network failed to start");
+
+            let paused = Arc::new(AtomicBool::new(false));
+
+            let on_pause_handler = peer_network_1.on_pause({
+                let paused = Arc::clone(&paused);
+
+                move || {
+                    paused.store(true, Ordering::SeqCst);
+                }
+            });
+
+            let on_resume_handler = peer_network_1.on_resume({
+                let paused = Arc::clone(&paused);
+
+                move || {
+                    paused.store(false, Ordering::SeqCst);
+                }
+            });
+
+            let path_peer_2 = TargetDirectory::new("test_network_outage_peer_2");
+
+            let peer_network_2 = Network::new(
+                NodeID::default(),
+                "127.0.0.1:0".parse().unwrap(),
+                vec![gateway_addr],
+                &path_peer_2,
+                2,
+                2,
+                5,
+                10,
+                10,
+                Duration::from_millis(100),
+                create_backoff,
+            )
+            .await
+            .expect("Network failed to start");
+
+            async_std::task::sleep(Duration::from_millis(200)).await;
+
+            // Everything is fine, not paused
+            assert!(!paused.load(Ordering::SeqCst));
+
+            drop(gateway_network);
+
+            async_std::task::sleep(Duration::from_millis(200)).await;
+
+            // Still fine, we have peer 2 still running
+            assert!(
+                !paused.load(Ordering::SeqCst),
+                "Must be connected to peer 2",
+            );
+            assert_eq!(
+                1,
+                peer_network_1
+                    .inner
+                    .nodes_container
+                    .lock()
+                    .await
+                    .get_peers()
+                    .count(),
+                "Must be connected to peer 2",
+            );
+
+            drop(peer_network_2);
+
+            async_std::task::sleep(Duration::from_millis(500)).await;
+
+            // Now second peer disconnected and we are paused
+            assert!(paused.load(Ordering::SeqCst));
+            assert_eq!(
+                0,
+                peer_network_1
+                    .inner
+                    .nodes_container
+                    .lock()
+                    .await
+                    .get_peers()
+                    .count(),
+            );
+
+            // Starting gateway again
+            let gateway_network = Network::new(
+                NodeID::default(),
+                gateway_addr,
+                vec![],
+                &path_gateway,
+                1,
+                2,
+                5,
+                10,
+                10,
+                Duration::from_millis(100),
+                create_backoff,
+            )
+            .await
+            .expect("Network failed to start");
+
+            async_std::task::sleep(Duration::from_millis(500)).await;
+
+            // Should reconnect to gateway by now and not be paused anymore
+            assert!(!paused.load(Ordering::SeqCst));
+            let contacts = peer_network_1
+                .inner
+                .nodes_container
+                .lock()
+                .await
+                .get_peers()
+                .map(|peer: &Peer| *peer.address())
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                vec![gateway_addr],
+                contacts,
+                "Must reconnect to the gateway automatically"
+            );
+
+            drop(on_pause_handler);
+            drop(on_resume_handler);
+            drop(peer_network_1);
+            drop(gateway_network);
         });
     }
 }

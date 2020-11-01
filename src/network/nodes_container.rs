@@ -304,6 +304,11 @@ impl NodesContainer {
         }
     }
 
+    /// Remove peer and do nothing else
+    pub(super) fn remove_peer(&mut self, node_addr: &SocketAddr) {
+        self.peers.remove(&node_addr);
+    }
+
     /// State transition from PendingPeer to Peer in case of successful connection attempt
     ///
     /// Returns None if such pending peer was not found
@@ -330,6 +335,10 @@ impl NodesContainer {
             }
             None => None,
         }
+    }
+
+    pub(super) fn is_peer_connected(&self, addr: &SocketAddr) -> bool {
+        self.peers.contains_key(addr)
     }
 
     /// PendingPeer removal in case of failed connection attempt
