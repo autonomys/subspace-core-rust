@@ -106,6 +106,7 @@ use futures_lite::future;
 use log::*;
 use messages::{BlocksRequest, GossipMessage, Message, RequestMessage, ResponseMessage};
 use rand::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt::{Debug, Display};
@@ -407,6 +408,13 @@ fn handle_messages(network_weak: NetworkWeak, mut message_receiver: Receiver<Mes
             });
         }
     });
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct PersistedNodes {
+    contacts: Vec<SocketAddr>,
+    peers: Vec<SocketAddr>,
+    blocklist: Vec<SocketAddr>,
 }
 
 #[derive(Debug)]
@@ -896,14 +904,11 @@ impl Network {
                     trace!("Maintaining contacts");
                     let mut nodes_container_locked = nodes_container.lock().await;
 
-                    let contacts = nodes_container_locked
-                        .get_contacts()
-                        .map(|addr| addr.to_string())
-                        .collect::<Vec<_>>();
+                    let persisted_nodes = nodes_container_locked.get_persisted_nodes();
 
                     let result: io::Result<()> = try {
                         let mut contacts_file = contacts_file.lock().await;
-                        let data = serde_json::to_vec(&contacts).unwrap();
+                        let data = serde_json::to_vec(&persisted_nodes).unwrap();
                         contacts_file.seek(SeekFrom::Start(0)).await?;
                         contacts_file.write_all(&data).await?;
                         contacts_file.set_len(data.len() as u64).await?;

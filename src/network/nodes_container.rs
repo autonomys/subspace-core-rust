@@ -1,3 +1,4 @@
+use crate::network::PersistedNodes;
 use async_std::net::{Shutdown, TcpStream};
 use async_std::sync::{channel, Sender};
 use bytes::Bytes;
@@ -185,6 +186,20 @@ impl NodesContainer {
             .keys()
             .chain(self.pending_peers.keys())
             .chain(self.contacts.keys())
+    }
+
+    /// Returns all known contacts, actively connected peers and blocklist
+    pub(super) fn get_persisted_nodes(&self) -> PersistedNodes {
+        PersistedNodes {
+            contacts: self
+                .contacts
+                .keys()
+                .chain(self.pending_peers.keys())
+                .copied()
+                .collect(),
+            peers: self.peers.keys().copied().collect(),
+            blocklist: self.block_list.iter().map(|(&addr, _)| addr).collect(),
+        }
     }
 
     /// Returns all known contacts, including those that are already connected or pending
