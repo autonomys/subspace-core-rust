@@ -2015,7 +2015,6 @@ mod tests {
 
             async_std::task::sleep(Duration::from_millis(300)).await;
 
-            // TODO: Check peers too
             let contacts = peer_network_1
                 .inner
                 .nodes_container
@@ -2028,6 +2027,19 @@ mod tests {
             assert_eq!(
                 vec![gateway_network.address(), peer_network_2.address()],
                 contacts,
+                "Must already be connected to both gateway and peer other peer"
+            );
+
+            let peers_count = peer_network_1
+                .inner
+                .nodes_container
+                .lock()
+                .await
+                .get_contacts()
+                .count();
+
+            assert_eq!(
+                2, peers_count,
                 "Must already be connected to both gateway and peer other peer"
             );
         });
