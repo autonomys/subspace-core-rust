@@ -3,13 +3,34 @@
 //! Network module manages TCP connections to other nodes on Subspace network and is used to
 //! exchange gossip as well as request/response messages.
 //!
-//! During the first startup network instance needs to connect to one or more gateway nodes on order
-//! to discover more nodes on the network and establish more connections (for reliability,
-//! performance and security purposes).
+//! During the first startup network instance starts in a special mode and connects to one or more
+//! gateway nodes on order to discover more nodes on the network and establish more connections (for
+//! reliability, performance and security purposes). On subsequent starts it reuses previously known
+//! nodes stored on disk to avoid being fully dependant on gateway nodes.
 //!
-//! Once connections to other nodes on the network are established, gateway nodes are no longer
-//! required for operation (upon restart network will try to reconnect to previously known nodes;
-//! TODO: not implemented at the moment), but may be used as a fallback if needed.
+//! Nodes known by network can be in one of 3 states:
+//! * contacts (known reachable nodes to which there is no active connection)
+//! * pending peers (nodes to which connection is being established)
+//! * peer (actively connected nodes)
+//!
+//! Nodes can be transitioned between those states as follows:
+//! * contact -> Drop (not reachable)
+//! * contact -> pending peer (trying to establish an active connection)
+//! * pending peer -> Drop (not reachable)
+//! * pending peer -> peer (connected successfully)
+//! * peer -> pending peer (disconnected)
+//! * peer -> Drop (blocklisted)
+//!
+//! Once connections to enough nodes on the network are established, network instance switches to
+//! the main mode of operation with background maintenance routines.
+//!
+//! One background routine is to maintain contacts:
+//! * check if contacts are reachable
+//! * request more contacts from already connected peers if needed
+//! * persist known nodes on disk
+//!
+//! Another background routine is to maintain peers:
+//! * connect to more nodes if needed to maintain certain number of active connections
 //!
 //! Every connection starts with node address exchange (as remote address of incoming connection
 //! will not match publicly reachable address), after which communication consists of binary
