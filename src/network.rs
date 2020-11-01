@@ -112,7 +112,8 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::atomic::AtomicBool;
+use std::sync::{atomic, Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 use std::{fmt, io, mem};
 
@@ -452,6 +453,8 @@ impl<T> Default for RequestsContainer<T> {
 struct Handlers {
     peer: AsyncMutex<Vec<Box<dyn Fn(&Peer) + Send>>>,
     gossip: AsyncMutex<Vec<Box<dyn Fn(&GossipMessage) + Send>>>,
+    pause: AsyncMutex<Vec<Box<dyn Fn() + Send>>>,
+    resume: AsyncMutex<Vec<Box<dyn Fn() + Send>>>,
 }
 
 struct Inner {
@@ -459,6 +462,7 @@ struct Inner {
     gateway_nodes: Vec<SocketAddr>,
     nodes_container: Arc<AsyncMutex<NodesContainer>>,
     background_tasks: StdMutex<Vec<JoinHandle<()>>>,
+    paused: AtomicBool,
     handlers: Handlers,
     gossip_sender: async_channel::Sender<(SocketAddr, GossipMessage)>,
     gossip_receiver: StdMutex<Option<async_channel::Receiver<(SocketAddr, GossipMessage)>>>,
@@ -764,6 +768,7 @@ impl StartupNetwork {
             gateway_nodes: gateway_nodes.clone(),
             nodes_container: Arc::new(AsyncMutex::new(nodes_container)),
             background_tasks: StdMutex::default(),
+            paused: AtomicBool::new(false),
             handlers,
             gossip_sender,
             gossip_receiver: StdMutex::new(Some(gossip_receiver)),
@@ -1356,6 +1361,26 @@ impl Network {
             .push(Box::new(callback));
     }
 
+    /// Subscribe to event when network is paused due to losing all active connections
+    pub async fn on_pause<F: Fn() + Send + 'static>(&self, callback: F) {
+        self.inner
+            .handlers
+            .pause
+            .lock()
+            .await
+            .push(Box::new(callback));
+    }
+
+    /// Subscribe to event when network is resumed after being paused previously
+    pub async fn on_resume<F: Fn() + Send + 'static>(&self, callback: F) {
+        self.inner
+            .handlers
+            .resume
+            .lock()
+            .await
+            .push(Box::new(callback));
+    }
+
     /// Non-generic method to avoid significant duplication in final binary
     async fn request(&self, message: RequestMessage) -> Result<ResponseMessage, RequestError> {
         let id;
@@ -1414,12 +1439,31 @@ impl Network {
 
     // TODO: This function probably needs timeouts for various operations
     async fn reconnect(&self, node_addr: SocketAddr) {
-        let pending_peer = self
-            .inner
-            .nodes_container
-            .lock()
-            .await
-            .start_peer_reconnection(&node_addr);
+        let pending_peer = {
+            let mut nodes_container = self.inner.nodes_container.lock().await;
+            let pending_peer = nodes_container.start_peer_reconnection(&node_addr);
+            let peers_count = nodes_container.get_peers().len();
+            drop(nodes_container);
+
+            if peers_count == 0 {
+                if !self
+                    .inner
+                    .paused
+                    .compare_and_swap(false, true, atomic::Ordering::SeqCst)
+                {
+                    for callback in self.handlers().pause.lock().await.iter() {
+                        callback();
+                    }
+
+                    let network = self.clone();
+                    async_std::task::spawn(async move {
+                        // TODO: Try to connect to gateways and delay everything until that time
+                        network.inner;
+                    });
+                }
+            }
+            pending_peer
+        };
         if let Some(pending_peer) = pending_peer {
             let mut backoff = (self.inner.create_backoff)();
             while let Some(delay) = backoff.next_backoff() {
