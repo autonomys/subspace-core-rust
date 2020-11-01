@@ -489,7 +489,7 @@ impl Drop for Inner {
 }
 
 #[async_trait]
-trait TransportCommon {
+trait NetworkCommon {
     fn nodes_container(&self) -> &AsyncMutex<NodesContainer>;
 
     fn node_addr(&self) -> SocketAddr;
@@ -673,7 +673,7 @@ pub struct StartupNetwork {
     inner: Arc<Inner>,
 }
 
-impl TransportCommon for StartupNetwork {
+impl NetworkCommon for StartupNetwork {
     fn nodes_container(&self) -> &Mutex<NodesContainer> {
         &self.inner.nodes_container
     }
@@ -849,7 +849,7 @@ impl StartupNetwork {
     }
 
     pub async fn connect_to_random_contact(&self) -> Result<PeersLevel, ConnectionError> {
-        match TransportCommon::connect_to_random_contact(self).await {
+        match NetworkCommon::connect_to_random_contact(self).await {
             Ok(_) => Ok(self.nodes_container().lock().await.peers_level()),
             Err(error) => Err(error),
         }
@@ -865,7 +865,7 @@ pub struct Network {
     inner: Arc<Inner>,
 }
 
-impl TransportCommon for Network {
+impl NetworkCommon for Network {
     fn nodes_container(&self) -> &Mutex<NodesContainer> {
         &self.inner.nodes_container
     }
