@@ -461,7 +461,9 @@ struct Inner {
     gateway_nodes: Vec<SocketAddr>,
     nodes_container: Arc<AsyncMutex<NodesContainer>>,
     background_tasks: StdMutex<Vec<JoinHandle<()>>>,
-    paused: AsyncMutex<bool>,
+    // Paused is used as synchronization mechanism during pause/resume transition, it will be locked
+    // while network is paused
+    paused: AsyncMutex<()>,
     handlers: Handlers,
     gossip_sender: async_channel::Sender<(SocketAddr, GossipMessage)>,
     gossip_receiver: StdMutex<Option<async_channel::Receiver<(SocketAddr, GossipMessage)>>>,
@@ -564,9 +566,7 @@ impl Network {
             gateway_nodes: gateway_nodes.clone(),
             nodes_container: Arc::new(AsyncMutex::new(nodes_container)),
             background_tasks: StdMutex::default(),
-            // Paused is used to check when network is paused and also as synchronization mechanism
-            // during pause/resume transition
-            paused: AsyncMutex::new(false),
+            paused: AsyncMutex::new(()),
             handlers,
             gossip_sender,
             gossip_receiver: StdMutex::new(Some(gossip_receiver)),
@@ -758,6 +758,13 @@ impl Network {
             async move {
                 let mut interval = async_std::stream::interval(maintain_peers_interval);
                 while let Some(_) = interval.next().await {
+                    if let Some(network) = network_weak.upgrade() {
+                        // Make sure network is not paused
+                        network.inner.paused.lock().await;
+                    } else {
+                        break;
+                    }
+
                     trace!("Maintaining contacts");
                     let mut nodes_container_locked = nodes_container.lock().await;
 
@@ -828,6 +835,13 @@ impl Network {
             async move {
                 let mut interval = async_std::stream::interval(maintain_peers_interval);
                 while let Some(_) = interval.next().await {
+                    if let Some(network) = network_weak.upgrade() {
+                        // Make sure network is not paused
+                        network.inner.paused.lock().await;
+                    } else {
+                        break;
+                    }
+
                     trace!("Maintaining peers");
                     if !nodes_container.lock().await.peers_level().min_peers() {
                         trace!("Below min peers, trying to establish more connections");
@@ -1361,8 +1375,6 @@ impl Network {
     // TODO: This function probably needs timeouts for various operations
     async fn reconnect(&self, node_addr: SocketAddr) {
         let pending_peer = {
-            let mut paused = self.inner.paused.lock().await;
-
             let mut nodes_container = self.inner.nodes_container.lock().await;
             let pending_peer = nodes_container.start_peer_reconnection(&node_addr);
             let peers_count = nodes_container.get_peers().len();
@@ -1380,19 +1392,43 @@ impl Network {
                     }
                 });
 
-                if !*paused {
-                    *paused = true;
-
+                // Take lock on paused network
+                if let Some(paused) = self.inner.paused.try_lock() {
                     self.inner.handlers.pause.call_simple();
 
-                    let network = self.clone();
-                    async_std::task::spawn(async move {
-                        // TODO: Try to connect to gateways and delay everything until that time
-                        network.inner;
-                    });
-                }
+                    // Looks like we've lost all connections, try to reconnect to one of the
+                    // gateways, this will indicate that network works again
+                    'outer_loop: loop {
+                        let mut gateway_nodes = self.inner.gateway_nodes.clone();
+                        gateway_nodes.shuffle(&mut rand::thread_rng());
 
-                drop(paused);
+                        for addr in gateway_nodes {
+                            match self.connect(addr).await {
+                                Ok(_) => {
+                                    break 'outer_loop;
+                                }
+                                Err(error) => {
+                                    warn!(
+                                        "Failed to connect to gateway {} on lost network: {:?}",
+                                        addr, error,
+                                    );
+                                }
+                            }
+
+                            warn!(
+                                "Have not connected to a gateway after lost network, \
+                                waiting 10 seconds and trying again"
+                            );
+
+                            async_std::task::sleep(Duration::from_secs(10)).await;
+                        }
+                    }
+
+                    // Remove lock
+                    drop(paused);
+
+                    self.inner.handlers.resume.call_simple();
+                }
 
                 // Wait until network is resumed
                 drop(resume_receiver.await);
@@ -1404,6 +1440,9 @@ impl Network {
         if let Some(pending_peer) = pending_peer {
             let mut backoff = (self.inner.create_backoff)();
             while let Some(delay) = backoff.next_backoff() {
+                // Make sure network is not paused
+                self.inner.paused.lock().await;
+
                 debug!(
                     "Reconnecting to peer {:?} after {} seconds",
                     pending_peer,
