@@ -472,7 +472,7 @@ struct Inner {
     node_addr: SocketAddr,
     create_backoff: Box<dyn (Fn() -> ExponentialBackoff) + Send + Sync + 'static>,
     maintain_peers_interval: Duration,
-    contacts_file: Arc<AsyncMutex<File>>,
+    nodes_file: Arc<AsyncMutex<File>>,
 }
 
 impl Drop for Inner {
@@ -720,22 +720,48 @@ impl StartupNetwork {
         let node_addr = listener.local_addr()?;
 
         let handlers = Handlers::default();
-        let contacts_file = OpenOptions::new()
+        let mut nodes_file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(path.join("contacts.json"))
+            .open(path.join("nodes.json"))
             .await?;
+
+        let mut nodes_container = NodesContainer::new(
+            min_contacts,
+            max_contacts,
+            min_peers,
+            max_peers,
+            block_list_size,
+        );
+
+        nodes_file.seek(SeekFrom::Start(0)).await?;
+        let mut contents = Vec::new();
+        nodes_file.read_to_end(&mut contents).await?;
+
+        let persisted_nodes = if contents.is_empty() {
+            None
+        } else {
+            match serde_json::from_slice::<PersistedNodes>(&contents) {
+                Ok(persisted_nodes) => Some(persisted_nodes),
+                Err(error) => {
+                    debug!("Failed to decode persisted nodes: {}", error);
+                    None
+                }
+            }
+        };
+
+        if let Some(persisted_nodes) = &persisted_nodes {
+            nodes_container.add_contacts(&persisted_nodes.contacts);
+            nodes_container.add_contacts(&persisted_nodes.peers);
+            for &addr in &persisted_nodes.blocklist {
+                nodes_container.add_to_block_list(addr);
+            }
+        }
 
         let inner = Arc::new(Inner {
             node_id,
-            nodes_container: Arc::new(AsyncMutex::new(NodesContainer::new(
-                min_contacts,
-                max_contacts,
-                min_peers,
-                max_peers,
-                block_list_size,
-            ))),
+            nodes_container: Arc::new(AsyncMutex::new(nodes_container)),
             background_tasks: StdMutex::default(),
             handlers,
             gossip_sender,
@@ -747,13 +773,13 @@ impl StartupNetwork {
             node_addr,
             create_backoff: Box::new(create_backoff),
             maintain_peers_interval,
-            contacts_file: Arc::new(AsyncMutex::new(contacts_file)),
+            nodes_file: Arc::new(AsyncMutex::new(nodes_file)),
         });
 
-        let network = Self { inner };
+        let startup_network = Self { inner };
 
         let connections_handle = {
-            let network_weak = network.downgrade();
+            let network_weak = startup_network.downgrade();
 
             async_std::task::spawn(async move {
                 let mut connections = listener.incoming();
@@ -814,11 +840,51 @@ impl StartupNetwork {
         };
 
         {
-            let mut background_tasks = network.inner.background_tasks.lock().unwrap();
+            let mut background_tasks = startup_network.inner.background_tasks.lock().unwrap();
             background_tasks.push(connections_handle);
         }
 
-        Ok(network)
+        if let Some(persisted_nodes) = persisted_nodes {
+            let mut connection_futures = Vec::new();
+            // Connect to previously known peers
+            for addr in persisted_nodes.peers {
+                connection_futures.push(startup_network.connect(addr));
+            }
+            drop(futures::future::join_all(connection_futures).await);
+
+            if !startup_network
+                .inner
+                .nodes_container
+                .lock()
+                .await
+                .peers_level()
+                .min_peers()
+            {
+                // If not enough peers - connect to random contacts
+                loop {
+                    match startup_network.connect_to_random_contact().await {
+                        Ok(peers_level) => {
+                            if peers_level.min_peers() {
+                                break;
+                            }
+                        }
+                        Err(error) => match error {
+                            ConnectionError::NoContact => {
+                                break;
+                            }
+                            _ => {
+                                trace!(
+                                    "Failed to connect to random contact on startup: {:?}",
+                                    error
+                                );
+                            }
+                        },
+                    }
+                }
+            }
+        }
+
+        Ok(startup_network)
     }
 
     /// Connect during bootstrap process
@@ -895,7 +961,7 @@ impl Network {
 
         let maintain_contacts_handle = async_std::task::spawn({
             let nodes_container = Arc::clone(&network.inner.nodes_container);
-            let contacts_file = Arc::clone(&network.inner.contacts_file);
+            let nodes_file = Arc::clone(&network.inner.nodes_file);
             let network_weak = network.downgrade();
 
             async move {
@@ -907,12 +973,12 @@ impl Network {
                     let persisted_nodes = nodes_container_locked.get_persisted_nodes();
 
                     let result: io::Result<()> = try {
-                        let mut contacts_file = contacts_file.lock().await;
+                        let mut nodes_file = nodes_file.lock().await;
                         let data = serde_json::to_vec(&persisted_nodes).unwrap();
-                        contacts_file.seek(SeekFrom::Start(0)).await?;
-                        contacts_file.write_all(&data).await?;
-                        contacts_file.set_len(data.len() as u64).await?;
-                        contacts_file.sync_all().await?;
+                        nodes_file.seek(SeekFrom::Start(0)).await?;
+                        nodes_file.write_all(&data).await?;
+                        nodes_file.set_len(data.len() as u64).await?;
+                        nodes_file.sync_all().await?;
                     };
 
                     if let Err(error) = result {
