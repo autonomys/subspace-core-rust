@@ -663,6 +663,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1cd41440ae7e4734bbd42302f63eaba892afc93a3912dad84006247f0dedb0e"
 
 [[package]]
+name = "event-listener-primitives"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "716eca2dff90232f087f15551bb69c281de5ecf60c52fae67aa2bf5dd9478650"
+
+[[package]]
 name = "fake-simd"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2050,6 +2056,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "env_logger",
+ "event-listener-primitives",
  "futures 0.3.5",
  "futures-lite 1.7.0",
  "hex",

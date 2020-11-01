@@ -97,6 +97,7 @@ use async_trait::async_trait;
 use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
 use bytes::BytesMut;
+use event_listener_primitives::{Bag, HandlerId};
 use futures::io::SeekFrom;
 use futures::lock::{Mutex as AsyncMutex, Mutex};
 use futures::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, StreamExt};
@@ -112,8 +113,7 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
-use std::sync::{atomic, Arc, Mutex as StdMutex, Weak};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 use std::{fmt, io, mem};
 
@@ -451,10 +451,10 @@ impl<T> Default for RequestsContainer<T> {
 
 #[derive(Default)]
 struct Handlers {
-    peer: AsyncMutex<Vec<Box<dyn Fn(&Peer) + Send>>>,
-    gossip: AsyncMutex<Vec<Box<dyn Fn(&GossipMessage) + Send>>>,
-    pause: AsyncMutex<Vec<Box<dyn Fn() + Send>>>,
-    resume: AsyncMutex<Vec<Box<dyn Fn() + Send>>>,
+    peer: Bag<'static, dyn Fn(&Peer) + Send>,
+    gossip: Bag<'static, dyn Fn(&GossipMessage) + Send>,
+    pause: Bag<'static, dyn Fn() + Send>,
+    resume: Bag<'static, dyn Fn() + Send>,
 }
 
 struct Inner {
@@ -462,7 +462,7 @@ struct Inner {
     gateway_nodes: Vec<SocketAddr>,
     nodes_container: Arc<AsyncMutex<NodesContainer>>,
     background_tasks: StdMutex<Vec<JoinHandle<()>>>,
-    paused: AtomicBool,
+    paused: AsyncMutex<bool>,
     handlers: Handlers,
     gossip_sender: async_channel::Sender<(SocketAddr, GossipMessage)>,
     gossip_receiver: StdMutex<Option<async_channel::Receiver<(SocketAddr, GossipMessage)>>>,
@@ -545,9 +545,9 @@ trait NetworkCommon {
 
             handle_messages(self.downgrade(), message_receiver, peer.clone());
 
-            for callback in self.handlers().peer.lock().await.iter() {
+            self.handlers().peer.call(|callback| {
                 callback(peer);
-            }
+            });
         }
 
         peer
@@ -768,7 +768,9 @@ impl StartupNetwork {
             gateway_nodes: gateway_nodes.clone(),
             nodes_container: Arc::new(AsyncMutex::new(nodes_container)),
             background_tasks: StdMutex::default(),
-            paused: AtomicBool::new(false),
+            // Paused is used to check when network is paused and also as synchronization mechanism
+            // during pause/resume transition
+            paused: AsyncMutex::new(false),
             handlers,
             gossip_sender,
             gossip_receiver: StdMutex::new(Some(gossip_receiver)),
@@ -1137,9 +1139,9 @@ impl Network {
 
     /// Send a message to all peers
     pub(crate) async fn gossip(&self, message: GossipMessage) {
-        for callback in self.inner.handlers.gossip.lock().await.iter() {
+        self.inner.handlers.gossip.call(|callback| {
             callback(&message);
-        }
+        });
 
         let message = Message::Gossip(message);
         let bytes = message.to_bytes();
@@ -1156,9 +1158,9 @@ impl Network {
 
     /// Send a message to all but one peer (who sent you the message)
     pub(crate) async fn regossip(&self, sender: &SocketAddr, message: GossipMessage) {
-        for callback in self.inner.handlers.gossip.lock().await.iter() {
+        self.inner.handlers.gossip.call(|callback| {
             callback(&message);
-        }
+        });
 
         let message = Message::Gossip(message);
         let bytes = message.to_bytes();
@@ -1343,42 +1345,22 @@ impl Network {
         }
     }
 
-    pub async fn on_peer<F: Fn(&Peer) + Send + 'static>(&self, callback: F) {
-        self.inner
-            .handlers
-            .peer
-            .lock()
-            .await
-            .push(Box::new(callback));
+    pub fn on_peer<F: Fn(&Peer) + Send + 'static>(&self, callback: F) -> HandlerId {
+        self.inner.handlers.peer.add(Box::new(callback))
     }
 
-    pub async fn on_gossip<F: Fn(&GossipMessage) + Send + 'static>(&self, callback: F) {
-        self.inner
-            .handlers
-            .gossip
-            .lock()
-            .await
-            .push(Box::new(callback));
+    pub fn on_gossip<F: Fn(&GossipMessage) + Send + 'static>(&self, callback: F) -> HandlerId {
+        self.inner.handlers.gossip.add(Box::new(callback))
     }
 
     /// Subscribe to event when network is paused due to losing all active connections
-    pub async fn on_pause<F: Fn() + Send + 'static>(&self, callback: F) {
-        self.inner
-            .handlers
-            .pause
-            .lock()
-            .await
-            .push(Box::new(callback));
+    pub fn on_pause<F: Fn() + Send + 'static>(&self, callback: F) -> HandlerId {
+        self.inner.handlers.pause.add(Box::new(callback))
     }
 
     /// Subscribe to event when network is resumed after being paused previously
-    pub async fn on_resume<F: Fn() + Send + 'static>(&self, callback: F) {
-        self.inner
-            .handlers
-            .resume
-            .lock()
-            .await
-            .push(Box::new(callback));
+    pub fn on_resume<F: Fn() + Send + 'static>(&self, callback: F) -> HandlerId {
+        self.inner.handlers.resume.add(Box::new(callback))
     }
 
     /// Non-generic method to avoid significant duplication in final binary
@@ -1440,20 +1422,29 @@ impl Network {
     // TODO: This function probably needs timeouts for various operations
     async fn reconnect(&self, node_addr: SocketAddr) {
         let pending_peer = {
+            let mut paused = self.inner.paused.lock().await;
+
             let mut nodes_container = self.inner.nodes_container.lock().await;
             let pending_peer = nodes_container.start_peer_reconnection(&node_addr);
             let peers_count = nodes_container.get_peers().len();
             drop(nodes_container);
 
-            if peers_count == 0 {
-                if !self
-                    .inner
-                    .paused
-                    .compare_and_swap(false, true, atomic::Ordering::SeqCst)
-                {
-                    for callback in self.handlers().pause.lock().await.iter() {
-                        callback();
+            if peers_count == 0 && !self.inner.gateway_nodes.is_empty() {
+                let (resume_sender, resume_receiver) = async_oneshot::oneshot::<()>();
+                let resume_handler = self.on_resume({
+                    let resume_sender = StdMutex::new(Some(resume_sender));
+
+                    move || {
+                        if let Some(resume_sender) = resume_sender.lock().unwrap().take() {
+                            drop(resume_sender.send(()));
+                        }
                     }
+                });
+
+                if !*paused {
+                    *paused = true;
+
+                    self.handlers().pause.call_simple();
 
                     let network = self.clone();
                     async_std::task::spawn(async move {
@@ -1461,6 +1452,13 @@ impl Network {
                         network.inner;
                     });
                 }
+
+                drop(paused);
+
+                // Wait until network is resumed
+                drop(resume_receiver.await);
+                // Remove resume handler
+                drop(resume_handler);
             }
             pending_peer
         };
@@ -1689,7 +1687,7 @@ mod tests {
                         .on_gossip(move |_message: &GossipMessage| {
                             callback_called.fetch_add(1, Ordering::SeqCst);
                         })
-                        .await;
+                        .detach();
                 }
 
                 gateway_network
@@ -1773,7 +1771,7 @@ mod tests {
                         .on_gossip(move |_message: &GossipMessage| {
                             callback_called.fetch_add(1, Ordering::SeqCst);
                         })
-                        .await;
+                        .detach();
                 }
 
                 {
@@ -1789,9 +1787,9 @@ mod tests {
 
                 assert!(
                     matches!(
-                            gateway_gossip.next().await,
-                            Some((_, GossipMessage::BlockProposal { .. }))
-                        ),
+                        gateway_gossip.next().await,
+                        Some((_, GossipMessage::BlockProposal { .. }))
+                    ),
                     "Expected block proposal gossip massage",
                 );
 
@@ -1811,9 +1809,9 @@ mod tests {
 
                 assert!(
                     matches!(
-                            gateway_gossip.next().await,
-                            Some((_, GossipMessage::BlockProposal { .. }))
-                        ),
+                        gateway_gossip.next().await,
+                        Some((_, GossipMessage::BlockProposal { .. }))
+                    ),
                     "Expected block proposal gossip massage",
                 );
             }
