@@ -82,7 +82,7 @@ use crate::network::messages::{
     InternalResponseMessage, PieceRequestById, PieceRequestByIndex, StateBlockRequestByHeight,
     StateBlockRequestById, TxRequestById,
 };
-use crate::network::nodes_container::{NodesContainer, Peer, PeersLevel, PendingPeer};
+use crate::network::nodes_container::{NodesContainer, Peer, PendingPeer};
 use crate::state::{
     BlockHeight, NetworkPieceBundleById, NetworkPieceBundleByIndex, StateBlock, StateBlockId,
 };
@@ -93,13 +93,12 @@ use async_std::fs::{File, OpenOptions};
 use async_std::net::{TcpListener, TcpStream};
 use async_std::sync::{channel, Receiver};
 use async_std::task::JoinHandle;
-use async_trait::async_trait;
 use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
 use bytes::BytesMut;
 use event_listener_primitives::{Bag, HandlerId};
 use futures::io::SeekFrom;
-use futures::lock::{Mutex as AsyncMutex, Mutex};
+use futures::lock::Mutex as AsyncMutex;
 use futures::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, StreamExt};
 use futures_lite::future;
 use log::*;
@@ -491,215 +490,12 @@ impl Drop for Inner {
     }
 }
 
-#[async_trait]
-trait NetworkCommon {
-    fn nodes_container(&self) -> &AsyncMutex<NodesContainer>;
-
-    fn node_addr(&self) -> SocketAddr;
-
-    // TODO: It is ugly that we can get regular Network from StartupNetwork instance this way
-    fn downgrade(&self) -> NetworkWeak;
-
-    fn handlers(&self) -> &Handlers;
-
-    fn internal_requests_container(
-        &self,
-    ) -> &AsyncMutex<RequestsContainer<InternalResponseMessage>>;
-
-    // TODO: This function probably needs timeouts for various operations
-    async fn connect_simple(&self, pending_peer: PendingPeer) -> Result<Peer, ConnectionError> {
-        let mut stream = match TcpStream::connect(pending_peer.address()).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                self.on_connection_failure(&pending_peer).await;
-
-                return Err(ConnectionError::IO { error });
-            }
-        };
-
-        match exchange_peer_addr(self.node_addr(), &mut stream).await {
-            Some(_peer_addr) => match self.on_connection_success(&pending_peer, stream).await {
-                Some(peer) => Ok(peer),
-                None => Err(ConnectionError::NoPendingPeer),
-            },
-            None => {
-                self.on_connection_failure(&pending_peer).await;
-                Err(ConnectionError::FailedToExchangeAddress)
-            }
-        }
-    }
-
-    async fn on_connection_success(
-        &self,
-        pending_peer: &PendingPeer,
-        stream: TcpStream,
-    ) -> Option<Peer> {
-        let peer = self
-            .nodes_container()
-            .lock()
-            .await
-            .finish_successful_connection_attempt(pending_peer, stream.clone());
-
-        if let Some(peer) = &peer {
-            let message_receiver = create_message_receiver(stream);
-
-            handle_messages(self.downgrade(), message_receiver, peer.clone());
-
-            self.handlers().peer.call(|callback| {
-                callback(peer);
-            });
-        }
-
-        peer
-    }
-
-    async fn on_connection_failure(&self, pending_peer: &PendingPeer) {
-        self.nodes_container()
-            .lock()
-            .await
-            .finish_failed_connection_attempt(pending_peer);
-    }
-
-    async fn sync_contacts(&self, peer: Peer) -> Result<(), RequestError> {
-        if self
-            .nodes_container()
-            .lock()
-            .await
-            .contacts_level()
-            .max_contacts()
-        {
-            // No need to request more contacts
-            return Ok(());
-        }
-
-        let response = self
-            .internal_request(peer, InternalRequestMessage::Contacts)
-            .await?;
-
-        match response {
-            InternalResponseMessage::Contacts(contacts) => {
-                for contact in contacts {
-                    trace!("Received contact {:?}, trying to connect", contact);
-                    if let Ok(stream) = TcpStream::connect(contact).await {
-                        drop(stream);
-                        self.nodes_container().lock().await.add_contacts(&[contact]);
-                    }
-                }
-
-                Ok(())
-            } // _ => Err(RequestError::BadResponse),
-        }
-    }
-
-    /// Non-generic method to avoid significant duplication in final binary
-    async fn internal_request(
-        &self,
-        peer: Peer,
-        message: InternalRequestMessage,
-    ) -> Result<InternalResponseMessage, RequestError> {
-        let id;
-        let (response_sender, response_receiver) = async_oneshot::oneshot();
-        let internal_requests_container = self.internal_requests_container();
-
-        {
-            let mut internal_requests_container = internal_requests_container.lock().await;
-
-            id = internal_requests_container.next_id;
-
-            internal_requests_container.next_id =
-                internal_requests_container.next_id.wrapping_add(1);
-            internal_requests_container
-                .handlers
-                .insert(id, response_sender);
-        }
-
-        let message = Message::InternalRequest { id, message }.to_bytes();
-        if message.len() > MAX_MESSAGE_CONTENTS_LENGTH {
-            internal_requests_container
-                .lock()
-                .await
-                .handlers
-                .remove(&id);
-
-            return Err(RequestError::MessageTooLong);
-        }
-
-        async_std::task::spawn(async move {
-            peer.send(message).await;
-        });
-
-        future::or(
-            async move {
-                response_receiver
-                    .await
-                    .map_err(|_| RequestError::ConnectionClosed {})
-            },
-            async move {
-                async_io::Timer::after(REQUEST_TIMEOUT).await;
-
-                internal_requests_container
-                    .lock()
-                    .await
-                    .handlers
-                    .remove(&id);
-
-                Err(RequestError::TimedOut)
-            },
-        )
-        .await
-    }
-
-    async fn connect_to_random_contact(&self) -> Result<(), ConnectionError> {
-        let pending_peer = match self
-            .nodes_container()
-            .lock()
-            .await
-            .connect_to_random_contact()
-        {
-            Some(pending_peer) => pending_peer,
-            None => {
-                return Err(ConnectionError::NoContact);
-            }
-        };
-
-        match self.connect_simple(pending_peer).await {
-            Ok(peer) => {
-                drop(self.sync_contacts(peer).await);
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
-    }
-}
-
-pub struct StartupNetwork {
+#[derive(Clone)]
+pub struct Network {
     inner: Arc<Inner>,
 }
 
-impl NetworkCommon for StartupNetwork {
-    fn nodes_container(&self) -> &Mutex<NodesContainer> {
-        &self.inner.nodes_container
-    }
-
-    fn node_addr(&self) -> SocketAddr {
-        self.inner.node_addr
-    }
-
-    fn downgrade(&self) -> NetworkWeak {
-        let inner = Arc::downgrade(&self.inner);
-        NetworkWeak { inner }
-    }
-
-    fn handlers(&self) -> &Handlers {
-        &self.inner.handlers
-    }
-
-    fn internal_requests_container(&self) -> &Mutex<RequestsContainer<InternalResponseMessage>> {
-        &self.inner.internal_requests_container
-    }
-}
-
-impl StartupNetwork {
+impl Network {
     pub async fn new<CB>(
         node_id: NodeID,
         addr: SocketAddr,
@@ -784,10 +580,10 @@ impl StartupNetwork {
             nodes_file: Arc::new(AsyncMutex::new(nodes_file)),
         });
 
-        let startup_network = Self { inner };
+        let network = Self { inner };
 
         let connections_handle = {
-            let network_weak = startup_network.downgrade();
+            let network_weak = network.downgrade();
 
             async_std::task::spawn(async move {
                 let mut connections = listener.incoming();
@@ -848,7 +644,7 @@ impl StartupNetwork {
         };
 
         {
-            let mut background_tasks = startup_network.inner.background_tasks.lock().unwrap();
+            let mut background_tasks = network.inner.background_tasks.lock().unwrap();
             background_tasks.push(connections_handle);
         }
 
@@ -856,11 +652,11 @@ impl StartupNetwork {
             let mut connection_futures = Vec::new();
             // Connect to previously known peers
             for addr in persisted_nodes.peers {
-                connection_futures.push(startup_network.connect(addr));
+                connection_futures.push(network.connect(addr));
             }
             drop(futures::future::join_all(connection_futures).await);
 
-            if !startup_network
+            if !network
                 .inner
                 .nodes_container
                 .lock()
@@ -870,9 +666,16 @@ impl StartupNetwork {
             {
                 // If not enough peers - connect to random contacts
                 loop {
-                    match startup_network.connect_to_random_contact().await {
-                        Ok(peers_level) => {
-                            if peers_level.min_peers() {
+                    match network.connect_to_random_contact().await {
+                        Ok(_) => {
+                            if network
+                                .inner
+                                .nodes_container
+                                .lock()
+                                .await
+                                .peers_level()
+                                .min_peers()
+                            {
                                 break;
                             }
                         }
@@ -892,7 +695,7 @@ impl StartupNetwork {
             }
         }
 
-        if !startup_network
+        if !network
             .inner
             .nodes_container
             .lock()
@@ -911,9 +714,9 @@ impl StartupNetwork {
                 gateway_nodes.shuffle(&mut rand::thread_rng());
                 // If still not enough peers - connect to gateway nodes
                 for addr in gateway_nodes {
-                    match startup_network.connect(addr).await {
+                    match network.connect(addr).await {
                         Ok(_) => {
-                            if startup_network
+                            if network
                                 .inner
                                 .nodes_container
                                 .lock()
@@ -939,86 +742,18 @@ impl StartupNetwork {
             }
         }
 
-        Ok(startup_network)
+        network.setup_maintenance_routines();
+
+        Ok(network)
     }
 
-    // TODO: This is probably no longer necessary
-    pub fn finish_startup(self) -> Network {
-        Network::new(self.inner)
-    }
-
-    /// Connect during bootstrap process
-    async fn connect(&self, peer_addr: SocketAddr) -> Result<(), ConnectionError> {
-        // TODO: This function probably needs timeouts for various operations
-        let mut nodes_container = self.inner.nodes_container.lock().await;
-
-        nodes_container.add_contacts(&[peer_addr]);
-
-        let pending_peer = match nodes_container.connect_to_specific_contact(&peer_addr) {
-            Some(pending_peer) => pending_peer,
-            None => {
-                return Err(ConnectionError::NoContact);
-            }
-        };
-        drop(nodes_container);
-
-        match self.connect_simple(pending_peer).await {
-            Ok(peer) => match self.sync_contacts(peer).await {
-                Ok(_) => Ok(()),
-                Err(error) => {
-                    debug!("Failed to request contacts from node: {:?}", error);
-                    Err(ConnectionError::ContactsRequest)
-                }
-            },
-            Err(error) => Err(error),
-        }
-    }
-
-    async fn connect_to_random_contact(&self) -> Result<PeersLevel, ConnectionError> {
-        match NetworkCommon::connect_to_random_contact(self).await {
-            Ok(_) => Ok(self.nodes_container().lock().await.peers_level()),
-            Err(error) => Err(error),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct Network {
-    inner: Arc<Inner>,
-}
-
-impl NetworkCommon for Network {
-    fn nodes_container(&self) -> &Mutex<NodesContainer> {
-        &self.inner.nodes_container
-    }
-
-    fn node_addr(&self) -> SocketAddr {
-        self.inner.node_addr
-    }
-
-    fn downgrade(&self) -> NetworkWeak {
-        let inner = Arc::downgrade(&self.inner);
-        NetworkWeak { inner }
-    }
-
-    fn handlers(&self) -> &Handlers {
-        &self.inner.handlers
-    }
-
-    fn internal_requests_container(&self) -> &Mutex<RequestsContainer<InternalResponseMessage>> {
-        &self.inner.internal_requests_container
-    }
-}
-
-impl Network {
-    fn new(inner: Arc<Inner>) -> Self {
-        let maintain_peers_interval = inner.maintain_peers_interval;
-        let network = Self { inner };
+    fn setup_maintenance_routines(&self) {
+        let maintain_peers_interval = self.inner.maintain_peers_interval;
 
         let maintain_contacts_handle = async_std::task::spawn({
-            let nodes_container = Arc::clone(&network.inner.nodes_container);
-            let nodes_file = Arc::clone(&network.inner.nodes_file);
-            let network_weak = network.downgrade();
+            let nodes_container = Arc::clone(&self.inner.nodes_container);
+            let nodes_file = Arc::clone(&self.inner.nodes_file);
+            let network_weak = self.downgrade();
 
             async move {
                 let mut interval = async_std::stream::interval(maintain_peers_interval);
@@ -1087,8 +822,8 @@ impl Network {
             }
         });
         let maintain_peers_handle = async_std::task::spawn({
-            let nodes_container = Arc::clone(&network.inner.nodes_container);
-            let network_weak = network.downgrade();
+            let nodes_container = Arc::clone(&self.inner.nodes_container);
+            let network_weak = self.downgrade();
 
             async move {
                 let mut interval = async_std::stream::interval(maintain_peers_interval);
@@ -1125,12 +860,211 @@ impl Network {
             }
         });
         {
-            let mut background_tasks = network.inner.background_tasks.lock().unwrap();
+            let mut background_tasks = self.inner.background_tasks.lock().unwrap();
             background_tasks.push(maintain_contacts_handle);
             background_tasks.push(maintain_peers_handle);
         }
+    }
 
-        network
+    // TODO: This function probably needs timeouts for various operations
+    async fn connect_simple(&self, pending_peer: PendingPeer) -> Result<Peer, ConnectionError> {
+        let mut stream = match TcpStream::connect(pending_peer.address()).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.on_connection_failure(&pending_peer).await;
+
+                return Err(ConnectionError::IO { error });
+            }
+        };
+
+        match exchange_peer_addr(self.inner.node_addr, &mut stream).await {
+            Some(_peer_addr) => match self.on_connection_success(&pending_peer, stream).await {
+                Some(peer) => Ok(peer),
+                None => Err(ConnectionError::NoPendingPeer),
+            },
+            None => {
+                self.on_connection_failure(&pending_peer).await;
+                Err(ConnectionError::FailedToExchangeAddress)
+            }
+        }
+    }
+
+    async fn on_connection_success(
+        &self,
+        pending_peer: &PendingPeer,
+        stream: TcpStream,
+    ) -> Option<Peer> {
+        let peer = self
+            .inner
+            .nodes_container
+            .lock()
+            .await
+            .finish_successful_connection_attempt(pending_peer, stream.clone());
+
+        if let Some(peer) = &peer {
+            let message_receiver = create_message_receiver(stream);
+
+            handle_messages(self.downgrade(), message_receiver, peer.clone());
+
+            self.inner.handlers.peer.call(|callback| {
+                callback(peer);
+            });
+        }
+
+        peer
+    }
+
+    async fn on_connection_failure(&self, pending_peer: &PendingPeer) {
+        self.inner
+            .nodes_container
+            .lock()
+            .await
+            .finish_failed_connection_attempt(pending_peer);
+    }
+
+    async fn sync_contacts(&self, peer: Peer) -> Result<(), RequestError> {
+        if self
+            .inner
+            .nodes_container
+            .lock()
+            .await
+            .contacts_level()
+            .max_contacts()
+        {
+            // No need to request more contacts
+            return Ok(());
+        }
+
+        let response = self
+            .internal_request(peer, InternalRequestMessage::Contacts)
+            .await?;
+
+        match response {
+            InternalResponseMessage::Contacts(contacts) => {
+                for contact in contacts {
+                    trace!("Received contact {:?}, trying to connect", contact);
+                    if let Ok(stream) = TcpStream::connect(contact).await {
+                        drop(stream);
+                        self.inner
+                            .nodes_container
+                            .lock()
+                            .await
+                            .add_contacts(&[contact]);
+                    }
+                }
+
+                Ok(())
+            } // _ => Err(RequestError::BadResponse),
+        }
+    }
+
+    async fn internal_request(
+        &self,
+        peer: Peer,
+        message: InternalRequestMessage,
+    ) -> Result<InternalResponseMessage, RequestError> {
+        let id;
+        let (response_sender, response_receiver) = async_oneshot::oneshot();
+
+        {
+            let mut internal_requests_container =
+                self.inner.internal_requests_container.lock().await;
+
+            id = internal_requests_container.next_id;
+
+            internal_requests_container.next_id =
+                internal_requests_container.next_id.wrapping_add(1);
+            internal_requests_container
+                .handlers
+                .insert(id, response_sender);
+        }
+
+        let message = Message::InternalRequest { id, message }.to_bytes();
+        if message.len() > MAX_MESSAGE_CONTENTS_LENGTH {
+            self.inner
+                .internal_requests_container
+                .lock()
+                .await
+                .handlers
+                .remove(&id);
+
+            return Err(RequestError::MessageTooLong);
+        }
+
+        async_std::task::spawn(async move {
+            peer.send(message).await;
+        });
+
+        future::or(
+            async move {
+                response_receiver
+                    .await
+                    .map_err(|_| RequestError::ConnectionClosed {})
+            },
+            async move {
+                async_io::Timer::after(REQUEST_TIMEOUT).await;
+
+                self.inner
+                    .internal_requests_container
+                    .lock()
+                    .await
+                    .handlers
+                    .remove(&id);
+
+                Err(RequestError::TimedOut)
+            },
+        )
+        .await
+    }
+
+    async fn connect_to_random_contact(&self) -> Result<(), ConnectionError> {
+        let pending_peer = match self
+            .inner
+            .nodes_container
+            .lock()
+            .await
+            .connect_to_random_contact()
+        {
+            Some(pending_peer) => pending_peer,
+            None => {
+                return Err(ConnectionError::NoContact);
+            }
+        };
+
+        match self.connect_simple(pending_peer).await {
+            Ok(peer) => {
+                drop(self.sync_contacts(peer).await);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Connect during bootstrap process
+    async fn connect(&self, peer_addr: SocketAddr) -> Result<(), ConnectionError> {
+        // TODO: This function probably needs timeouts for various operations
+        let mut nodes_container = self.inner.nodes_container.lock().await;
+
+        nodes_container.add_contacts(&[peer_addr]);
+
+        let pending_peer = match nodes_container.connect_to_specific_contact(&peer_addr) {
+            Some(pending_peer) => pending_peer,
+            None => {
+                return Err(ConnectionError::NoContact);
+            }
+        };
+        drop(nodes_container);
+
+        match self.connect_simple(pending_peer).await {
+            Ok(peer) => match self.sync_contacts(peer).await {
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    debug!("Failed to request contacts from node: {:?}", error);
+                    Err(ConnectionError::ContactsRequest)
+                }
+            },
+            Err(error) => Err(error),
+        }
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -1363,6 +1297,11 @@ impl Network {
         self.inner.handlers.resume.add(Box::new(callback))
     }
 
+    fn downgrade(&self) -> NetworkWeak {
+        let inner = Arc::downgrade(&self.inner);
+        NetworkWeak { inner }
+    }
+
     /// Non-generic method to avoid significant duplication in final binary
     async fn request(&self, message: RequestMessage) -> Result<ResponseMessage, RequestError> {
         let id;
@@ -1444,7 +1383,7 @@ impl Network {
                 if !*paused {
                     *paused = true;
 
-                    self.handlers().pause.call_simple();
+                    self.inner.handlers.pause.call_simple();
 
                     let network = self.clone();
                     async_std::task::spawn(async move {
@@ -1637,7 +1576,7 @@ mod tests {
         executor::block_on(async {
             let path = TargetDirectory::new("test_create");
 
-            StartupNetwork::new(
+            Network::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
                 vec![],
@@ -1661,7 +1600,7 @@ mod tests {
         executor::block_on(async {
             let path = TargetDirectory::new("test_gossip_regossip_callback");
 
-            let gateway_network = StartupNetwork::new(
+            let gateway_network = Network::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
                 vec![],
@@ -1675,8 +1614,7 @@ mod tests {
                 create_backoff,
             )
             .await
-            .expect("Network failed to start")
-            .finish_startup();
+            .expect("Network failed to start");
 
             {
                 let callback_called = Arc::new(AtomicUsize::new(0));
@@ -1724,7 +1662,7 @@ mod tests {
         executor::block_on(async {
             let path_gateway = TargetDirectory::new("test_gossip_regossip_gateway");
 
-            let gateway_network = StartupNetwork::new(
+            let gateway_network = Network::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
                 vec![],
@@ -1738,13 +1676,12 @@ mod tests {
                 create_backoff,
             )
             .await
-            .expect("Network failed to start")
-            .finish_startup();
+            .expect("Network failed to start");
             let mut gateway_gossip = gateway_network.get_gossip_receiver().unwrap();
 
             let path_peer = TargetDirectory::new("test_gossip_regossip_peer");
 
-            let peer_startup_network = StartupNetwork::new(
+            let peer_network = Network::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
                 vec![gateway_network.address()],
@@ -1759,8 +1696,6 @@ mod tests {
             )
             .await
             .expect("Network failed to start");
-
-            let peer_network = peer_startup_network.finish_startup();
 
             {
                 let callback_called = Arc::new(AtomicUsize::new(0));
@@ -1824,7 +1759,7 @@ mod tests {
         executor::block_on(async {
             let path_gateway = TargetDirectory::new("test_request_response_gateway");
 
-            let gateway_network = StartupNetwork::new(
+            let gateway_network = Network::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
                 vec![],
@@ -1838,14 +1773,13 @@ mod tests {
                 create_backoff,
             )
             .await
-            .expect("Network failed to start")
-            .finish_startup();
+            .expect("Network failed to start");
 
             let mut gateway_requests = gateway_network.get_requests_receiver().unwrap();
 
             let path_peer = TargetDirectory::new("test_request_response_peer");
 
-            let peer_startup_network = StartupNetwork::new(
+            let peer_network = Network::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
                 vec![gateway_network.address()],
@@ -1860,8 +1794,6 @@ mod tests {
             )
             .await
             .expect("Network failed to start");
-
-            let peer_network = peer_startup_network.finish_startup();
 
             {
                 let fake_block = fake_block();
@@ -1909,7 +1841,7 @@ mod tests {
         executor::block_on(async {
             let path_gateway = TargetDirectory::new("test_maintain_contacts_and_peers_gateway");
 
-            let gateway_network = StartupNetwork::new(
+            let gateway_network = Network::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
                 vec![],
@@ -1923,12 +1855,11 @@ mod tests {
                 create_backoff,
             )
             .await
-            .expect("Network failed to start")
-            .finish_startup();
+            .expect("Network failed to start");
 
             let path_peer_1 = TargetDirectory::new("test_maintain_contacts_and_peers_peer_1");
 
-            let peer_startup_network_1 = StartupNetwork::new(
+            let peer_network_1 = Network::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
                 vec![gateway_network.address()],
@@ -1944,11 +1875,9 @@ mod tests {
             .await
             .expect("Network failed to start");
 
-            let peer_network_1 = peer_startup_network_1.finish_startup();
-
             let path_peer_2 = TargetDirectory::new("test_maintain_contacts_and_peers_peer_2");
 
-            let peer_startup_network_2 = StartupNetwork::new(
+            let peer_network_2 = Network::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
                 vec![gateway_network.address()],
@@ -1963,8 +1892,6 @@ mod tests {
             )
             .await
             .expect("Network failed to start");
-
-            let peer_network_2 = peer_startup_network_2.finish_startup();
 
             async_std::task::sleep(Duration::from_millis(300)).await;
 
@@ -1991,7 +1918,7 @@ mod tests {
         executor::block_on(async {
             let path_gateway = TargetDirectory::new("test_reconnection_gateway");
 
-            let gateway_network = StartupNetwork::new(
+            let gateway_network = Network::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
                 vec![],
@@ -2010,14 +1937,13 @@ mod tests {
                 },
             )
             .await
-            .expect("Network failed to start")
-            .finish_startup();
+            .expect("Network failed to start");
 
             let gateway_addr = gateway_network.address();
 
             let path_peer_1 = TargetDirectory::new("test_reconnection_peer_1");
 
-            let peer_startup_network_1 = StartupNetwork::new(
+            let peer_network_1 = Network::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
                 vec![gateway_addr],
@@ -2032,8 +1958,6 @@ mod tests {
             )
             .await
             .expect("Network failed to start");
-
-            let peer_network_1 = peer_startup_network_1.finish_startup();
 
             let peer_network_1_address = peer_network_1.address();
 
@@ -2053,7 +1977,7 @@ mod tests {
                 "All peers must be disconnected",
             );
 
-            let peer_startup_network_1 = StartupNetwork::new(
+            let peer_startup_network_1 = Network::new(
                 NodeID::default(),
                 peer_network_1_address,
                 vec![],

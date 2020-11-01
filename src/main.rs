@@ -11,7 +11,7 @@ use std::{env, fs};
 use subspace_core_rust::farmer::FarmerMessage;
 use subspace_core_rust::ledger::Ledger;
 use subspace_core_rust::manager::ProtocolMessage;
-use subspace_core_rust::network::{NodeType, StartupNetwork};
+use subspace_core_rust::network::{Network, NodeType};
 use subspace_core_rust::plot::Plot;
 use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
@@ -166,7 +166,7 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
     let ledger = Ledger::new(keys, epoch_tracker.clone(), state);
 
     // create the network
-    let startup_network_fut = StartupNetwork::new(
+    let startup_network_fut = Network::new(
         node_id,
         if node_type == NodeType::Gateway {
             DEV_GATEWAY_ADDR.parse().unwrap()
@@ -189,8 +189,7 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
     );
 
     // initiate outbound network connections
-    let startup_network = startup_network_fut.await.unwrap();
-    let network = startup_network.finish_startup();
+    let network = startup_network_fut.await.unwrap();
 
     // optionally create the RPC server
     let mut rpc_server = None;
