@@ -82,9 +82,7 @@ use crate::network::messages::{
     InternalResponseMessage, PieceRequestById, PieceRequestByIndex, StateBlockRequestByHeight,
     StateBlockRequestById, TxRequestById,
 };
-use crate::network::nodes_container::{
-    ContactsLevel, NodesContainer, Peer, PeersLevel, PendingPeer,
-};
+use crate::network::nodes_container::{NodesContainer, Peer, PeersLevel, PendingPeer};
 use crate::state::{
     BlockHeight, NetworkPieceBundleById, NetworkPieceBundleByIndex, StateBlock, StateBlockId,
 };
@@ -458,6 +456,7 @@ struct Handlers {
 
 struct Inner {
     node_id: NodeID,
+    gateway_nodes: Vec<SocketAddr>,
     nodes_container: Arc<AsyncMutex<NodesContainer>>,
     background_tasks: StdMutex<Vec<JoinHandle<()>>>,
     handlers: Handlers,
@@ -700,6 +699,7 @@ impl StartupNetwork {
     pub async fn new<CB>(
         node_id: NodeID,
         addr: SocketAddr,
+        gateway_nodes: Vec<SocketAddr>,
         path: &PathBuf,
         min_peers: usize,
         max_peers: usize,
@@ -761,6 +761,7 @@ impl StartupNetwork {
 
         let inner = Arc::new(Inner {
             node_id,
+            gateway_nodes: gateway_nodes.clone(),
             nodes_container: Arc::new(AsyncMutex::new(nodes_container)),
             background_tasks: StdMutex::default(),
             handlers,
@@ -884,11 +885,63 @@ impl StartupNetwork {
             }
         }
 
+        if !startup_network
+            .inner
+            .nodes_container
+            .lock()
+            .await
+            .peers_level()
+            .min_peers()
+        {
+            info!("Connecting to gateway nodes");
+
+            'outer_loop: loop {
+                if gateway_nodes.is_empty() {
+                    // Nothing to do in this case, it was intentional
+                    break;
+                }
+                let mut gateway_nodes = gateway_nodes.clone();
+                gateway_nodes.shuffle(&mut rand::thread_rng());
+                // If still not enough peers - connect to gateway nodes
+                for addr in gateway_nodes {
+                    match startup_network.connect(addr).await {
+                        Ok(_) => {
+                            if startup_network
+                                .inner
+                                .nodes_container
+                                .lock()
+                                .await
+                                .peers_level()
+                                .min_peers()
+                            {
+                                break 'outer_loop;
+                            }
+                        }
+                        Err(error) => {
+                            warn!(
+                                "Failed to connect to gateway {} on startup: {:?}",
+                                addr, error,
+                            );
+                        }
+                    }
+                }
+
+                warn!("Have not connected to enough peers, waiting 10 seconds and trying again");
+
+                async_std::task::sleep(Duration::from_secs(10)).await;
+            }
+        }
+
         Ok(startup_network)
     }
 
+    // TODO: This is probably no longer necessary
+    pub fn finish_startup(self) -> Network {
+        Network::new(self.inner)
+    }
+
     /// Connect during bootstrap process
-    pub async fn connect(&self, peer_addr: SocketAddr) -> Result<ContactsLevel, ConnectionError> {
+    async fn connect(&self, peer_addr: SocketAddr) -> Result<(), ConnectionError> {
         // TODO: This function probably needs timeouts for various operations
         let mut nodes_container = self.inner.nodes_container.lock().await;
 
@@ -904,7 +957,7 @@ impl StartupNetwork {
 
         match self.connect_simple(pending_peer).await {
             Ok(peer) => match self.sync_contacts(peer).await {
-                Ok(_) => Ok(self.inner.nodes_container.lock().await.contacts_level()),
+                Ok(_) => Ok(()),
                 Err(error) => {
                     debug!("Failed to request contacts from node: {:?}", error);
                     Err(ConnectionError::ContactsRequest)
@@ -914,15 +967,11 @@ impl StartupNetwork {
         }
     }
 
-    pub async fn connect_to_random_contact(&self) -> Result<PeersLevel, ConnectionError> {
+    async fn connect_to_random_contact(&self) -> Result<PeersLevel, ConnectionError> {
         match NetworkCommon::connect_to_random_contact(self).await {
             Ok(_) => Ok(self.nodes_container().lock().await.peers_level()),
             Err(error) => Err(error),
         }
-    }
-
-    pub fn finish_startup(self) -> Network {
-        Network::new(self.inner)
     }
 }
 
@@ -1549,6 +1598,7 @@ mod tests {
             StartupNetwork::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
+                vec![],
                 &path,
                 1,
                 2,
@@ -1572,6 +1622,7 @@ mod tests {
             let gateway_network = StartupNetwork::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
+                vec![],
                 &path,
                 1,
                 2,
@@ -1634,6 +1685,7 @@ mod tests {
             let gateway_network = StartupNetwork::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
+                vec![],
                 &path_gateway,
                 1,
                 2,
@@ -1653,6 +1705,7 @@ mod tests {
             let peer_startup_network = StartupNetwork::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
+                vec![gateway_network.address()],
                 &path_peer,
                 1,
                 2,
@@ -1664,11 +1717,6 @@ mod tests {
             )
             .await
             .expect("Network failed to start");
-
-            peer_startup_network
-                .connect(gateway_network.address())
-                .await
-                .expect("Failed to connect to gateway");
 
             let peer_network = peer_startup_network.finish_startup();
 
@@ -1737,6 +1785,7 @@ mod tests {
             let gateway_network = StartupNetwork::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
+                vec![],
                 &path_gateway,
                 1,
                 2,
@@ -1757,6 +1806,7 @@ mod tests {
             let peer_startup_network = StartupNetwork::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
+                vec![gateway_network.address()],
                 &path_peer,
                 1,
                 2,
@@ -1768,11 +1818,6 @@ mod tests {
             )
             .await
             .expect("Network failed to start");
-
-            peer_startup_network
-                .connect(gateway_network.address())
-                .await
-                .expect("Failed to connect to gateway");
 
             let peer_network = peer_startup_network.finish_startup();
 
@@ -1825,6 +1870,7 @@ mod tests {
             let gateway_network = StartupNetwork::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
+                vec![],
                 &path_gateway,
                 1,
                 2,
@@ -1843,8 +1889,9 @@ mod tests {
             let peer_startup_network_1 = StartupNetwork::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
+                vec![gateway_network.address()],
                 &path_peer_1,
-                2,
+                1,
                 2,
                 5,
                 10,
@@ -1855,11 +1902,6 @@ mod tests {
             .await
             .expect("Network failed to start");
 
-            peer_startup_network_1
-                .connect(gateway_network.address())
-                .await
-                .expect("Failed to connect to gateway");
-
             let peer_network_1 = peer_startup_network_1.finish_startup();
 
             let path_peer_2 = TargetDirectory::new("test_maintain_contacts_and_peers_peer_2");
@@ -1867,6 +1909,7 @@ mod tests {
             let peer_startup_network_2 = StartupNetwork::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
+                vec![gateway_network.address()],
                 &path_peer_2,
                 1,
                 2,
@@ -1878,11 +1921,6 @@ mod tests {
             )
             .await
             .expect("Network failed to start");
-
-            peer_startup_network_2
-                .connect(gateway_network.address())
-                .await
-                .expect("Failed to connect to gateway");
 
             let peer_network_2 = peer_startup_network_2.finish_startup();
 
@@ -1905,7 +1943,6 @@ mod tests {
         });
     }
 
-    // TODO: Unlock when reconnection is triggered
     #[test]
     fn test_reconnection() {
         init();
@@ -1915,6 +1952,7 @@ mod tests {
             let gateway_network = StartupNetwork::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
+                vec![],
                 &path_gateway,
                 1,
                 2,
@@ -1940,6 +1978,7 @@ mod tests {
             let peer_startup_network_1 = StartupNetwork::new(
                 NodeID::default(),
                 "127.0.0.1:0".parse().unwrap(),
+                vec![gateway_addr],
                 &path_peer_1,
                 1,
                 2,
@@ -1951,11 +1990,6 @@ mod tests {
             )
             .await
             .expect("Network failed to start");
-
-            peer_startup_network_1
-                .connect(gateway_addr)
-                .await
-                .expect("Failed to connect to gateway");
 
             let peer_network_1 = peer_startup_network_1.finish_startup();
 
@@ -1980,6 +2014,7 @@ mod tests {
             let peer_startup_network_1 = StartupNetwork::new(
                 NodeID::default(),
                 peer_network_1_address,
+                vec![],
                 &path_peer_1,
                 1,
                 2,
