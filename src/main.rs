@@ -11,7 +11,7 @@ use std::{env, fs};
 use subspace_core_rust::farmer::FarmerMessage;
 use subspace_core_rust::ledger::Ledger;
 use subspace_core_rust::manager::ProtocolMessage;
-use subspace_core_rust::network::{NodeType, StartupNetwork};
+use subspace_core_rust::network::{Network, NodeType};
 use subspace_core_rust::plot::Plot;
 use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
@@ -166,12 +166,17 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
     let ledger = Ledger::new(keys, epoch_tracker.clone(), state);
 
     // create the network
-    let startup_network_fut = StartupNetwork::new(
+    let startup_network_fut = Network::new(
         node_id,
         if node_type == NodeType::Gateway {
             DEV_GATEWAY_ADDR.parse().unwrap()
         } else {
             node_addr
+        },
+        if node_type == NodeType::Gateway {
+            vec![]
+        } else {
+            vec![DEV_GATEWAY_ADDR.parse().unwrap()]
         },
         &path,
         MIN_PEERS,
@@ -184,40 +189,7 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
     );
 
     // initiate outbound network connections
-    let startup_network = startup_network_fut.await.unwrap();
-    if node_type != NodeType::Gateway {
-        info!("Connecting to gateway node");
-
-        let contacts_level = startup_network
-            .connect(DEV_GATEWAY_ADDR.parse().unwrap())
-            .await
-            .expect("Failed to connect to a single gateway node");
-
-        // TODO: Min gateways check
-
-        if !contacts_level.min_contacts() {
-            panic!("Failed to reach min contacts level on startup");
-        }
-
-        loop {
-            // TODO: Failed attempts should be handled correctly
-            match startup_network.connect_to_random_contact().await {
-                Ok(peers_level) => {
-                    if peers_level.min_peers() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    error!(
-                        "Failed to connect to minimum number of peers on startup: {:?}",
-                        error
-                    );
-                    break;
-                }
-            }
-        }
-    }
-    let network = startup_network.finish_startup();
+    let network = startup_network_fut.await.unwrap();
 
     // optionally create the RPC server
     let mut rpc_server = None;

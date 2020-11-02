@@ -1,7 +1,7 @@
 use crate::network::messages::GossipMessage;
 use crate::network::Network;
 use crate::{NodeID, DEV_WS_ADDR};
-use futures::{executor, future};
+use futures::future;
 use jsonrpc_core::{MetaIoHandler, Middleware, Params, Value};
 use jsonrpc_pubsub::{PubSubHandler, PubSubMetadata, Session, Sink, Subscriber, SubscriptionId};
 use jsonrpc_ws_server::{RequestContext, Server, ServerBuilder};
@@ -49,24 +49,26 @@ where
         }),
     );
 
-    executor::block_on(network.on_gossip(move |message| {
-        let sinks = Arc::clone(&sinks);
+    network
+        .on_gossip(move |message| {
+            let sinks = Arc::clone(&sinks);
 
-        match message {
-            GossipMessage::BlockProposal { block } => {
-                // TODO: Serialization for numbers may lose u64 precision, also bytes are ugly, we
-                //  probably want to have them as hex.
-                //  https://openethereum.github.io/wiki/JSONRPC
-                let params = Params::Array(vec![serde_json::to_value(block.clone()).unwrap()]);
-                for sink in sinks.lock().unwrap().values() {
-                    drop(sink.notify(params.clone()));
+            match message {
+                GossipMessage::BlockProposal { block } => {
+                    // TODO: Serialization for numbers may lose u64 precision, also bytes are ugly, we
+                    //  probably want to have them as hex.
+                    //  https://openethereum.github.io/wiki/JSONRPC
+                    let params = Params::Array(vec![serde_json::to_value(block.clone()).unwrap()]);
+                    for sink in sinks.lock().unwrap().values() {
+                        drop(sink.notify(params.clone()));
+                    }
+                }
+                GossipMessage::TxProposal { tx: _ } => {
+                    // TODO
                 }
             }
-            GossipMessage::TxProposal { tx: _ } => {
-                // TODO
-            }
-        }
-    }));
+        })
+        .detach();
 }
 
 pub fn run(node_id: NodeID, network: Network) -> Server {

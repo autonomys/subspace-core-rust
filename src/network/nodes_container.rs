@@ -1,3 +1,4 @@
+use crate::network::PersistedNodes;
 use async_std::net::{Shutdown, TcpStream};
 use async_std::sync::{channel, Sender};
 use bytes::Bytes;
@@ -187,6 +188,20 @@ impl NodesContainer {
             .chain(self.contacts.keys())
     }
 
+    /// Returns all known contacts, actively connected peers and blocklist
+    pub(super) fn get_persisted_nodes(&self) -> PersistedNodes {
+        PersistedNodes {
+            contacts: self
+                .contacts
+                .keys()
+                .chain(self.pending_peers.keys())
+                .copied()
+                .collect(),
+            peers: self.peers.keys().copied().collect(),
+            blocklist: self.block_list.iter().map(|(&addr, _)| addr).collect(),
+        }
+    }
+
     /// Returns all known contacts, including those that are already connected or pending
     pub(super) fn get_contacts_to_check(&mut self) -> impl Iterator<Item = SocketAddr> + '_ {
         // TODO: Should we prefer peers here (load balancing)
@@ -289,6 +304,11 @@ impl NodesContainer {
         }
     }
 
+    /// Remove peer and do nothing else
+    pub(super) fn remove_peer(&mut self, node_addr: &SocketAddr) {
+        self.peers.remove(&node_addr);
+    }
+
     /// State transition from PendingPeer to Peer in case of successful connection attempt
     ///
     /// Returns None if such pending peer was not found
@@ -315,6 +335,10 @@ impl NodesContainer {
             }
             None => None,
         }
+    }
+
+    pub(super) fn is_peer_connected(&self, addr: &SocketAddr) -> bool {
+        self.peers.contains_key(addr)
     }
 
     /// PendingPeer removal in case of failed connection attempt
