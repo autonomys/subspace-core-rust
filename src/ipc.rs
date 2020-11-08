@@ -1,5 +1,6 @@
 use async_oneshot::Sender;
-use async_std::os::unix::net::UnixListener;
+use async_std::fs;
+use async_std::os::unix::net::{UnixListener, UnixStream};
 use async_std::path::Path;
 use async_std::task::JoinHandle;
 use bytes::BytesMut;
@@ -10,14 +11,14 @@ use std::convert::TryInto;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum IpcRequestMessage {
-    // TODO
+    Shutdown,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum IpcResponseMessage {
-    // TODO
+    Shutdown,
 }
 
 pub struct IpcServer {
@@ -37,8 +38,11 @@ impl IpcServer {
     pub async fn new<P, OM>(path: P, on_message: OM) -> io::Result<IpcServer>
     where
         P: AsRef<Path>,
-        OM: Fn((IpcRequestMessage, Sender<IpcResponseMessage>)) + Send + Sync + 'static,
+        OM: Fn((IpcRequestMessage, Sender<Result<IpcResponseMessage, ()>>)) + Send + Sync + 'static,
     {
+        if path.as_ref().exists().await {
+            fs::remove_file(&path).await?;
+        }
         let listener = UnixListener::bind(path).await?;
         let on_message = Arc::new(on_message);
 
@@ -67,8 +71,7 @@ impl IpcServer {
                                 on_message((request_message, response_sender));
                                 match response_receiver.await {
                                     Ok(response) => {
-                                        let data =
-                                            bincode::serialize(&Ok::<_, ()>(response)).unwrap();
+                                        let data = bincode::serialize(&response).unwrap();
                                         let result: io::Result<()> = try {
                                             stream
                                                 .write_all(&(data.len() as u32).to_le_bytes())
@@ -110,5 +113,31 @@ impl IpcServer {
         Ok(IpcServer {
             task_handle: Mutex::new(Some(task_handle)),
         })
+    }
+}
+
+pub async fn simple_request<P: AsRef<Path>>(
+    path: P,
+    request: &IpcRequestMessage,
+) -> io::Result<IpcResponseMessage> {
+    let mut stream = UnixStream::connect(path).await?;
+    {
+        let data = bincode::serialize(request).unwrap();
+        stream.write_all(&(data.len() as u32).to_le_bytes()).await?;
+        stream.write_all(&data).await?;
+    }
+
+    let mut length_buffer = BytesMut::with_capacity(4);
+    length_buffer.resize(length_buffer.capacity(), 0);
+    let mut payload = BytesMut::new();
+
+    stream.read_exact(length_buffer.as_mut()).await?;
+    let length = u32::from_le_bytes(length_buffer.as_ref().try_into().unwrap());
+    payload.resize(length as usize, 0);
+    stream.read_exact(payload.as_mut()).await?;
+
+    match bincode::deserialize(&payload) {
+        Ok(response) => Ok(response),
+        Err(error) => Err(io::Error::new(io::ErrorKind::Other, error)),
     }
 }

@@ -7,10 +7,12 @@ use daemonize_me::Daemon;
 use futures;
 use log::LevelFilter;
 use log::*;
+use static_assertions::_core::time::Duration;
 use std::fs;
 use std::path::PathBuf;
 use std::thread;
 use subspace_core_rust::farmer::FarmerMessage;
+use subspace_core_rust::ipc::{IpcRequestMessage, IpcResponseMessage, IpcServer};
 use subspace_core_rust::ledger::Ledger;
 use subspace_core_rust::manager::ProtocolMessage;
 use subspace_core_rust::network::{Network, NodeType};
@@ -18,7 +20,7 @@ use subspace_core_rust::plot::Plot;
 use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::{
-    console, farmer, manager, network, plotter, rpc, state, BLOCK_LIST_SIZE, CONSOLE,
+    console, farmer, ipc, manager, network, plotter, rpc, state, BLOCK_LIST_SIZE, CONSOLE,
     DEV_GATEWAY_ADDR, GENESIS_PIECE_COUNT, MAINTAIN_PEERS_INTERVAL, MAX_CONTACTS, MAX_PEERS,
     MIN_CONTACTS, MIN_PEERS,
 };
@@ -174,7 +176,9 @@ async fn main() {
         }
         Command::Stop { custom_path } => {
             let path = get_path(custom_path);
-            unimplemented!();
+            ipc::simple_request(path.join("ipc.socket"), &IpcRequestMessage::Shutdown)
+                .await
+                .unwrap();
         }
         Command::Watch { custom_path } => {
             let path = get_path(custom_path);
@@ -277,6 +281,30 @@ pub async fn run(
     {
         rpc_server = Some(rpc::run(node_id, network.clone()));
     }
+
+    let ipc_server_fut = IpcServer::new(
+        path.join("ipc.socket"),
+        |(request_message, response_sender)| {
+            trace!("Received IPC request {:?}", request_message);
+
+            let response_message = match request_message {
+                IpcRequestMessage::Shutdown => {
+                    // TODO: Graceful shutdown here
+                    std::thread::spawn(|| {
+                        std::thread::sleep(Duration::from_secs(1));
+                        std::process::exit(0);
+                    });
+
+                    Ok(IpcResponseMessage::Shutdown)
+                }
+            };
+
+            trace!("Sending IPC response {:?}", response_message);
+            let _ = response_sender.send(response_message);
+        },
+    );
+
+    let _ipc_server = ipc_server_fut.await.unwrap();
 
     // create the manager
     let manager = manager::run(
