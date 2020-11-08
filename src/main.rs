@@ -3,6 +3,7 @@ use async_std::task;
 use clap::{Clap, ValueHint};
 use console::AppState;
 use crossbeam_channel::unbounded;
+use daemonize_me::Daemon;
 use futures;
 use log::LevelFilter;
 use log::*;
@@ -68,7 +69,30 @@ enum Command {
         /// Use custom path for data storage instead of platform-specific default
         #[clap(value_hint = ValueHint::FilePath)]
         custom_path: Option<PathBuf>,
+        /// Run in the background as daemon
+        #[clap(long)]
+        daemon: bool,
     },
+}
+
+fn get_path(custom_path: Option<PathBuf>) -> PathBuf {
+    // set storage path
+    let path = custom_path
+        .or_else(|| std::env::var("SUBSPACE_DIR").map(PathBuf::from).ok())
+        .unwrap_or_else(|| {
+            dirs::data_local_dir()
+                .expect("Can't find local data directory, needs to be specified explicitly")
+                .join("subspace")
+                .join("results")
+        });
+
+    if !path.exists() {
+        fs::create_dir_all(&path).unwrap_or_else(|error| {
+            panic!("Failed to create data directory {:?}: {:?}", path, error)
+        });
+    }
+
+    path
 }
 
 #[async_std::main]
@@ -77,7 +101,28 @@ async fn main() {
         Command::Run {
             node_type,
             custom_path,
+            daemon,
         } => {
+            let path = get_path(custom_path);
+            // TODO: Doesn't really work, see https://github.com/octetd/daemonize-me/issues/2
+            if daemon {
+                let stdout = std::fs::File::create(path.join("daemon.out")).unwrap();
+                let stderr = std::fs::File::create(path.join("daemon.err")).unwrap();
+                match Daemon::new()
+                    .stdout(stdout)
+                    .stderr(stderr)
+                    .pid_file(path.join("subspace.pid"), Some(false))
+                    .start()
+                {
+                    Ok(_) => {
+                        info!("Node successfully started in background");
+                    }
+                    Err(error) => {
+                        error!("Failed to start node in the background: {}", error);
+                        std::process::exit(1);
+                    }
+                }
+            }
             /*
              * Startup: cargo run <node-type> [<custom-path>]
              *
@@ -99,7 +144,7 @@ async fn main() {
                 // spawn a new thread to run the node else it will block the console
                 thread::spawn(move || {
                     task::spawn(async move {
-                        run(app_state_sender, node_type, custom_path).await;
+                        run(app_state_sender, node_type, path).await;
                     });
                 });
 
@@ -108,7 +153,7 @@ async fn main() {
             } else {
                 // TODO: fix default log level and occasionally print state to the console
                 env_logger::init();
-                run(app_state_sender, node_type, custom_path).await;
+                run(app_state_sender, node_type, path).await;
             }
         }
     }
@@ -117,25 +162,9 @@ async fn main() {
 pub async fn run(
     app_state_sender: crossbeam_channel::Sender<AppState>,
     node_type: NodeType,
-    custom_path: Option<PathBuf>,
+    path: PathBuf,
 ) {
     let node_addr = "127.0.0.1:0".parse().unwrap();
-
-    // set storage path
-    let path = custom_path
-        .or_else(|| std::env::var("SUBSPACE_DIR").map(PathBuf::from).ok())
-        .unwrap_or_else(|| {
-            dirs::data_local_dir()
-                .expect("Can't find local data directory, needs to be specified explicitly")
-                .join("subspace")
-                .join("results")
-        });
-
-    if !path.exists() {
-        fs::create_dir_all(&path).unwrap_or_else(|error| {
-            panic!("Failed to create data directory {:?}: {:?}", path, error)
-        });
-    }
 
     info!(
         "Starting new Subspace {:?} using location {:?}",
