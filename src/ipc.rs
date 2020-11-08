@@ -2,6 +2,7 @@ use async_oneshot::Sender;
 use async_std::fs;
 use async_std::os::unix::net::{UnixListener, UnixStream};
 use async_std::path::Path;
+use async_std::path::PathBuf;
 use async_std::task::JoinHandle;
 use bytes::BytesMut;
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
@@ -9,7 +10,7 @@ use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum IpcRequestMessage {
@@ -22,14 +23,17 @@ pub enum IpcResponseMessage {
 }
 
 pub struct IpcServer {
-    task_handle: Mutex<Option<JoinHandle<()>>>,
+    path: Option<PathBuf>,
+    task_handle: Option<JoinHandle<()>>,
 }
 
 impl Drop for IpcServer {
     fn drop(&mut self) {
-        let task_handle = self.task_handle.lock().unwrap().take().unwrap();
+        let path = self.path.take().unwrap();
+        let task_handle = self.task_handle.take().unwrap();
         async_std::task::spawn(async move {
             let _ = task_handle.cancel().await;
+            let _ = fs::remove_file(&path).await;
         });
     }
 }
@@ -43,7 +47,7 @@ impl IpcServer {
         if path.as_ref().exists().await {
             fs::remove_file(&path).await?;
         }
-        let listener = UnixListener::bind(path).await?;
+        let listener = UnixListener::bind(&path).await?;
         let on_message = Arc::new(on_message);
 
         let task_handle = async_std::task::spawn(async move {
@@ -111,7 +115,8 @@ impl IpcServer {
         });
 
         Ok(IpcServer {
-            task_handle: Mutex::new(Some(task_handle)),
+            path: Some(path.as_ref().to_path_buf()),
+            task_handle: Some(task_handle),
         })
     }
 }
