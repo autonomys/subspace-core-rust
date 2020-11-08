@@ -4,6 +4,10 @@ version = "0.1.0"
 authors = ["jwagstaff", "nazar-pc"]
 edition = "2018"
 
+[[bin]]
+name = "subspace"
+path = "src/main.rs"
+
 [dependencies]
 async-channel = "1.4.2"
 async-io = "1.1.2"

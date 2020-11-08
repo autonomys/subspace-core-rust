@@ -78,6 +78,30 @@ docker build -t subspace-core-rust -f Dockerfile .
 docker run --rm -it --init subspace-core-rust
 ```
 
+### Building and running without Docker image:
+To build an app run:
+```
+cargo build --release
+```
+
+Which will produce a binary that can be copied to one of the directories in PATH, for example:
+```
+sudo cp target/release/subspace /usr/local/bin/subspace
+```
+
+Then run a node:
+```
+subspace gateway
+```
+Or as peer:
+```
+subspace peer
+```
+Or as farmer:
+```
+subspace farmer
+```
+
 ### Status
 
 1. ~~Sloth based proof-of-replication~~
