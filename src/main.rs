@@ -181,7 +181,7 @@ async fn main() {
             unimplemented!();
         }
         Command::Send {
-            address: node_id,
+            address,
             amount,
             custom_path,
         } => {

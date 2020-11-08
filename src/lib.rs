@@ -13,6 +13,7 @@ pub mod block;
 pub mod console;
 pub mod crypto;
 pub mod farmer;
+pub mod ipc;
 pub mod ledger;
 pub mod manager;
 pub mod metablocks;
