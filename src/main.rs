@@ -67,11 +67,35 @@ enum Command {
         #[clap(arg_enum)]
         node_type: NodeType,
         /// Use custom path for data storage instead of platform-specific default
-        #[clap(value_hint = ValueHint::FilePath)]
+        #[clap(long, value_hint = ValueHint::FilePath)]
         custom_path: Option<PathBuf>,
         /// Run in the background as daemon
         #[clap(long)]
         daemon: bool,
+    },
+    /// Stop subspace node that was previously running as a daemon
+    Stop {
+        /// Use custom path for data storage instead of platform-specific default
+        #[clap(long, value_hint = ValueHint::FilePath)]
+        custom_path: Option<PathBuf>,
+    },
+    /// Start TUI to watch a subspace node running
+    Watch {
+        /// Use custom path for data storage instead of platform-specific default
+        #[clap(long, value_hint = ValueHint::FilePath)]
+        custom_path: Option<PathBuf>,
+    },
+    /// Send some credits using node wallet
+    Send {
+        // TODO: This should probably be a more specific type
+        /// Receiver address
+        address: String,
+        // TODO: This should probably be a more specific type
+        /// Amount of credits to send
+        amount: u64,
+        /// Use custom path for data storage instead of platform-specific default
+        #[clap(long, value_hint = ValueHint::FilePath)]
+        custom_path: Option<PathBuf>,
     },
 }
 
@@ -97,7 +121,8 @@ fn get_path(custom_path: Option<PathBuf>) -> PathBuf {
 
 #[async_std::main]
 async fn main() {
-    match Command::parse() {
+    let command: Command = Command::parse();
+    match command {
         Command::Run {
             node_type,
             custom_path,
@@ -123,15 +148,6 @@ async fn main() {
                     }
                 }
             }
-            /*
-             * Startup: cargo run <node-type> [<custom-path>]
-             *
-             * arg1 type -> gateway, farmer, peer
-             * arg2 path -> unique path for plot (data_local_dir default)
-             *
-             * Later: plot size, env
-             *
-             */
 
             // create an async channel for console
             let (app_state_sender, app_state_receiver) = unbounded::<AppState>();
@@ -155,6 +171,22 @@ async fn main() {
                 env_logger::init();
                 run(app_state_sender, node_type, path).await;
             }
+        }
+        Command::Stop { custom_path } => {
+            let path = get_path(custom_path);
+            unimplemented!();
+        }
+        Command::Watch { custom_path } => {
+            let path = get_path(custom_path);
+            unimplemented!();
+        }
+        Command::Send {
+            address: node_id,
+            amount,
+            custom_path,
+        } => {
+            let path = get_path(custom_path);
+            unimplemented!();
         }
     }
 }

@@ -32,7 +32,7 @@ Benches single block encode/decode time and full piece encode/decode time for ea
 
 ### Run Node
 
-`RUST_LOG=[level] cargo run -- run node-type [custom-path]`
+`RUST_LOG=[level] cargo run -- run node-type`
 
 `RUST_LOG=info cargo run -- run gateway`
 
