@@ -4,7 +4,7 @@ use clap::{Clap, ValueHint};
 use console::AppState;
 use crossbeam_channel::unbounded;
 use daemonize_me::Daemon;
-use futures;
+use futures_lite::FutureExt;
 use log::LevelFilter;
 use log::*;
 use static_assertions::_core::time::Duration;
@@ -324,7 +324,7 @@ pub async fn run(
         plot.clone(),
     );
 
-    futures::join!(manager, farmer);
+    manager.race(farmer).await;
 
     // RPC server will stop when this is dropped
     drop(rpc_server);
