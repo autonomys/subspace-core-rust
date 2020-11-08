@@ -74,6 +74,9 @@ enum Command {
         /// Run in the background as daemon
         #[clap(long)]
         daemon: bool,
+        /// Run WebSocket RPC server
+        #[clap(long)]
+        ws_rpc_server: bool,
     },
     /// Stop subspace node that was previously running as a daemon
     Stop {
@@ -129,6 +132,7 @@ async fn main() {
             node_type,
             custom_path,
             daemon,
+            ws_rpc_server,
         } => {
             let path = get_path(custom_path);
             // TODO: Doesn't really work, see https://github.com/octetd/daemonize-me/issues/2
@@ -162,7 +166,7 @@ async fn main() {
                 // spawn a new thread to run the node else it will block the console
                 thread::spawn(move || {
                     task::spawn(async move {
-                        run(app_state_sender, node_type, path).await;
+                        run(app_state_sender, node_type, path, ws_rpc_server).await;
                     });
                 });
 
@@ -171,7 +175,7 @@ async fn main() {
             } else {
                 // TODO: fix default log level and occasionally print state to the console
                 env_logger::init();
-                run(app_state_sender, node_type, path).await;
+                run(app_state_sender, node_type, path, ws_rpc_server).await;
             }
         }
         Command::Stop { custom_path } => {
@@ -199,6 +203,7 @@ pub async fn run(
     app_state_sender: crossbeam_channel::Sender<AppState>,
     node_type: NodeType,
     path: PathBuf,
+    ws_rpc_server: bool,
 ) {
     let node_addr = "127.0.0.1:0".parse().unwrap();
 
@@ -277,7 +282,7 @@ pub async fn run(
     let mut rpc_server = None;
     if std::env::var("RUN_WS_RPC")
         .map(|value| value == "1".to_string())
-        .unwrap_or_default()
+        .unwrap_or(ws_rpc_server)
     {
         rpc_server = Some(rpc::run(node_id, network.clone()));
     }
