@@ -98,6 +98,7 @@ pub const GENESIS_STATE_BLOCKS: usize = (1024 * 1024) / STATE_BLOCK_SIZE_IN_BYTE
 pub const GENESIS_PIECE_COUNT: usize = PIECES_PER_STATE_BLOCK * GENESIS_STATE_BLOCKS;
 
 pub const PLOT_SIZE: usize = GENESIS_PIECE_COUNT;
+pub const IPC_SOCKET_FILE: &str = "ipc.socket";
 
 // Assertions about acceptable values for above parameters:
 // Lookback should always be at least one

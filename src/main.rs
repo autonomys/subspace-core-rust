@@ -1,13 +1,15 @@
+use async_signals::Signals;
 use async_std::sync::channel;
 use async_std::task;
 use clap::{Clap, ValueHint};
 use console::AppState;
 use crossbeam_channel::unbounded;
 use daemonize_me::Daemon;
+use exitcode::{OK, SOFTWARE};
+use futures::StreamExt;
 use futures_lite::FutureExt;
 use log::LevelFilter;
 use log::*;
-use static_assertions::_core::time::Duration;
 use std::fs;
 use std::path::PathBuf;
 use std::thread;
@@ -21,8 +23,8 @@ use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::{
     console, farmer, ipc, manager, network, plotter, rpc, state, BLOCK_LIST_SIZE, CONSOLE,
-    DEV_GATEWAY_ADDR, GENESIS_PIECE_COUNT, MAINTAIN_PEERS_INTERVAL, MAX_CONTACTS, MAX_PEERS,
-    MIN_CONTACTS, MIN_PEERS,
+    DEV_GATEWAY_ADDR, GENESIS_PIECE_COUNT, IPC_SOCKET_FILE, MAINTAIN_PEERS_INTERVAL, MAX_CONTACTS,
+    MAX_PEERS, MIN_CONTACTS, MIN_PEERS,
 };
 use tui_logger::{init_logger, set_default_level};
 
@@ -180,7 +182,7 @@ async fn main() {
         }
         Command::Stop { custom_path } => {
             let path = get_path(custom_path);
-            ipc::simple_request(path.join("ipc.socket"), &IpcRequestMessage::Shutdown)
+            ipc::simple_request(path.join(IPC_SOCKET_FILE), &IpcRequestMessage::Shutdown)
                 .await
                 .unwrap();
         }
@@ -246,9 +248,6 @@ pub async fn run(
         }
     };
 
-    // create the farming loop
-    let farmer = farmer::run(timer_to_farmer_rx, solver_to_main_tx, &plot);
-
     // create the ledger
     let ledger = Ledger::new(keys, epoch_tracker.clone(), state);
 
@@ -287,17 +286,18 @@ pub async fn run(
         rpc_server = Some(rpc::run(node_id, network.clone()));
     }
 
+    let (ipc_shutdown_request_sender, mut ipc_shutdown_request_receiver) =
+        async_channel::unbounded::<()>();
     let ipc_server_fut = IpcServer::new(
-        path.join("ipc.socket"),
-        |(request_message, response_sender)| {
+        path.join(IPC_SOCKET_FILE),
+        move |(request_message, response_sender)| {
             trace!("Received IPC request {:?}", request_message);
 
             let response_message = match request_message {
                 IpcRequestMessage::Shutdown => {
-                    // TODO: Graceful shutdown here
-                    std::thread::spawn(|| {
-                        std::thread::sleep(Duration::from_secs(1));
-                        std::process::exit(0);
+                    let ipc_shutdown_request_sender = ipc_shutdown_request_sender.clone();
+                    async_std::task::spawn(async move {
+                        let _ = ipc_shutdown_request_sender.send(()).await;
                     });
 
                     Ok(IpcResponseMessage::Shutdown)
@@ -324,8 +324,58 @@ pub async fn run(
         plot.clone(),
     );
 
-    manager.race(farmer).await;
+    let mut app_handler = Some(async_std::task::spawn({
+        let plot = plot.clone();
 
-    // RPC server will stop when this is dropped
-    drop(rpc_server);
+        async move {
+            // create the farming loop
+            let farmer_fut = farmer::run(timer_to_farmer_rx, solver_to_main_tx, &plot);
+
+            manager.race(farmer_fut).await;
+        }
+    }));
+
+    let mut signals = Signals::new(vec![libc::SIGINT, libc::SIGTERM])
+        .unwrap()
+        .map(|_| ());
+
+    // Wrap into option, such that we can drop Plot when needed without dropping the whole variable
+    let mut plot = Some(plot);
+    let mut already_shutting_down = false;
+    while let Some(_) = ipc_shutdown_request_receiver
+        .next()
+        .race(signals.next())
+        .await
+    {
+        if already_shutting_down {
+            warn!("Received signal second time, force shutdown");
+            std::process::exit(SOFTWARE);
+        }
+        already_shutting_down = true;
+
+        info!("Shutdown signal received, shutting down");
+        // Stop RPC server
+        rpc_server.take();
+        if let Some(app_handler) = app_handler.take() {
+            let plot = plot.take().unwrap();
+            async_std::task::spawn(async move {
+                // TODO: We probably want to do something more sophisticated than just canceling it
+                app_handler.cancel().await;
+
+                let (close_sender, close_receiver) = async_oneshot::oneshot::<()>();
+                plot.on_close(move || {
+                    let _ = close_sender.send(());
+                })
+                .detach();
+
+                // We wait for plot to close gracefully, otherwise we may get this message:
+                // pure virtual method called
+                // terminate called without an active exception
+                drop(plot);
+                let _ = close_receiver.await;
+
+                std::process::exit(OK);
+            });
+        }
+    }
 }
