@@ -96,6 +96,7 @@ use async_std::task::JoinHandle;
 use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
 use bytes::BytesMut;
+use clap::Clap;
 use event_listener_primitives::{Bag, HandlerId};
 use futures::io::SeekFrom;
 use futures::lock::Mutex as AsyncMutex;
@@ -128,7 +129,7 @@ use std::{fmt, io, mem};
  RPC Methods
 
     Network
-    1. method similar to reqeust_blocks (uncomment match error)
+    1. method similar to request_blocks (uncomment match error)
     2. Add request message
     3. Add a response message
     4. Uncomment RequestError (BadResponse)
@@ -147,7 +148,7 @@ const MAX_BACKOFF_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_BACKOFF_ELAPSED_TIME: Duration = Duration::from_secs(60);
 const BACKOFF_MULTIPLIER: f64 = 5_f64;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Clap)]
 pub enum NodeType {
     Gateway,
     Peer,

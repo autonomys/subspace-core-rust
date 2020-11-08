@@ -1,13 +1,14 @@
 use async_std::sync::channel;
 use async_std::task;
+use clap::{Clap, ValueHint};
 use console::AppState;
 use crossbeam_channel::unbounded;
 use futures;
 use log::LevelFilter;
 use log::*;
+use std::fs;
 use std::path::PathBuf;
 use std::thread;
-use std::{env, fs};
 use subspace_core_rust::farmer::FarmerMessage;
 use subspace_core_rust::ledger::Ledger;
 use subspace_core_rust::manager::ProtocolMessage;
@@ -56,57 +57,73 @@ use tui_logger::{init_logger, set_default_level};
 
 */
 
+#[derive(Debug, Clap)]
+#[clap(about, version)]
+enum Command {
+    /// Run a subspace node
+    Run {
+        /// Node type to run
+        #[clap(arg_enum)]
+        node_type: NodeType,
+        /// Use custom path for data storage instead of platform-specific default
+        #[clap(value_hint = ValueHint::FilePath)]
+        custom_path: Option<PathBuf>,
+    },
+}
+
 #[async_std::main]
 async fn main() {
-    /*
-     * Startup: cargo run <node_type> <custom_path>
-     *
-     * arg1 type -> gateway, farmer, peer (gateway default)
-     * arg2 path -> unique path for plot (data_local_dir default)
-     *
-     * Later: plot size, env
-     *
-     */
+    match Command::parse() {
+        Command::Run {
+            node_type,
+            custom_path,
+        } => {
+            /*
+             * Startup: cargo run <node-type> [<custom-path>]
+             *
+             * arg1 type -> gateway, farmer, peer
+             * arg2 path -> unique path for plot (data_local_dir default)
+             *
+             * Later: plot size, env
+             *
+             */
 
-    // create an async channel for console
-    let (app_state_sender, app_state_receiver) = unbounded::<AppState>();
+            // create an async channel for console
+            let (app_state_sender, app_state_receiver) = unbounded::<AppState>();
 
-    if CONSOLE {
-        // setup the logger
-        init_logger(LevelFilter::Debug).unwrap();
-        set_default_level(LevelFilter::Trace);
+            if CONSOLE {
+                // setup the logger
+                init_logger(LevelFilter::Debug).unwrap();
+                set_default_level(LevelFilter::Trace);
 
-        // spawn a new thread to run the node else it will block the console
-        thread::spawn(move || {
-            task::spawn(async move {
-                run(app_state_sender).await;
-            });
-        });
+                // spawn a new thread to run the node else it will block the console
+                thread::spawn(move || {
+                    task::spawn(async move {
+                        run(app_state_sender, node_type, custom_path).await;
+                    });
+                });
 
-        // run the console app in the foreground, passing the receiver
-        console::run(app_state_receiver).unwrap();
-    } else {
-        // TODO: fix default log level and occasionally print state to the console
-        env_logger::init();
-        run(app_state_sender).await;
+                // run the console app in the foreground, passing the receiver
+                console::run(app_state_receiver).unwrap();
+            } else {
+                // TODO: fix default log level and occasionally print state to the console
+                env_logger::init();
+                run(app_state_sender, node_type, custom_path).await;
+            }
+        }
     }
 }
 
-pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
+pub async fn run(
+    app_state_sender: crossbeam_channel::Sender<AppState>,
+    node_type: NodeType,
+    custom_path: Option<PathBuf>,
+) {
     let node_addr = "127.0.0.1:0".parse().unwrap();
-    let node_type = env::args()
-        .skip(1)
-        .take(1)
-        .next()
-        .map(|s| s.parse().ok())
-        .flatten()
-        .unwrap_or(NodeType::Gateway);
 
     // set storage path
-    let path = env::args()
-        .nth(2)
-        .or_else(|| std::env::var("SUBSPACE_DIR").ok())
-        .map(PathBuf::from)
+    let path = custom_path
+        .or_else(|| std::env::var("SUBSPACE_DIR").map(PathBuf::from).ok())
         .unwrap_or_else(|| {
             dirs::data_local_dir()
                 .expect("Can't find local data directory, needs to be specified explicitly")

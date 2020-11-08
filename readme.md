@@ -32,11 +32,11 @@ Benches single block encode/decode time and full piece encode/decode time for ea
 
 ### Run Node
 
-`RUST_LOG=[level] cargo run [node-type] [optional-path]`
+`RUST_LOG=[level] cargo run -- run node-type [custom-path]`
 
-`RUST_LOG=info cargo run gateway`
+`RUST_LOG=info cargo run -- run gateway`
 
-`RUST_LOG=info cargo run peer`
+`RUST_LOG=info cargo run -- run peer`
 
 ### Environment variables
 
@@ -91,15 +91,15 @@ sudo cp target/release/subspace /usr/local/bin/subspace
 
 Then run a node:
 ```
-subspace gateway
+subspace run gateway
 ```
 Or as peer:
 ```
-subspace peer
+subspace run peer
 ```
 Or as farmer:
 ```
-subspace farmer
+subspace run farmer
 ```
 
 ### Status
