@@ -113,15 +113,11 @@ impl State {
         let mut piece_bundles: Vec<PieceBundle> = Vec::new();
 
         for _ in 0..piece_count {
-            input = crypto::digest_sha_256_simple(&input[..]);
+            input = crypto::digest_sha_256_simple(&input);
             let piece_seed = input[..].try_into().expect("32 bytes");
             let data = crypto::genesis_data_from_seed(piece_seed);
-            match self.add_data(data).await {
-                Some(state_bundle) => state_bundle
-                    .piece_bundles
-                    .iter()
-                    .for_each(|piece_bundle| piece_bundles.push(piece_bundle.clone())),
-                None => {}
+            if let Some(state_bundle) = self.add_data(data).await {
+                piece_bundles.extend(state_bundle.piece_bundles.into_iter());
             }
         }
 
