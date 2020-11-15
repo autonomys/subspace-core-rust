@@ -1,3 +1,15 @@
+//! IPC module
+//!
+//! Subspace node can run in foreground or background, but in either case there may be a need to
+//! have communication with an instance locally (using CLI as an example).
+//!
+//! IPC module has server and client implementation that exchange simple binary messages prepended
+//! by the message length. The intended communication pattern is for client (like CLI) to make a
+//! request and receive a response that corresponds to that request back. Each client can on have
+//! one request running at a time and each request can only have one corresponding response.
+//!
+//! Communication is done using Unix Domain Socket to limit access from the outside.
+
 use async_oneshot::Sender;
 use async_std::fs;
 use async_std::os::unix::net::{UnixListener, UnixStream};
