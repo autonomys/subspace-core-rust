@@ -140,6 +140,18 @@ use std::{fmt, io, mem};
 
 */
 
+macro_rules! upgrade_weak {
+    ($x:ident, $r:expr) => {{
+        match $x.upgrade() {
+            Some(o) => o,
+            None => return $r,
+        }
+    }};
+    ($x:ident) => {
+        upgrade_weak!($x, ())
+    };
+}
+
 const MAX_MESSAGE_CONTENTS_LENGTH: usize = 2usize.pow(16) - 1;
 // TODO: Consider adaptive request timeout for more efficient sync
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
@@ -316,13 +328,7 @@ fn handle_messages(network_weak: NetworkWeak, mut message_receiver: Receiver<Mes
         while let Some(message) = message_receiver.next().await {
             // TODO: This is probably suboptimal, we can probably get rid of it if we have special
             //  method to disconnect from all peers
-            let network = match network_weak.upgrade() {
-                Some(network) => network,
-                None => {
-                    // Network instance was destroyed
-                    return;
-                }
-            };
+            let network = upgrade_weak!(network_weak);
             match message {
                 Message::Gossip(message) => {
                     drop(network.inner.gossip_sender.send((peer_addr, message)).await);
@@ -404,12 +410,201 @@ fn handle_messages(network_weak: NetworkWeak, mut message_receiver: Receiver<Mes
             }
         }
 
-        if let Some(network) = network_weak.upgrade() {
-            async_std::task::spawn(async move {
-                network.reconnect(peer_addr).await;
-            });
-        }
+        async_std::task::spawn(async move {
+            reconnect(network_weak, peer_addr).await;
+        });
     });
+}
+
+// TODO: This function probably needs timeouts for various operations
+// TODO: Check if we really need to reconnect, maybe we above min_peers already and don't care
+async fn reconnect(network_weak: NetworkWeak, node_addr: SocketAddr) {
+    let pending_peer = {
+        let network = upgrade_weak!(network_weak);
+        let mut nodes_container = network.inner.nodes_container.lock().await;
+        // We do not reconnect to gateways in a regular way since otherwise it will conflict
+        // with code below that tries to establish connections to gateways specifically and will
+        // cause that code being unable to establish a connection (remember, regular
+        // reconnections are paused while we wait for network connection to recover)
+        let pending_peer = if network.inner.gateway_nodes.contains(&node_addr) {
+            nodes_container.remove_peer(&node_addr);
+            None
+        } else {
+            nodes_container.start_peer_reconnection(&node_addr)
+        };
+        let peers_count = nodes_container.get_peers().len();
+        drop(nodes_container);
+
+        if peers_count == 0 && !network.inner.gateway_nodes.is_empty() {
+            let (resume_sender, resume_receiver) = async_oneshot::oneshot::<()>();
+            let resume_handler = network.on_resume({
+                let resume_sender = StdMutex::new(Some(resume_sender));
+
+                move || {
+                    if let Some(resume_sender) = resume_sender.lock().unwrap().take() {
+                        drop(resume_sender.send(()));
+                    }
+                }
+            });
+
+            // Take lock on paused network such that nothing else can take it
+            let paused = Arc::clone(&network.inner.paused);
+            if let Some(paused) = paused.try_lock() {
+                network.inner.handlers.pause.call_simple();
+
+                let mut backoff: ExponentialBackoff = (network.inner.create_backoff)();
+                backoff.max_elapsed_time = None;
+
+                // Make sure we don't hold network instance while doing retries to allow instance
+                // destruction
+                drop(network);
+
+                // Looks like we've lost all connections, try to reconnect to one of the
+                // gateways, this will indicate that network works again
+                'outer_loop: loop {
+                    let mut gateway_nodes = upgrade_weak!(network_weak)
+                        .inner
+                        .gateway_nodes
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>();
+                    gateway_nodes.shuffle(&mut rand::thread_rng());
+
+                    for addr in gateway_nodes {
+                        match upgrade_weak!(network_weak).connect(addr).await {
+                            Ok(_) | Err(ConnectionError::AlreadyConnected) => {
+                                break 'outer_loop;
+                            }
+                            Err(error) => {
+                                warn!(
+                                    "Failed to connect to gateway {} on lost network: {:?}",
+                                    addr, error,
+                                );
+                            }
+                        }
+
+                        let delay = backoff.next_backoff().expect("No limit");
+
+                        async_std::task::sleep(delay).await;
+
+                        warn!(
+                            "Have not connected to a gateway after lost network, \
+                                waiting {} seconds and trying again",
+                            delay.as_secs_f32(),
+                        );
+                    }
+                }
+
+                // Remove lock
+                drop(paused);
+
+                upgrade_weak!(network_weak)
+                    .inner
+                    .handlers
+                    .resume
+                    .call_simple();
+            }
+
+            // Wait until network is resumed
+            drop(resume_receiver.await);
+            // Remove resume handler
+            drop(resume_handler);
+        }
+        pending_peer
+    };
+
+    if let Some(pending_peer) = pending_peer {
+        let network = upgrade_weak!(network_weak);
+        let mut backoff: ExponentialBackoff = (network.inner.create_backoff)();
+        let paused = Arc::clone(&network.inner.paused);
+        drop(network);
+
+        // This may prevent network from shutting down, hence running in the background
+        async_std::task::spawn(async move {
+            while let Some(delay) = backoff.next_backoff() {
+                debug!(
+                    "Reconnecting to peer {:?} after {} seconds",
+                    pending_peer,
+                    delay.as_secs_f32(),
+                );
+                async_std::task::sleep(delay).await;
+
+                // Make sure network is not paused
+                paused.lock().await;
+
+                let network = upgrade_weak!(network_weak);
+
+                let mut stream = match TcpStream::connect(pending_peer.address()).await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        debug!("Failed to reconnect to peer {:?}: {}", pending_peer, error);
+
+                        continue;
+                    }
+                };
+
+                match exchange_peer_addr(network.inner.node_addr, &mut stream).await {
+                    Some(_peer_addr) => {
+                        match network.on_connection_success(&pending_peer, stream).await {
+                            Some(_peer) => {
+                                debug!("Successfully reconnected to peer {:?}", pending_peer);
+                                return;
+                            }
+                            None => {
+                                debug!(
+                                    "Failed to reconnect to peer {:?}: no pending peer",
+                                    pending_peer,
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        debug!(
+                            "Failed to reconnect to peer {:?}: failed to exchange address",
+                            pending_peer,
+                        );
+                    }
+                }
+            }
+
+            let network = upgrade_weak!(network_weak);
+
+            network.on_connection_failure(&pending_peer).await;
+
+            if !network
+                .inner
+                .nodes_container
+                .lock()
+                .await
+                .peers_level()
+                .min_peers()
+            {
+                // Below min_peers, let's connect to someone
+                loop {
+                    // TODO: This can quickly exhaust contacts in case of temporary network
+                    //  disruption, isn't this a problem?
+                    // TODO: This will establish one connection, but it may also fail; there should
+                    //  be a mechanism to establish connections when new contacts are requested and
+                    //  we are below min peers
+                    match network.connect_to_random_contact().await {
+                        Ok(_) => {
+                            // Connected, good, move on
+                            break;
+                        }
+                        Err(error) => match error {
+                            ConnectionError::NoContact => {
+                                // No contacts left, give up
+                                break;
+                            }
+                            _ => {
+                                continue;
+                            }
+                        },
+                    }
+                }
+            }
+        });
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1335,21 +1530,24 @@ impl Network {
         }
     }
 
-    pub fn on_peer<F: Fn(&Peer) + Send + 'static>(&self, callback: F) -> HandlerId {
+    pub fn on_peer<F: Fn(&Peer) + Send + 'static>(&self, callback: F) -> HandlerId<'static> {
         self.inner.handlers.peer.add(Box::new(callback))
     }
 
-    pub fn on_gossip<F: Fn(&GossipMessage) + Send + 'static>(&self, callback: F) -> HandlerId {
+    pub fn on_gossip<F: Fn(&GossipMessage) + Send + 'static>(
+        &self,
+        callback: F,
+    ) -> HandlerId<'static> {
         self.inner.handlers.gossip.add(Box::new(callback))
     }
 
     /// Subscribe to event when network is paused due to losing all active connections
-    pub fn on_pause<F: Fn() + Send + 'static>(&self, callback: F) -> HandlerId {
+    pub fn on_pause<F: Fn() + Send + 'static>(&self, callback: F) -> HandlerId<'static> {
         self.inner.handlers.pause.add(Box::new(callback))
     }
 
     /// Subscribe to event when network is resumed after being paused previously
-    pub fn on_resume<F: Fn() + Send + 'static>(&self, callback: F) -> HandlerId {
+    pub fn on_resume<F: Fn() + Send + 'static>(&self, callback: F) -> HandlerId<'static> {
         self.inner.handlers.resume.add(Box::new(callback))
     }
 
@@ -1412,194 +1610,6 @@ impl Network {
             },
         )
         .await
-    }
-
-    // TODO: This function probably needs timeouts for various operations
-    // TODO: Check if we really need to reconnect, maybe we above min_peers already and don't care
-    async fn reconnect(&self, node_addr: SocketAddr) {
-        let pending_peer = {
-            let mut nodes_container = self.inner.nodes_container.lock().await;
-            // We do not reconnect to gateways in a regular way since otherwise it will conflict
-            // with code below that tries to establish connections to gateways specifically and will
-            // cause that code being unable to establish a connection (remember, regular
-            // reconnections are paused while we wait for network connection to recover)
-            let pending_peer = if self.inner.gateway_nodes.contains(&node_addr) {
-                nodes_container.remove_peer(&node_addr);
-                None
-            } else {
-                nodes_container.start_peer_reconnection(&node_addr)
-            };
-            let peers_count = nodes_container.get_peers().len();
-            drop(nodes_container);
-
-            if peers_count == 0 && !self.inner.gateway_nodes.is_empty() {
-                let (resume_sender, resume_receiver) = async_oneshot::oneshot::<()>();
-                let resume_handler = self.on_resume({
-                    let resume_sender = StdMutex::new(Some(resume_sender));
-
-                    move || {
-                        if let Some(resume_sender) = resume_sender.lock().unwrap().take() {
-                            drop(resume_sender.send(()));
-                        }
-                    }
-                });
-
-                // TODO: This may also prevent network from shutting down, needs to happen in the
-                //  background
-                // Take lock on paused network such that nothing else can take it
-                if let Some(paused) = self.inner.paused.try_lock() {
-                    self.inner.handlers.pause.call_simple();
-
-                    let mut backoff: ExponentialBackoff = (self.inner.create_backoff)();
-                    backoff.max_elapsed_time = None;
-
-                    // Looks like we've lost all connections, try to reconnect to one of the
-                    // gateways, this will indicate that network works again
-                    'outer_loop: loop {
-                        let mut gateway_nodes =
-                            self.inner.gateway_nodes.iter().copied().collect::<Vec<_>>();
-                        gateway_nodes.shuffle(&mut rand::thread_rng());
-
-                        for addr in gateway_nodes {
-                            match self.connect(addr).await {
-                                Ok(_) | Err(ConnectionError::AlreadyConnected) => {
-                                    break 'outer_loop;
-                                }
-                                Err(error) => {
-                                    warn!(
-                                        "Failed to connect to gateway {} on lost network: {:?}",
-                                        addr, error,
-                                    );
-                                }
-                            }
-
-                            let delay = backoff.next_backoff().expect("No limit");
-
-                            async_std::task::sleep(delay).await;
-
-                            warn!(
-                                "Have not connected to a gateway after lost network, \
-                                waiting {} seconds and trying again",
-                                delay.as_secs_f32(),
-                            );
-                        }
-                    }
-
-                    // Remove lock
-                    drop(paused);
-
-                    self.inner.handlers.resume.call_simple();
-                }
-
-                // Wait until network is resumed
-                drop(resume_receiver.await);
-                // Remove resume handler
-                drop(resume_handler);
-            }
-            pending_peer
-        };
-
-        if let Some(pending_peer) = pending_peer {
-            let mut backoff: ExponentialBackoff = (self.inner.create_backoff)();
-            let network_weak = self.downgrade();
-            let paused = Arc::clone(&self.inner.paused);
-
-            // This may prevent network from shutting down, hence running in the background
-            async_std::task::spawn(async move {
-                while let Some(delay) = backoff.next_backoff() {
-                    debug!(
-                        "Reconnecting to peer {:?} after {} seconds",
-                        pending_peer,
-                        delay.as_secs_f32(),
-                    );
-                    async_std::task::sleep(delay).await;
-
-                    // Make sure network is not paused
-                    paused.lock().await;
-
-                    let network = match network_weak.upgrade() {
-                        Some(network) => network,
-                        None => {
-                            return;
-                        }
-                    };
-
-                    let mut stream = match TcpStream::connect(pending_peer.address()).await {
-                        Ok(stream) => stream,
-                        Err(error) => {
-                            debug!("Failed to reconnect to peer {:?}: {}", pending_peer, error);
-
-                            continue;
-                        }
-                    };
-
-                    match exchange_peer_addr(network.inner.node_addr, &mut stream).await {
-                        Some(_peer_addr) => {
-                            match network.on_connection_success(&pending_peer, stream).await {
-                                Some(_peer) => {
-                                    debug!("Successfully reconnected to peer {:?}", pending_peer);
-                                    return;
-                                }
-                                None => {
-                                    debug!(
-                                        "Failed to reconnect to peer {:?}: no pending peer",
-                                        pending_peer,
-                                    );
-                                }
-                            }
-                        }
-                        None => {
-                            debug!(
-                                "Failed to reconnect to peer {:?}: failed to exchange address",
-                                pending_peer,
-                            );
-                        }
-                    }
-                }
-
-                let network = match network_weak.upgrade() {
-                    Some(network) => network,
-                    None => {
-                        return;
-                    }
-                };
-
-                network.on_connection_failure(&pending_peer).await;
-
-                if !network
-                    .inner
-                    .nodes_container
-                    .lock()
-                    .await
-                    .peers_level()
-                    .min_peers()
-                {
-                    // Below min_peers, let's connect to someone
-                    loop {
-                        // TODO: This can quickly exhaust contacts in case of temporary network
-                        //  disruption, isn't this a problem?
-                        // TODO: This will establish one connection, but it may also fail; there should
-                        //  be a mechanism to establish connections when new contacts are requested and
-                        //  we are below min peers
-                        match network.connect_to_random_contact().await {
-                            Ok(_) => {
-                                // Connected, good, move on
-                                break;
-                            }
-                            Err(error) => match error {
-                                ConnectionError::NoContact => {
-                                    // No contacts left, give up
-                                    break;
-                                }
-                                _ => {
-                                    continue;
-                                }
-                            },
-                        }
-                    }
-                }
-            });
-        }
     }
 }
 
