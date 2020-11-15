@@ -126,8 +126,7 @@ fn get_path(custom_path: Option<PathBuf>) -> PathBuf {
     path
 }
 
-#[async_std::main]
-async fn main() {
+fn main() {
     let command: Command = Command::parse();
     match command {
         Command::Run {
@@ -157,34 +156,38 @@ async fn main() {
                 }
             }
 
-            // create an async channel for console
-            let (app_state_sender, app_state_receiver) = unbounded::<AppState>();
+            task::block_on(async move {
+                // create an async channel for console
+                let (app_state_sender, app_state_receiver) = unbounded::<AppState>();
 
-            if CONSOLE {
-                // setup the logger
-                init_logger(LevelFilter::Debug).unwrap();
-                set_default_level(LevelFilter::Trace);
+                if CONSOLE {
+                    // setup the logger
+                    init_logger(LevelFilter::Debug).unwrap();
+                    set_default_level(LevelFilter::Trace);
 
-                // spawn a new thread to run the node else it will block the console
-                thread::spawn(move || {
-                    task::spawn(async move {
-                        run(app_state_sender, node_type, path, ws_rpc_server).await;
+                    // spawn a new thread to run the node else it will block the console
+                    thread::spawn(move || {
+                        task::spawn(async move {
+                            run(app_state_sender, node_type, path, ws_rpc_server).await;
+                        });
                     });
-                });
 
-                // run the console app in the foreground, passing the receiver
-                console::run(app_state_receiver).unwrap();
-            } else {
-                // TODO: fix default log level and occasionally print state to the console
-                env_logger::init();
-                run(app_state_sender, node_type, path, ws_rpc_server).await;
-            }
+                    // run the console app in the foreground, passing the receiver
+                    console::run(app_state_receiver).unwrap();
+                } else {
+                    // TODO: fix default log level and occasionally print state to the console
+                    env_logger::init();
+                    run(app_state_sender, node_type, path, ws_rpc_server).await;
+                }
+            })
         }
         Command::Stop { custom_path } => {
             let path = get_path(custom_path);
-            ipc::simple_request(path.join(IPC_SOCKET_FILE), &IpcRequestMessage::Shutdown)
-                .await
-                .unwrap();
+            task::block_on(async move {
+                ipc::simple_request(path.join(IPC_SOCKET_FILE), &IpcRequestMessage::Shutdown)
+                    .await
+                    .unwrap();
+            })
         }
         Command::Watch { custom_path } => {
             let path = get_path(custom_path);
@@ -201,7 +204,7 @@ async fn main() {
     }
 }
 
-pub async fn run(
+async fn run(
     app_state_sender: crossbeam_channel::Sender<AppState>,
     node_type: NodeType,
     path: PathBuf,
