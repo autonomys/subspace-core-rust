@@ -136,7 +136,6 @@ fn main() {
             ws_rpc_server,
         } => {
             let path = get_path(custom_path);
-            // TODO: Doesn't really work, see https://github.com/octetd/daemonize-me/issues/2
             if daemon {
                 let stdout = std::fs::File::create(path.join("daemon.out")).unwrap();
                 let stderr = std::fs::File::create(path.join("daemon.err")).unwrap();
