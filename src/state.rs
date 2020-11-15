@@ -3,6 +3,7 @@ use crate::{crypto, NodeID, Piece, PIECES_PER_STATE_BLOCK, PIECE_SIZE, STATE_BLO
 use async_std::sync::Sender;
 use itertools::izip;
 use log::warn;
+use reed_solomon_erasure::galois_16::ReedSolomon;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::convert::TryInto;
@@ -177,12 +178,35 @@ impl State {
         // pad to state block size
         new_state.resize(STATE_BLOCK_SIZE_IN_BYTES, 0u8);
 
-        // TODO: erasure code state here: 1:1 ratio of source:parity pieces
-
         // slice into pieces
-        let pieces: Vec<Piece> = new_state
+        let mut pieces: Vec<Vec<[u8; 2]>> = new_state
             .chunks_exact(PIECE_SIZE)
-            .map(|piece| piece.try_into().unwrap())
+            .map(|piece| {
+                piece
+                    .chunks_exact(2)
+                    .map(|chunk| chunk.try_into().unwrap())
+                    .collect()
+            })
+            .collect();
+
+        let reed_solomon = ReedSolomon::new(pieces.len(), pieces.len()).unwrap();
+
+        // Add parity pieces
+        pieces.resize(pieces.len() * 2, vec![[0u8; 2]; PIECE_SIZE / 2]);
+
+        reed_solomon.encode(&mut pieces).unwrap();
+
+        let pieces: Vec<Piece> = pieces
+            .into_iter()
+            .map(|piece| {
+                piece
+                    .iter()
+                    .flat_map(|x| x.iter())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap()
+            })
             .collect();
 
         let piece_ids: Vec<[u8; 32]> = pieces
