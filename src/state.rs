@@ -7,6 +7,7 @@ use reed_solomon_erasure::galois_16::ReedSolomon;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::convert::TryInto;
+use std::io::Write;
 
 /* TODO
 
@@ -199,13 +200,16 @@ impl State {
         let pieces: Vec<Piece> = pieces
             .into_iter()
             .map(|piece| {
-                piece
-                    .iter()
-                    .flat_map(|x| x.iter())
-                    .copied()
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap()
+                let mut final_piece = [0u8; PIECE_SIZE];
+
+                final_piece
+                    .chunks_exact_mut(2)
+                    .zip(piece)
+                    .for_each(|(mut target, source)| {
+                        target.write_all(&source).unwrap();
+                    });
+
+                final_piece
             })
             .collect();
 
