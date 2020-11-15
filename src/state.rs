@@ -219,10 +219,15 @@ impl State {
 
         let mut piece_bundles: Vec<PieceBundle> = Vec::new();
         let mut piece_index = PIECES_PER_STATE_BLOCK as u64 * self.last_state_block_height;
-        for (piece, piece_id, piece_proof) in izip!(&pieces, piece_ids, merkle_proofs) {
+        for (piece, piece_id, piece_proof) in izip!(pieces.into_iter(), piece_ids, merkle_proofs) {
+            debug_assert!(
+                crypto::validate_merkle_proof(piece_id, &piece_proof, &merkle_root),
+                "Generated proof must be valid",
+            );
+
             piece_bundles.push(PieceBundle {
                 piece_id,
-                piece: *piece,
+                piece,
                 piece_proof,
                 piece_index,
             });
