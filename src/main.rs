@@ -1,14 +1,20 @@
+use async_signals::Signals;
 use async_std::sync::channel;
 use async_std::task;
+use clap::{Clap, ValueHint};
 use console::AppState;
 use crossbeam_channel::unbounded;
-use futures;
+use daemonize_me::Daemon;
+use exitcode::{OK, SOFTWARE};
+use futures::StreamExt;
+use futures_lite::FutureExt;
 use log::LevelFilter;
 use log::*;
+use std::fs;
 use std::path::PathBuf;
 use std::thread;
-use std::{env, fs};
 use subspace_core_rust::farmer::FarmerMessage;
+use subspace_core_rust::ipc::{IpcRequestMessage, IpcResponseMessage, IpcServer};
 use subspace_core_rust::ledger::Ledger;
 use subspace_core_rust::manager::ProtocolMessage;
 use subspace_core_rust::network::{Network, NodeType};
@@ -16,9 +22,9 @@ use subspace_core_rust::plot::Plot;
 use subspace_core_rust::pseudo_wallet::Wallet;
 use subspace_core_rust::timer::EpochTracker;
 use subspace_core_rust::{
-    console, farmer, manager, network, plotter, rpc, state, BLOCK_LIST_SIZE, CONSOLE,
-    DEV_GATEWAY_ADDR, GENESIS_PIECE_COUNT, MAINTAIN_PEERS_INTERVAL, MAX_CONTACTS, MAX_PEERS,
-    MIN_CONTACTS, MIN_PEERS,
+    console, farmer, ipc, manager, network, plotter, rpc, state, BLOCK_LIST_SIZE, CONSOLE,
+    DEV_GATEWAY_ADDR, GENESIS_PIECE_COUNT, IPC_SOCKET_FILE, MAINTAIN_PEERS_INTERVAL, MAX_CONTACTS,
+    MAX_PEERS, MIN_CONTACTS, MIN_PEERS,
 };
 use tui_logger::{init_logger, set_default_level};
 
@@ -56,57 +62,54 @@ use tui_logger::{init_logger, set_default_level};
 
 */
 
-#[async_std::main]
-async fn main() {
-    /*
-     * Startup: cargo run <node_type> <custom_path>
-     *
-     * arg1 type -> gateway, farmer, peer (gateway default)
-     * arg2 path -> unique path for plot (data_local_dir default)
-     *
-     * Later: plot size, env
-     *
-     */
-
-    // create an async channel for console
-    let (app_state_sender, app_state_receiver) = unbounded::<AppState>();
-
-    if CONSOLE {
-        // setup the logger
-        init_logger(LevelFilter::Debug).unwrap();
-        set_default_level(LevelFilter::Trace);
-
-        // spawn a new thread to run the node else it will block the console
-        thread::spawn(move || {
-            task::spawn(async move {
-                run(app_state_sender).await;
-            });
-        });
-
-        // run the console app in the foreground, passing the receiver
-        console::run(app_state_receiver).unwrap();
-    } else {
-        // TODO: fix default log level and occasionally print state to the console
-        env_logger::init();
-        run(app_state_sender).await;
-    }
+#[derive(Debug, Clap)]
+#[clap(about, version)]
+enum Command {
+    /// Run a subspace node
+    Run {
+        /// Node type to run
+        #[clap(arg_enum)]
+        node_type: NodeType,
+        /// Use custom path for data storage instead of platform-specific default
+        #[clap(long, value_hint = ValueHint::FilePath)]
+        custom_path: Option<PathBuf>,
+        /// Run in the background as daemon
+        #[clap(long)]
+        daemon: bool,
+        /// Run WebSocket RPC server
+        #[clap(long)]
+        ws_rpc_server: bool,
+    },
+    /// Stop subspace node that was previously running as a daemon
+    Stop {
+        /// Use custom path for data storage instead of platform-specific default
+        #[clap(long, value_hint = ValueHint::FilePath)]
+        custom_path: Option<PathBuf>,
+    },
+    /// Start TUI to watch a subspace node running
+    Watch {
+        /// Use custom path for data storage instead of platform-specific default
+        #[clap(long, value_hint = ValueHint::FilePath)]
+        custom_path: Option<PathBuf>,
+    },
+    /// Send some credits using node wallet
+    Send {
+        // TODO: This should probably be a more specific type
+        /// Receiver address
+        address: String,
+        // TODO: This should probably be a more specific type
+        /// Amount of credits to send
+        amount: u64,
+        /// Use custom path for data storage instead of platform-specific default
+        #[clap(long, value_hint = ValueHint::FilePath)]
+        custom_path: Option<PathBuf>,
+    },
 }
 
-pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
-    let node_addr = "127.0.0.1:0".parse().unwrap();
-    let node_type = env::args()
-        .skip(1)
-        .take(1)
-        .next()
-        .map(|s| s.parse().ok())
-        .flatten()
-        .unwrap_or(NodeType::Gateway);
-
+fn get_path(custom_path: Option<PathBuf>) -> PathBuf {
     // set storage path
-    let path = env::args()
-        .nth(2)
-        .or_else(|| std::env::var("SUBSPACE_DIR").ok())
-        .map(PathBuf::from)
+    let path = custom_path
+        .or_else(|| std::env::var("SUBSPACE_DIR").map(PathBuf::from).ok())
         .unwrap_or_else(|| {
             dirs::data_local_dir()
                 .expect("Can't find local data directory, needs to be specified explicitly")
@@ -119,6 +122,92 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
             panic!("Failed to create data directory {:?}: {:?}", path, error)
         });
     }
+
+    path
+}
+
+#[async_std::main]
+async fn main() {
+    let command: Command = Command::parse();
+    match command {
+        Command::Run {
+            node_type,
+            custom_path,
+            daemon,
+            ws_rpc_server,
+        } => {
+            let path = get_path(custom_path);
+            // TODO: Doesn't really work, see https://github.com/octetd/daemonize-me/issues/2
+            if daemon {
+                let stdout = std::fs::File::create(path.join("daemon.out")).unwrap();
+                let stderr = std::fs::File::create(path.join("daemon.err")).unwrap();
+                match Daemon::new()
+                    .stdout(stdout)
+                    .stderr(stderr)
+                    .pid_file(path.join("subspace.pid"), Some(false))
+                    .start()
+                {
+                    Ok(_) => {
+                        info!("Node successfully started in background");
+                    }
+                    Err(error) => {
+                        error!("Failed to start node in the background: {}", error);
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            // create an async channel for console
+            let (app_state_sender, app_state_receiver) = unbounded::<AppState>();
+
+            if CONSOLE {
+                // setup the logger
+                init_logger(LevelFilter::Debug).unwrap();
+                set_default_level(LevelFilter::Trace);
+
+                // spawn a new thread to run the node else it will block the console
+                thread::spawn(move || {
+                    task::spawn(async move {
+                        run(app_state_sender, node_type, path, ws_rpc_server).await;
+                    });
+                });
+
+                // run the console app in the foreground, passing the receiver
+                console::run(app_state_receiver).unwrap();
+            } else {
+                // TODO: fix default log level and occasionally print state to the console
+                env_logger::init();
+                run(app_state_sender, node_type, path, ws_rpc_server).await;
+            }
+        }
+        Command::Stop { custom_path } => {
+            let path = get_path(custom_path);
+            ipc::simple_request(path.join(IPC_SOCKET_FILE), &IpcRequestMessage::Shutdown)
+                .await
+                .unwrap();
+        }
+        Command::Watch { custom_path } => {
+            let path = get_path(custom_path);
+            unimplemented!();
+        }
+        Command::Send {
+            address,
+            amount,
+            custom_path,
+        } => {
+            let path = get_path(custom_path);
+            unimplemented!();
+        }
+    }
+}
+
+pub async fn run(
+    app_state_sender: crossbeam_channel::Sender<AppState>,
+    node_type: NodeType,
+    path: PathBuf,
+    ws_rpc_server: bool,
+) {
+    let node_addr = "127.0.0.1:0".parse().unwrap();
 
     info!(
         "Starting new Subspace {:?} using location {:?}",
@@ -159,9 +248,6 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
         }
     };
 
-    // create the farming loop
-    let farmer = farmer::run(timer_to_farmer_rx, solver_to_main_tx, &plot);
-
     // create the ledger
     let ledger = Ledger::new(keys, epoch_tracker.clone(), state);
 
@@ -195,10 +281,35 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
     let mut rpc_server = None;
     if std::env::var("RUN_WS_RPC")
         .map(|value| value == "1".to_string())
-        .unwrap_or_default()
+        .unwrap_or(ws_rpc_server)
     {
         rpc_server = Some(rpc::run(node_id, network.clone()));
     }
+
+    let (ipc_shutdown_request_sender, mut ipc_shutdown_request_receiver) =
+        async_channel::unbounded::<()>();
+    let ipc_server_fut = IpcServer::new(
+        path.join(IPC_SOCKET_FILE),
+        move |(request_message, response_sender)| {
+            trace!("Received IPC request {:?}", request_message);
+
+            let response_message = match request_message {
+                IpcRequestMessage::Shutdown => {
+                    let ipc_shutdown_request_sender = ipc_shutdown_request_sender.clone();
+                    async_std::task::spawn(async move {
+                        let _ = ipc_shutdown_request_sender.send(()).await;
+                    });
+
+                    Ok(IpcResponseMessage::Shutdown)
+                }
+            };
+
+            trace!("Sending IPC response {:?}", response_message);
+            let _ = response_sender.send(response_message);
+        },
+    );
+
+    let _ipc_server = ipc_server_fut.await.unwrap();
 
     // create the manager
     let manager = manager::run(
@@ -213,8 +324,58 @@ pub async fn run(app_state_sender: crossbeam_channel::Sender<AppState>) {
         plot.clone(),
     );
 
-    futures::join!(manager, farmer);
+    let mut app_handler = Some(async_std::task::spawn({
+        let plot = plot.clone();
 
-    // RPC server will stop when this is dropped
-    drop(rpc_server);
+        async move {
+            // create the farming loop
+            let farmer_fut = farmer::run(timer_to_farmer_rx, solver_to_main_tx, &plot);
+
+            manager.race(farmer_fut).await;
+        }
+    }));
+
+    let mut signals = Signals::new(vec![libc::SIGINT, libc::SIGTERM])
+        .unwrap()
+        .map(|_| ());
+
+    // Wrap into option, such that we can drop Plot when needed without dropping the whole variable
+    let mut plot = Some(plot);
+    let mut already_shutting_down = false;
+    while let Some(_) = ipc_shutdown_request_receiver
+        .next()
+        .race(signals.next())
+        .await
+    {
+        if already_shutting_down {
+            warn!("Received signal second time, force shutdown");
+            std::process::exit(SOFTWARE);
+        }
+        already_shutting_down = true;
+
+        info!("Shutdown signal received, shutting down");
+        // Stop RPC server
+        rpc_server.take();
+        if let Some(app_handler) = app_handler.take() {
+            let plot = plot.take().unwrap();
+            async_std::task::spawn(async move {
+                // TODO: We probably want to do something more sophisticated than just canceling it
+                app_handler.cancel().await;
+
+                let (close_sender, close_receiver) = async_oneshot::oneshot::<()>();
+                plot.on_close(move || {
+                    let _ = close_sender.send(());
+                })
+                .detach();
+
+                // We wait for plot to close gracefully, otherwise we may get this message:
+                // pure virtual method called
+                // terminate called without an active exception
+                drop(plot);
+                let _ = close_receiver.await;
+
+                std::process::exit(OK);
+            });
+        }
+    }
 }

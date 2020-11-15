@@ -6,9 +6,8 @@ use crate::{
 use async_std::fs::OpenOptions;
 use async_std::path::PathBuf;
 use async_std::task;
-use futures::channel::mpsc;
-use futures::channel::mpsc::Sender;
-use futures::channel::mpsc::UnboundedSender;
+use event_listener_primitives::{Bag, HandlerId};
+use futures::channel::mpsc as async_mpsc;
 use futures::channel::oneshot;
 use futures::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SinkExt, StreamExt};
 use log::*;
@@ -72,10 +71,16 @@ enum WriteRequests {
     },
 }
 
+#[derive(Default)]
+struct Handlers {
+    close: Bag<'static, dyn FnOnce() + Send>,
+}
+
 pub struct Inner {
-    any_requests_sender: Sender<()>,
-    read_requests_sender: UnboundedSender<ReadRequests>,
-    write_requests_sender: UnboundedSender<WriteRequests>,
+    handlers: Arc<Handlers>,
+    any_requests_sender: async_mpsc::Sender<()>,
+    read_requests_sender: async_mpsc::UnboundedSender<ReadRequests>,
+    write_requests_sender: async_mpsc::UnboundedSender<WriteRequests>,
 }
 
 /* ToDo
@@ -113,224 +118,251 @@ impl Plot {
         );
 
         // Channel with at most single element to throttle loop below if there are no updates
-        let (any_requests_sender, mut any_requests_receiver) = mpsc::channel::<()>(1);
-        let (read_requests_sender, mut read_requests_receiver) = mpsc::unbounded::<ReadRequests>();
+        let (any_requests_sender, mut any_requests_receiver) = async_mpsc::channel::<()>(1);
+        let (read_requests_sender, mut read_requests_receiver) =
+            async_mpsc::unbounded::<ReadRequests>();
         let (write_requests_sender, mut write_requests_receiver) =
-            mpsc::unbounded::<WriteRequests>();
+            async_mpsc::unbounded::<WriteRequests>();
+
+        let handlers = Arc::new(Handlers::default());
 
         // TODO: Handle drop nicer: when read is dropped, make sure writes still all finish
-        task::spawn(async move {
-            let mut did_nothing = true;
-            loop {
-                if did_nothing {
-                    // Wait for stuff to come in
-                    if any_requests_receiver.next().await.is_none() {
-                        return;
-                    }
-                }
+        task::spawn({
+            let handlers = Arc::clone(&handlers);
 
-                did_nothing = true;
-
-                // Process as many read requests as there is
-                while let Ok(read_request) = read_requests_receiver.try_next() {
-                    did_nothing = false;
-
-                    match read_request {
-                        Some(ReadRequests::IsEmpty { result_sender }) => {
-                            let _ = result_sender.send(
-                                task::spawn_blocking({
-                                    let map_db = Arc::clone(&map_db);
-                                    move || map_db.iterator(IteratorMode::Start).next().is_none()
-                                })
-                                .await,
-                            );
-                        }
-                        Some(ReadRequests::ReadEncoding {
-                            index,
-                            result_sender,
-                        }) => {
-                            // TODO: Remove unwrap
-                            let piece_data: Option<(u64, Vec<u8>)> = task::spawn_blocking({
-                                let map_db = Arc::clone(&map_db);
-                                move || map_db.get(index.to_le_bytes())
-                            })
-                            .await
-                            .unwrap()
-                            .map(|raw_piece_data| {
-                                let position =
-                                    u64::from_le_bytes(raw_piece_data[0..8].try_into().unwrap());
-                                let merkle_proof = raw_piece_data[8..].to_vec();
-                                (position, merkle_proof)
-                            });
-
-                            let _ = result_sender.send(match piece_data {
-                                Some((position, merkle_proof)) => {
-                                    try {
-                                        plot_file.seek(SeekFrom::Start(position)).await?;
-                                        let mut buffer = [0u8; PIECE_SIZE];
-                                        plot_file.read_exact(&mut buffer).await?;
-                                        (buffer, merkle_proof)
-                                    }
-                                }
-                                None => Err(io::Error::from(io::ErrorKind::NotFound)),
-                            });
-                        }
-                        None => {
-                            return;
-                        }
-                        Some(ReadRequests::FindByRange {
-                            target,
-                            range,
-                            result_sender,
-                        }) => {
-                            // TODO: Remove unwrap
-                            let solutions = task::spawn_blocking({
-                                let tags_db = Arc::clone(&tags_db);
-                                move || {
-                                    let mut iter = tags_db.raw_iterator();
-
-                                    let mut solutions: Vec<(Tag, u64)> = Vec::new();
-
-                                    let (lower, is_lower_overflowed) =
-                                        u64::from_be_bytes(target).overflowing_sub(range / 2);
-                                    let (upper, is_upper_overflowed) =
-                                        u64::from_be_bytes(target).overflowing_add(range / 2);
-
-                                    trace!(
-                                        "{} Lower overflow: {} -- Upper overflow: {}",
-                                        hex::encode(&target),
-                                        is_lower_overflowed,
-                                        is_upper_overflowed
-                                    );
-
-                                    if is_lower_overflowed || is_upper_overflowed {
-                                        iter.seek_to_first();
-                                        while let Some(tag) = iter.key() {
-                                            let tag = tag.try_into().unwrap();
-                                            let index = iter.value().unwrap();
-                                            if u64::from_be_bytes(tag) <= upper {
-                                                solutions.push((
-                                                    tag,
-                                                    u64::from_le_bytes(index.try_into().unwrap()),
-                                                ));
-                                                iter.next();
-                                            } else {
-                                                break;
-                                            }
-                                        }
-                                        iter.seek(lower.to_be_bytes());
-                                        while let Some(tag) = iter.key() {
-                                            let tag = tag.try_into().unwrap();
-                                            let index = iter.value().unwrap();
-
-                                            solutions.push((
-                                                tag,
-                                                u64::from_le_bytes(index.try_into().unwrap()),
-                                            ));
-                                            iter.next();
-                                        }
-                                    } else {
-                                        iter.seek(lower.to_be_bytes());
-                                        while let Some(tag) = iter.key() {
-                                            let tag = tag.try_into().unwrap();
-                                            let index = iter.value().unwrap();
-                                            if u64::from_be_bytes(tag) <= upper {
-                                                solutions.push((
-                                                    tag,
-                                                    u64::from_le_bytes(index.try_into().unwrap()),
-                                                ));
-                                                iter.next();
-                                            } else {
-                                                break;
-                                            }
-                                        }
-                                    }
-
-                                    solutions
-                                }
-                            })
-                            .await;
-
-                            let _ = result_sender.send(Ok(solutions));
+            async move {
+                let mut did_nothing = true;
+                'outer: loop {
+                    if did_nothing {
+                        // Wait for stuff to come in
+                        if any_requests_receiver.next().await.is_none() {
+                            break;
                         }
                     }
-                }
 
-                let write_request = write_requests_receiver.try_next();
-                if write_request.is_ok() {
-                    did_nothing = false;
-                }
-                // Process at most write request since reading is higher priority
-                match write_request {
-                    Ok(Some(WriteRequests::WriteEncoding {
-                        index,
-                        nonce,
-                        encoding,
-                        merkle_proof,
-                        result_sender,
-                    })) => {
-                        // TODO: remove unwrap
-                        task::spawn_blocking({
-                            let map_db = Arc::clone(&map_db);
-                            move || map_db.delete(index.to_le_bytes())
-                        })
-                        .await
-                        .unwrap();
+                    did_nothing = true;
 
-                        let _ = result_sender.send(
-                            try {
-                                let position = plot_file.seek(SeekFrom::End(0)).await?;
-                                plot_file.write_all(&encoding).await?;
+                    // Process as many read requests as there is
+                    while let Ok(read_request) = read_requests_receiver.try_next() {
+                        did_nothing = false;
 
-                                // TODO: remove unwrap
-                                task::spawn_blocking({
+                        match read_request {
+                            Some(ReadRequests::IsEmpty { result_sender }) => {
+                                let _ = result_sender.send(
+                                    task::spawn_blocking({
+                                        let map_db = Arc::clone(&map_db);
+                                        move || {
+                                            map_db.iterator(IteratorMode::Start).next().is_none()
+                                        }
+                                    })
+                                    .await,
+                                );
+                            }
+                            Some(ReadRequests::ReadEncoding {
+                                index,
+                                result_sender,
+                            }) => {
+                                // TODO: Remove unwrap
+                                let piece_data: Option<(u64, Vec<u8>)> = task::spawn_blocking({
                                     let map_db = Arc::clone(&map_db);
-                                    let tags_db = Arc::clone(&tags_db);
-                                    let tag = crypto::create_hmac(&encoding, &nonce.to_le_bytes());
-                                    move || {
-                                        tags_db.put(&tag[0..8], index.to_le_bytes()).and_then(
-                                            |_| {
-                                                // TODO: may want to put version field of the plotting software here
-                                                let value = &[
-                                                    &position.to_le_bytes()[..],
-                                                    &merkle_proof[..],
-                                                ]
-                                                .concat();
-                                                map_db.put(index.to_le_bytes(), value)
-                                            },
-                                        )
-                                    }
+                                    move || map_db.get(index.to_le_bytes())
                                 })
                                 .await
-                                .unwrap();
-                            },
-                        );
-                    }
-                    Ok(Some(WriteRequests::RemoveEncoding {
-                        index,
-                        result_sender,
-                    })) => {
-                        // TODO: remove unwrap
-                        task::spawn_blocking({
-                            let map_db = Arc::clone(&map_db);
-                            move || map_db.delete(index.to_le_bytes())
-                        })
-                        .await
-                        .unwrap();
+                                .unwrap()
+                                .map(|raw_piece_data| {
+                                    let position = u64::from_le_bytes(
+                                        raw_piece_data[0..8].try_into().unwrap(),
+                                    );
+                                    let merkle_proof = raw_piece_data[8..].to_vec();
+                                    (position, merkle_proof)
+                                });
 
-                        let _ = result_sender.send(Ok(()));
+                                let _ = result_sender.send(match piece_data {
+                                    Some((position, merkle_proof)) => {
+                                        try {
+                                            plot_file.seek(SeekFrom::Start(position)).await?;
+                                            let mut buffer = [0u8; PIECE_SIZE];
+                                            plot_file.read_exact(&mut buffer).await?;
+                                            (buffer, merkle_proof)
+                                        }
+                                    }
+                                    None => Err(io::Error::from(io::ErrorKind::NotFound)),
+                                });
+                            }
+                            None => {
+                                break 'outer;
+                            }
+                            Some(ReadRequests::FindByRange {
+                                target,
+                                range,
+                                result_sender,
+                            }) => {
+                                // TODO: Remove unwrap
+                                let solutions = task::spawn_blocking({
+                                    let tags_db = Arc::clone(&tags_db);
+                                    move || {
+                                        let mut iter = tags_db.raw_iterator();
+
+                                        let mut solutions: Vec<(Tag, u64)> = Vec::new();
+
+                                        let (lower, is_lower_overflowed) =
+                                            u64::from_be_bytes(target).overflowing_sub(range / 2);
+                                        let (upper, is_upper_overflowed) =
+                                            u64::from_be_bytes(target).overflowing_add(range / 2);
+
+                                        trace!(
+                                            "{} Lower overflow: {} -- Upper overflow: {}",
+                                            hex::encode(&target),
+                                            is_lower_overflowed,
+                                            is_upper_overflowed
+                                        );
+
+                                        if is_lower_overflowed || is_upper_overflowed {
+                                            iter.seek_to_first();
+                                            while let Some(tag) = iter.key() {
+                                                let tag = tag.try_into().unwrap();
+                                                let index = iter.value().unwrap();
+                                                if u64::from_be_bytes(tag) <= upper {
+                                                    solutions.push((
+                                                        tag,
+                                                        u64::from_le_bytes(
+                                                            index.try_into().unwrap(),
+                                                        ),
+                                                    ));
+                                                    iter.next();
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                            iter.seek(lower.to_be_bytes());
+                                            while let Some(tag) = iter.key() {
+                                                let tag = tag.try_into().unwrap();
+                                                let index = iter.value().unwrap();
+
+                                                solutions.push((
+                                                    tag,
+                                                    u64::from_le_bytes(index.try_into().unwrap()),
+                                                ));
+                                                iter.next();
+                                            }
+                                        } else {
+                                            iter.seek(lower.to_be_bytes());
+                                            while let Some(tag) = iter.key() {
+                                                let tag = tag.try_into().unwrap();
+                                                let index = iter.value().unwrap();
+                                                if u64::from_be_bytes(tag) <= upper {
+                                                    solutions.push((
+                                                        tag,
+                                                        u64::from_le_bytes(
+                                                            index.try_into().unwrap(),
+                                                        ),
+                                                    ));
+                                                    iter.next();
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                        }
+
+                                        solutions
+                                    }
+                                })
+                                .await;
+
+                                let _ = result_sender.send(Ok(solutions));
+                            }
+                        }
                     }
-                    Ok(None) => {
-                        return;
+
+                    let write_request = write_requests_receiver.try_next();
+                    if write_request.is_ok() {
+                        did_nothing = false;
                     }
-                    Err(_) => {
-                        // Ignore
+                    // Process at most write request since reading is higher priority
+                    match write_request {
+                        Ok(Some(WriteRequests::WriteEncoding {
+                            index,
+                            nonce,
+                            encoding,
+                            merkle_proof,
+                            result_sender,
+                        })) => {
+                            // TODO: remove unwrap
+                            task::spawn_blocking({
+                                let map_db = Arc::clone(&map_db);
+                                move || map_db.delete(index.to_le_bytes())
+                            })
+                            .await
+                            .unwrap();
+
+                            let _ = result_sender.send(
+                                try {
+                                    let position = plot_file.seek(SeekFrom::End(0)).await?;
+                                    plot_file.write_all(&encoding).await?;
+
+                                    // TODO: remove unwrap
+                                    task::spawn_blocking({
+                                        let map_db = Arc::clone(&map_db);
+                                        let tags_db = Arc::clone(&tags_db);
+                                        let tag =
+                                            crypto::create_hmac(&encoding, &nonce.to_le_bytes());
+                                        move || {
+                                            tags_db.put(&tag[0..8], index.to_le_bytes()).and_then(
+                                                |_| {
+                                                    // TODO: may want to put version field of the plotting software here
+                                                    let value = &[
+                                                        &position.to_le_bytes()[..],
+                                                        &merkle_proof[..],
+                                                    ]
+                                                    .concat();
+                                                    map_db.put(index.to_le_bytes(), value)
+                                                },
+                                            )
+                                        }
+                                    })
+                                    .await
+                                    .unwrap();
+                                },
+                            );
+                        }
+                        Ok(Some(WriteRequests::RemoveEncoding {
+                            index,
+                            result_sender,
+                        })) => {
+                            // TODO: remove unwrap
+                            task::spawn_blocking({
+                                let map_db = Arc::clone(&map_db);
+                                move || map_db.delete(index.to_le_bytes())
+                            })
+                            .await
+                            .unwrap();
+
+                            let _ = result_sender.send(Ok(()));
+                        }
+                        Ok(None) => {
+                            break 'outer;
+                        }
+                        Err(_) => {
+                            // Ignore
+                        }
                     }
                 }
+
+                std::thread::spawn({
+                    let handlers = Arc::clone(&handlers);
+
+                    move || {
+                        drop(map_db);
+                        drop(tags_db);
+
+                        handlers.close.call_once_simple();
+                    }
+                });
             }
         });
 
         let inner = Inner {
+            handlers,
             any_requests_sender,
             read_requests_sender,
             write_requests_sender,
@@ -514,6 +546,10 @@ impl Plot {
         result_receiver
             .await
             .expect("Remove encoding result sender was dropped")
+    }
+
+    pub fn on_close<F: FnOnce() + Send + 'static>(&self, callback: F) -> HandlerId {
+        self.inner.handlers.close.add(Box::new(callback))
     }
 }
 

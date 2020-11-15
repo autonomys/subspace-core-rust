@@ -95,7 +95,7 @@ pub async fn plot(path: PathBuf, node_id: NodeID, piece_bundles: Vec<PieceBundle
         info!("Sloth is slowly plotting {} pieces...", PLOT_SIZE);
 
         if !CONSOLE {
-            println!(
+            eprintln!(
                 r#"
           `""==,,__
             `"==..__"=..__ _    _..-==""_

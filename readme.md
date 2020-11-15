@@ -32,11 +32,11 @@ Benches single block encode/decode time and full piece encode/decode time for ea
 
 ### Run Node
 
-`RUST_LOG=[level] cargo run [node-type] [optional-path]`
+`RUST_LOG=[level] cargo run -- run node-type`
 
-`RUST_LOG=info cargo run gateway`
+`RUST_LOG=info cargo run -- run gateway`
 
-`RUST_LOG=info cargo run peer`
+`RUST_LOG=info cargo run -- run peer`
 
 ### Environment variables
 
@@ -76,6 +76,30 @@ Remove `config.json`, `plot.bin`, `plot-map` and `plot-tags` at the location whe
 ```
 docker build -t subspace-core-rust -f Dockerfile .
 docker run --rm -it --init subspace-core-rust
+```
+
+### Building and running without Docker image:
+To build an app run:
+```
+cargo build --release
+```
+
+Which will produce a binary that can be copied to one of the directories in PATH, for example:
+```
+sudo cp target/release/subspace /usr/local/bin/subspace
+```
+
+Then run a node:
+```
+subspace run gateway
+```
+Or as peer:
+```
+subspace run peer
+```
+Or as farmer:
+```
+subspace run farmer
 ```
 
 ### Status

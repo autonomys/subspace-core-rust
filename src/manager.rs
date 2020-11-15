@@ -98,11 +98,11 @@ pub async fn run(
 ) {
     let ledger: SharedLedger = Arc::new(Mutex::new(ledger));
 
-    {
+    let gossip_handling = {
         let network = network.clone();
         let ledger = Arc::clone(&ledger);
 
-        async_std::task::spawn(async move {
+        async move {
             let gossip_receiver = network.get_gossip_receiver().unwrap();
             while let Ok((peer_addr, message)) = gossip_receiver.recv().await {
                 match message {
@@ -171,16 +171,16 @@ pub async fn run(
                     }
                 }
             }
-        });
-    }
+        }
+    };
 
-    {
+    let requests_handling = {
         let network = network.clone();
         let ledger = Arc::clone(&ledger);
         // let plot = Arc::clone(&plot);
         let plot = plot.clone();
 
-        async_std::task::spawn(async move {
+        async move {
             let requests_receiver = network.get_requests_receiver().unwrap();
             while let Ok((message, response_sender)) = requests_receiver.recv().await {
                 let ledger = Arc::clone(&ledger);
@@ -289,8 +289,8 @@ pub async fn run(
                     }
                 });
             }
-        });
-    }
+        }
+    };
 
     let protocol_listener = async {
         info!("Main protocol loop is running...");
@@ -712,5 +712,10 @@ pub async fn run(
         }
     };
 
-    futures::join!(protocol_listener, protocol_startup);
+    futures::join!(
+        gossip_handling,
+        requests_handling,
+        protocol_listener,
+        protocol_startup
+    );
 }

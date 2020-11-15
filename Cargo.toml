@@ -4,19 +4,27 @@ version = "0.1.0"
 authors = ["jwagstaff", "nazar-pc"]
 edition = "2018"
 
+[[bin]]
+name = "subspace"
+path = "src/main.rs"
+
 [dependencies]
 async-channel = "1.4.2"
 async-io = "1.1.2"
 async-oneshot = "0.3.3"
+async-signals = "0.3.1"
 backoff = "0.2.1"
 bincode = "1.2.1"
 bitintr = "0.3.0"
 bytes = "0.5.6"
+clap = "3.0.0-beta.2"
 crossbeam-channel = "0.4.3"
+daemonize-me = "0.3.1"
 dirs = "3.0.1"
 ed25519-dalek = "=1.0.0-pre.3"
 env_logger = "0.7.1"
 event-listener-primitives = "0.1.0"
+exitcode = "1.1.2"
 indicatif = "0.15.0"
 futures = "0.3.5"
 futures-lite = "1.7.0"
@@ -29,6 +37,7 @@ jsonrpc-core-client = {git = "https://github.com/paritytech/jsonrpc.git"}
 jsonrpc-derive = {git = "https://github.com/paritytech/jsonrpc.git"}
 jsonrpc-pubsub = {git = "https://github.com/paritytech/jsonrpc.git"}
 jsonrpc-ws-server = {git = "https://github.com/paritytech/jsonrpc.git"}
+libc = "0.2.80"
 log = "0.4.0"
 lru = "0.6.0"
 merkle-tree-binary = { git = "https://github.com/subspace/merkle-tree-binary.rs" }
