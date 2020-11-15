@@ -106,6 +106,7 @@ use log::*;
 use messages::{BlocksRequest, GossipMessage, Message, RequestMessage, ResponseMessage};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
+use smol_timeout::TimeoutExt;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt::{Debug, Display};
@@ -153,6 +154,8 @@ macro_rules! upgrade_weak {
 }
 
 const MAX_MESSAGE_CONTENTS_LENGTH: usize = 2usize.pow(16) - 1;
+const TCP_CONNECTING_TIMEOUT: Duration = Duration::from_secs(2);
+const PEER_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(1);
 // TODO: Consider adaptive request timeout for more efficient sync
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const INITIAL_BACKOFF_INTERVAL: Duration = Duration::from_secs(1);
@@ -276,49 +279,58 @@ fn create_message_receiver(mut stream: TcpStream) -> Receiver<Message> {
 }
 
 async fn exchange_peer_addr(own_addr: SocketAddr, stream: &mut TcpStream) -> Option<SocketAddr> {
-    // TODO: Timeout for this function
-    let own_addr_string = own_addr.to_string();
-    if let Err(error) = stream
-        .write(&[own_addr_string.as_bytes().len() as u8])
-        .await
-    {
-        trace!("Failed to write node address length: {}", error);
-        return None;
-    }
-    if let Err(error) = stream.write(own_addr_string.as_bytes()).await {
-        trace!("Failed to write node address: {}", error);
-        return None;
-    }
-
-    let mut peer_addr_len = [0];
-    if let Err(error) = stream.read_exact(&mut peer_addr_len).await {
-        trace!("Failed to read node address length: {}", error);
-        return None;
-    }
-    let mut peer_addr_bytes = vec![0; peer_addr_len[0] as usize];
-    if let Err(error) = stream.read_exact(&mut peer_addr_bytes).await {
-        trace!("Failed to read node address: {}", error);
-        return None;
-    }
-
-    let peer_addr_string = match String::from_utf8(peer_addr_bytes) {
-        Ok(peer_addr_string) => peer_addr_string,
-        Err(error) => {
-            warn!("Failed to parse node address from bytes: {}", error);
+    let exchange_peer_addr_fut = async {
+        let own_addr_string = own_addr.to_string();
+        if let Err(error) = stream
+            .write(&[own_addr_string.as_bytes().len() as u8])
+            .await
+        {
+            trace!("Failed to write node address length: {}", error);
             return None;
+        }
+        if let Err(error) = stream.write(own_addr_string.as_bytes()).await {
+            trace!("Failed to write node address: {}", error);
+            return None;
+        }
+
+        let mut peer_addr_len = [0];
+        if let Err(error) = stream.read_exact(&mut peer_addr_len).await {
+            trace!("Failed to read node address length: {}", error);
+            return None;
+        }
+        let mut peer_addr_bytes = vec![0; peer_addr_len[0] as usize];
+        if let Err(error) = stream.read_exact(&mut peer_addr_bytes).await {
+            trace!("Failed to read node address: {}", error);
+            return None;
+        }
+
+        let peer_addr_string = match String::from_utf8(peer_addr_bytes) {
+            Ok(peer_addr_string) => peer_addr_string,
+            Err(error) => {
+                warn!("Failed to parse node address from bytes: {}", error);
+                return None;
+            }
+        };
+
+        match peer_addr_string.parse() {
+            Ok(peer_addr) => Some(peer_addr),
+            Err(error) => {
+                warn!(
+                    "Failed to parse node address {}: {}",
+                    peer_addr_string, error
+                );
+                return None;
+            }
         }
     };
 
-    match peer_addr_string.parse() {
-        Ok(peer_addr) => Some(peer_addr),
-        Err(error) => {
-            warn!(
-                "Failed to parse node address {}: {}",
-                peer_addr_string, error
-            );
-            return None;
-        }
-    }
+    exchange_peer_addr_fut
+        .timeout(PEER_EXCHANGE_TIMEOUT)
+        .await
+        .unwrap_or_else(|| {
+            debug!("Peer exchange timed out");
+            None
+        })
 }
 
 fn handle_messages(network_weak: NetworkWeak, mut message_receiver: Receiver<Message>, peer: Peer) {
@@ -416,7 +428,6 @@ fn handle_messages(network_weak: NetworkWeak, mut message_receiver: Receiver<Mes
     });
 }
 
-// TODO: This function probably needs timeouts for various operations
 // TODO: Check if we really need to reconnect, maybe we above min_peers already and don't care
 async fn reconnect(network_weak: NetworkWeak, node_addr: SocketAddr) {
     let pending_peer = {
@@ -1113,9 +1124,16 @@ impl Network {
         }
     }
 
-    // TODO: This function probably needs timeouts for various operations
     async fn connect_simple(&self, pending_peer: PendingPeer) -> Result<Peer, ConnectionError> {
-        let mut stream = match TcpStream::connect(pending_peer.address()).await {
+        let mut stream = match TcpStream::connect(pending_peer.address())
+            .timeout(TCP_CONNECTING_TIMEOUT)
+            .await
+            .unwrap_or_else(|| {
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "TCP connection timeout",
+                ))
+            }) {
             Ok(stream) => stream,
             Err(error) => {
                 self.on_connection_failure(&pending_peer).await;
@@ -1289,7 +1307,6 @@ impl Network {
 
     /// Connect during bootstrap process
     async fn connect(&self, peer_addr: SocketAddr) -> Result<(), ConnectionError> {
-        // TODO: This function probably needs timeouts for various operations
         let mut nodes_container = self.inner.nodes_container.lock().await;
 
         nodes_container.add_contacts(&[peer_addr]);
